@@ -1,0 +1,541 @@
+"""
+Brain Module - QuenBot AI Zeka Merkezi
+=======================================
+Tüm botların ortak zeka katmanı. Pattern eşleştirme, öğrenme, 
+çoklu zaman dilimi analizi ve kendi kendini geliştirme.
+"""
+import asyncio
+import json
+import logging
+import math
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional, Tuple
+
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+
+logger = logging.getLogger(__name__)
+
+# ─── Zaman Dilimleri ───
+TIMEFRAMES = {
+    '15m': 15,
+    '1h': 60,
+    '4h': 240,
+    '1d': 1440
+}
+
+
+class TradeSnapshot:
+    """Belirli bir zaman dilimindeki trade verilerinin özeti"""
+    def __init__(self, symbol: str, exchange: str, market_type: str,
+                 start_time: datetime, end_time: datetime,
+                 buy_count: int, sell_count: int,
+                 buy_volume: float, sell_volume: float,
+                 avg_price: float, price_start: float, price_end: float,
+                 high: float, low: float):
+        self.symbol = symbol
+        self.exchange = exchange
+        self.market_type = market_type
+        self.start_time = start_time
+        self.end_time = end_time
+        self.buy_count = buy_count
+        self.sell_count = sell_count
+        self.buy_volume = buy_volume
+        self.sell_volume = sell_volume
+        self.avg_price = avg_price
+        self.price_start = price_start
+        self.price_end = price_end
+        self.high = high
+        self.low = low
+
+    @property
+    def total_volume(self): return self.buy_volume + self.sell_volume
+    @property
+    def total_trades(self): return self.buy_count + self.sell_count
+    @property
+    def buy_ratio(self): return self.buy_volume / max(self.total_volume, 1e-8)
+    @property
+    def price_change_pct(self): return (self.price_end - self.price_start) / max(self.price_start, 1e-8)
+    @property
+    def volatility(self): return (self.high - self.low) / max(self.avg_price, 1e-8)
+
+    def to_vector(self) -> np.ndarray:
+        """Snapshot'ı karşılaştırılabilir vektöre çevir"""
+        return np.array([
+            self.price_change_pct,
+            self.buy_ratio,
+            self.volatility,
+            math.log1p(self.total_volume),
+            math.log1p(self.total_trades),
+            self.buy_count / max(self.sell_count, 1),
+        ], dtype=np.float64)
+
+    def to_dict(self) -> dict:
+        return {
+            'symbol': self.symbol, 'exchange': self.exchange,
+            'market_type': self.market_type,
+            'start_time': self.start_time.isoformat(),
+            'end_time': self.end_time.isoformat(),
+            'buy_count': self.buy_count, 'sell_count': self.sell_count,
+            'buy_volume': self.buy_volume, 'sell_volume': self.sell_volume,
+            'avg_price': self.avg_price,
+            'price_start': self.price_start, 'price_end': self.price_end,
+            'high': self.high, 'low': self.low,
+            'price_change_pct': self.price_change_pct,
+            'buy_ratio': self.buy_ratio, 'volatility': self.volatility,
+        }
+
+
+class PatternRecord:
+    """Geçmiş pattern kaydı + sonrasında fiyatın ne yaptığı"""
+    def __init__(self, snapshot: TradeSnapshot,
+                 outcome_15m: Optional[float] = None,
+                 outcome_1h: Optional[float] = None,
+                 outcome_4h: Optional[float] = None,
+                 outcome_1d: Optional[float] = None):
+        self.snapshot = snapshot
+        self.outcomes = {
+            '15m': outcome_15m,
+            '1h': outcome_1h,
+            '4h': outcome_4h,
+            '1d': outcome_1d,
+        }
+
+    @property
+    def vector(self): return self.snapshot.to_vector()
+
+
+class BrainModule:
+    """Merkezi AI Zeka Modülü"""
+
+    def __init__(self, db):
+        self.db = db
+        self.pattern_memory: List[PatternRecord] = []
+        self.learning_weights = {
+            'similarity': 0.35,
+            'volume_match': 0.25,
+            'direction_match': 0.2,
+            'confidence_history': 0.2,
+        }
+        # Öğrenme metrikleri
+        self.prediction_accuracy = {'correct': 0, 'total': 0}
+        self.signal_type_scores: Dict[str, Dict] = {}
+        self.last_learning_update = None
+
+    async def initialize(self):
+        """Geçmiş pattern'ları yükle"""
+        try:
+            patterns = await self.db.get_pattern_records(limit=500)
+            for p in patterns:
+                snap_data = p.get('snapshot_data', {})
+                if not snap_data:
+                    continue
+                snap = TradeSnapshot(
+                    symbol=snap_data.get('symbol', ''),
+                    exchange=snap_data.get('exchange', ''),
+                    market_type=snap_data.get('market_type', 'spot'),
+                    start_time=datetime.fromisoformat(snap_data['start_time']) if snap_data.get('start_time') else datetime.utcnow(),
+                    end_time=datetime.fromisoformat(snap_data['end_time']) if snap_data.get('end_time') else datetime.utcnow(),
+                    buy_count=snap_data.get('buy_count', 0),
+                    sell_count=snap_data.get('sell_count', 0),
+                    buy_volume=snap_data.get('buy_volume', 0),
+                    sell_volume=snap_data.get('sell_volume', 0),
+                    avg_price=snap_data.get('avg_price', 0),
+                    price_start=snap_data.get('price_start', 0),
+                    price_end=snap_data.get('price_end', 0),
+                    high=snap_data.get('high', 0),
+                    low=snap_data.get('low', 0),
+                )
+                record = PatternRecord(
+                    snapshot=snap,
+                    outcome_15m=p.get('outcome_15m'),
+                    outcome_1h=p.get('outcome_1h'),
+                    outcome_4h=p.get('outcome_4h'),
+                    outcome_1d=p.get('outcome_1d'),
+                )
+                self.pattern_memory.append(record)
+            logger.info(f"🧠 Brain: Loaded {len(self.pattern_memory)} historical patterns")
+        except Exception as e:
+            logger.warning(f"Brain: Could not load patterns: {e}")
+
+    def build_snapshot_from_trades(self, trades: List[Dict], symbol: str,
+                                    exchange: str, market_type: str) -> Optional[TradeSnapshot]:
+        """Trade listesinden snapshot oluştur"""
+        if not trades or len(trades) < 5:
+            return None
+        try:
+            buy_trades = [t for t in trades if t.get('side') == 'buy']
+            sell_trades = [t for t in trades if t.get('side') == 'sell']
+            prices = [float(t['price']) for t in trades]
+            timestamps = [t['timestamp'] if isinstance(t['timestamp'], datetime) else datetime.fromisoformat(str(t['timestamp'])) for t in trades]
+
+            return TradeSnapshot(
+                symbol=symbol, exchange=exchange, market_type=market_type,
+                start_time=min(timestamps), end_time=max(timestamps),
+                buy_count=len(buy_trades), sell_count=len(sell_trades),
+                buy_volume=sum(float(t['quantity']) * float(t['price']) for t in buy_trades),
+                sell_volume=sum(float(t['quantity']) * float(t['price']) for t in sell_trades),
+                avg_price=sum(prices) / len(prices),
+                price_start=prices[0], price_end=prices[-1],
+                high=max(prices), low=min(prices),
+            )
+        except Exception as e:
+            logger.debug(f"Error building snapshot: {e}")
+            return None
+
+    def find_matching_patterns(self, current: TradeSnapshot,
+                                min_similarity: float = 0.7,
+                                top_k: int = 10) -> List[Tuple[PatternRecord, float]]:
+        """Mevcut snapshot'a benzeyen geçmiş pattern'ları bul"""
+        if not self.pattern_memory:
+            return []
+        try:
+            current_vec = current.to_vector().reshape(1, -1)
+            same_symbol = [p for p in self.pattern_memory if p.snapshot.symbol == current.symbol]
+            if len(same_symbol) < 3:
+                same_symbol = self.pattern_memory  # yeterli veri yoksa tümünü kullan
+
+            if not same_symbol:
+                return []
+
+            hist_vecs = np.array([p.vector for p in same_symbol])
+            # Normalize
+            norms_c = np.linalg.norm(current_vec, axis=1, keepdims=True)
+            norms_h = np.linalg.norm(hist_vecs, axis=1, keepdims=True)
+            current_normed = current_vec / np.maximum(norms_c, 1e-8)
+            hist_normed = hist_vecs / np.maximum(norms_h, 1e-8)
+
+            sims = cosine_similarity(current_normed, hist_normed)[0]
+            results = []
+            for i, sim in enumerate(sims):
+                if sim >= min_similarity:
+                    results.append((same_symbol[i], float(sim)))
+            results.sort(key=lambda x: x[1], reverse=True)
+            return results[:top_k]
+        except Exception as e:
+            logger.debug(f"Pattern matching error: {e}")
+            return []
+
+    def predict_direction(self, matches: List[Tuple[PatternRecord, float]]) -> Dict[str, Any]:
+        """Eşleşen pattern'lardan yön ve güven tahmini yap"""
+        if not matches:
+            return {'direction': None, 'confidence': 0, 'timeframes': {}}
+
+        timeframe_predictions = {}
+        for tf_key in TIMEFRAMES:
+            outcomes = []
+            weights = []
+            for pattern, sim in matches:
+                outcome = pattern.outcomes.get(tf_key)
+                if outcome is not None:
+                    outcomes.append(outcome)
+                    weights.append(sim)
+            if outcomes:
+                weighted_avg = sum(o * w for o, w in zip(outcomes, weights)) / sum(weights)
+                direction = 'long' if weighted_avg > 0 else 'short'
+                strength = abs(weighted_avg)
+                timeframe_predictions[tf_key] = {
+                    'direction': direction,
+                    'avg_change_pct': weighted_avg,
+                    'strength': strength,
+                    'sample_count': len(outcomes),
+                }
+
+        # Çoğunluk yönünü belirle
+        directions = [v['direction'] for v in timeframe_predictions.values()]
+        long_count = directions.count('long')
+        short_count = directions.count('short')
+        primary_dir = 'long' if long_count >= short_count else 'short'
+
+        avg_sim = sum(s for _, s in matches) / len(matches)
+        confidence = min(avg_sim * 0.6 + (len(matches) / 20) * 0.4, 1.0)
+
+        return {
+            'direction': primary_dir,
+            'confidence': confidence,
+            'timeframes': timeframe_predictions,
+            'match_count': len(matches),
+            'avg_similarity': avg_sim,
+        }
+
+    def record_outcome(self, pattern_id: int, timeframe: str, actual_change_pct: float):
+        """Gerçekleşen sonucu kaydet, öğrenme için"""
+        for record in self.pattern_memory:
+            if id(record) == pattern_id:
+                record.outcomes[timeframe] = actual_change_pct
+                break
+        self.prediction_accuracy['total'] += 1
+
+    def update_learning(self, signal_type: str, was_correct: bool, pnl_pct: float):
+        """Sinyal sonuçlarından öğren"""
+        if signal_type not in self.signal_type_scores:
+            self.signal_type_scores[signal_type] = {
+                'correct': 0, 'total': 0, 'total_pnl': 0
+            }
+        stats = self.signal_type_scores[signal_type]
+        stats['total'] += 1
+        stats['total_pnl'] += pnl_pct
+        if was_correct:
+            stats['correct'] += 1
+            self.prediction_accuracy['correct'] += 1
+        self.prediction_accuracy['total'] += 1
+        self.last_learning_update = datetime.utcnow()
+        logger.info(f"🧠 Brain learning: {signal_type} {'✓' if was_correct else '✗'} | "
+                     f"Accuracy: {self.get_accuracy():.1%}")
+
+    def get_accuracy(self) -> float:
+        if self.prediction_accuracy['total'] == 0:
+            return 0.0
+        return self.prediction_accuracy['correct'] / self.prediction_accuracy['total']
+
+    def should_generate_signal(self, symbol: str, direction: str,
+                                confidence: float, min_return: float = 0.02) -> bool:
+        """Sinyal üretilmeli mi? Öğrenme verileriyle karar ver"""
+        if confidence < 0.5:
+            return False
+
+        # Geçmiş benzer sinyallerin başarı oranını kontrol et
+        for sig_type, stats in self.signal_type_scores.items():
+            if direction in sig_type and stats['total'] > 5:
+                accuracy = stats['correct'] / stats['total']
+                if accuracy < 0.3:
+                    logger.debug(f"Brain: Suppressing {direction} signal for {symbol} "
+                                  f"(historical accuracy {accuracy:.1%})")
+                    return False
+        return True
+
+    def get_brain_status(self) -> Dict[str, Any]:
+        """Brain durumunu döndür"""
+        return {
+            'total_patterns': len(self.pattern_memory),
+            'accuracy': self.get_accuracy(),
+            'prediction_stats': dict(self.prediction_accuracy),
+            'signal_type_scores': {k: {
+                'accuracy': v['correct'] / max(v['total'], 1),
+                'total': v['total'],
+                'avg_pnl': v['total_pnl'] / max(v['total'], 1),
+            } for k, v in self.signal_type_scores.items()},
+            'last_learning_update': self.last_learning_update.isoformat() if self.last_learning_update else None,
+            'learning_weights': self.learning_weights,
+        }
+
+
+class ChatHandler:
+    """Bot ile sohbet sistemi"""
+
+    def __init__(self, db, brain: BrainModule):
+        self.db = db
+        self.brain = brain
+        self.agents = {}
+
+    def register_agent(self, name: str, agent):
+        self.agents[name] = agent
+
+    async def process_message(self, message: str) -> str:
+        """Kullanıcı mesajını işle ve yanıt döndür"""
+        msg = message.strip().lower()
+        try:
+            # Durum sorguları
+            if any(w in msg for w in ['durum', 'status', 'nasıl', 'naber']):
+                return await self._get_system_status()
+
+            # Fiyat sorguları
+            if any(w in msg for w in ['fiyat', 'price', 'kaç']):
+                return await self._get_price_info(msg)
+
+            # Sinyal sorguları
+            if any(w in msg for w in ['sinyal', 'signal']):
+                return await self._get_signal_info()
+
+            # Simülasyon sorguları
+            if any(w in msg for w in ['simülasyon', 'simulation', 'sim', 'trade', 'pozisyon']):
+                return await self._get_sim_info()
+
+            # Brain / öğrenme sorguları
+            if any(w in msg for w in ['öğren', 'learn', 'brain', 'beyin', 'zeka', 'akıl']):
+                return await self._get_brain_info()
+
+            # Order flow
+            if any(w in msg for w in ['order flow', 'akış', 'alış satış', 'baskı']):
+                return await self._get_flow_info(msg)
+
+            # Watchlist
+            if any(w in msg for w in ['watchlist', 'izleme', 'liste', 'coin']):
+                return await self._get_watchlist_info()
+
+            # Agent health
+            if any(w in msg for w in ['agent', 'bot', 'sağlık', 'health']):
+                return await self._get_agent_health()
+
+            # Performans
+            if any(w in msg for w in ['performans', 'başarı', 'accuracy', 'doğruluk']):
+                return await self._get_performance_info()
+
+            # Default
+            return (
+                "🤖 QuenBot AI ile konuşuyorsunuz. Şu komutları deneyebilirsiniz:\n\n"
+                "• **durum** - Sistem genel durumu\n"
+                "• **fiyat BTC** - Anlık fiyat bilgisi\n"
+                "• **sinyal** - Aktif sinyaller\n"
+                "• **simülasyon** - Açık pozisyonlar\n"
+                "• **beyin** - AI öğrenme durumu\n"
+                "• **order flow** - Alış/satış baskısı\n"
+                "• **performans** - Bot başarı oranı\n"
+                "• **watchlist** - İzleme listesi\n"
+                "• **agent** - Bot sağlık durumları\n"
+            )
+
+        except Exception as e:
+            return f"⚠ Bir hata oluştu: {str(e)}"
+
+    async def _get_system_status(self) -> str:
+        try:
+            summary = await self.db.get_dashboard_summary()
+            brain_status = self.brain.get_brain_status()
+            return (
+                f"📊 **QuenBot Sistem Durumu**\n\n"
+                f"• Toplam Trade: **{summary['total_trades']:,}**\n"
+                f"• Aktif Sinyal: **{summary['active_signals']}**\n"
+                f"• Açık Simülasyon: **{summary['open_simulations']}**\n"
+                f"• Toplam PnL: **${summary['total_pnl']:.2f}**\n"
+                f"• Öğrenilen Pattern: **{brain_status['total_patterns']}**\n"
+                f"• AI Doğruluk: **{brain_status['accuracy']:.1%}**\n"
+                f"• Tüm botlar çalışıyor ✅"
+            )
+        except Exception as e:
+            return f"⚠ Durum alınamadı: {e}"
+
+    async def _get_price_info(self, msg: str) -> str:
+        try:
+            symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT',
+                        'DOTUSDT', 'LINKUSDT', 'LTCUSDT', 'XRPUSDT', 'BCHUSDT']
+            target_symbol = None
+            for sym in symbols:
+                short = sym.replace('USDT', '').lower()
+                if short in msg:
+                    target_symbol = sym
+                    break
+
+            if target_symbol:
+                trades = await self.db.get_recent_trades(target_symbol, limit=1)
+                if trades:
+                    price = float(trades[0]['price'])
+                    return f"💰 **{target_symbol}**: ${price:,.2f} ({trades[0]['exchange']})"
+                return f"❌ {target_symbol} için veri bulunamadı."
+
+            # Tüm fiyatları göster
+            lines = ["💰 **Güncel Fiyatlar**\n"]
+            for sym in symbols:
+                trades = await self.db.get_recent_trades(sym, limit=1)
+                if trades:
+                    lines.append(f"• {sym}: **${float(trades[0]['price']):,.2f}**")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"⚠ Fiyat bilgisi alınamadı: {e}"
+
+    async def _get_signal_info(self) -> str:
+        try:
+            signals = await self.db.get_pending_signals()
+            if not signals:
+                return "📡 Şu an aktif sinyal bulunmuyor. Stratejist bot yeni pattern'lar arıyor..."
+            lines = [f"📡 **{len(signals)} Aktif Sinyal**\n"]
+            for s in signals[:5]:
+                conf = float(s.get('confidence', 0)) * 100
+                lines.append(f"• {s['symbol']} | {s['signal_type']} | Güven: %{conf:.0f} | ${float(s['price']):,.2f}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"⚠ Sinyal bilgisi alınamadı: {e}"
+
+    async def _get_sim_info(self) -> str:
+        try:
+            sims = await self.db.get_open_simulations()
+            if not sims:
+                return "👻 Şu an açık simülasyon yok. Ghost bot sinyal bekliyor..."
+            lines = [f"👻 **{len(sims)} Açık Simülasyon**\n"]
+            for s in sims[:5]:
+                entry = float(s.get('entry_price', 0))
+                lines.append(f"• {s['symbol']} | {s['side']} | Giriş: ${entry:,.2f}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"⚠ Simülasyon bilgisi alınamadı: {e}"
+
+    async def _get_brain_info(self) -> str:
+        status = self.brain.get_brain_status()
+        lines = [
+            "🧠 **AI Beyin Durumu**\n",
+            f"• Öğrenilen Pattern: **{status['total_patterns']}**",
+            f"• Tahmin Doğruluğu: **{status['accuracy']:.1%}**",
+            f"• Toplam Tahmin: **{status['prediction_stats']['total']}**",
+            f"• Doğru Tahmin: **{status['prediction_stats']['correct']}**",
+        ]
+        if status['signal_type_scores']:
+            lines.append("\n**Sinyal Tipi Başarıları:**")
+            for sig_type, scores in status['signal_type_scores'].items():
+                lines.append(f"  • {sig_type}: %{scores['accuracy']*100:.0f} ({scores['total']} sinyal)")
+        return "\n".join(lines)
+
+    async def _get_flow_info(self, msg: str) -> str:
+        try:
+            from config import Config
+            lines = ["⚡ **Order Flow (Son 30dk)**\n"]
+            for sym in Config.WATCHLIST[:5]:
+                trades = await self.db.get_recent_trades(sym, limit=200, market_type='spot')
+                if not trades:
+                    continue
+                recent = [t for t in trades if (datetime.utcnow() - t['timestamp']).seconds < 1800]
+                if not recent:
+                    continue
+                buy_vol = sum(float(t['quantity']) * float(t['price']) for t in recent if t['side'] == 'buy')
+                sell_vol = sum(float(t['quantity']) * float(t['price']) for t in recent if t['side'] == 'sell')
+                total = buy_vol + sell_vol
+                if total > 0:
+                    ratio = buy_vol / total * 100
+                    pressure = "🟢 Alış" if ratio > 55 else "🔴 Satış" if ratio < 45 else "⚪ Dengeli"
+                    lines.append(f"• {sym}: {pressure} ({ratio:.0f}% alış)")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"⚠ Order flow alınamadı: {e}"
+
+    async def _get_watchlist_info(self) -> str:
+        from config import Config
+        watchlist = await self.db.get_watchlist()
+        if watchlist:
+            lines = ["📋 **İzleme Listesi (DB)**\n"]
+            for w in watchlist:
+                lines.append(f"• {w['symbol']} ({w['market_type']})")
+        else:
+            lines = ["📋 **İzleme Listesi (Config)**\n"]
+            for sym in Config.WATCHLIST:
+                lines.append(f"• {sym} (spot + futures)")
+        return "\n".join(lines)
+
+    async def _get_agent_health(self) -> str:
+        lines = ["🤖 **Agent Durumları**\n"]
+        for name, agent in self.agents.items():
+            try:
+                health = await agent.health_check()
+                status = "✅" if health.get('healthy', True) else "❌"
+                lines.append(f"• {name}: {status}")
+            except:
+                lines.append(f"• {name}: ❓ Bilinmiyor")
+        return "\n".join(lines)
+
+    async def _get_performance_info(self) -> str:
+        try:
+            closed = await self.db.get_closed_simulations(limit=100)
+            if not closed:
+                return "📈 Henüz kapatılmış simülasyon yok. Performans verisi birikmesi bekleniyor..."
+            wins = [s for s in closed if float(s.get('pnl', 0)) > 0]
+            losses = [s for s in closed if float(s.get('pnl', 0)) <= 0]
+            win_rate = len(wins) / len(closed) * 100
+            avg_pnl = sum(float(s.get('pnl_pct', 0)) for s in closed) / len(closed)
+            return (
+                f"📈 **Bot Performansı**\n\n"
+                f"• Toplam: **{len(closed)}** simülasyon\n"
+                f"• Kazanç: **{len(wins)}** ✅\n"
+                f"• Kayıp: **{len(losses)}** ❌\n"
+                f"• Win Rate: **{win_rate:.1f}%**\n"
+                f"• Ort. PnL: **{avg_pnl:.2f}%**"
+            )
+        except Exception as e:
+            return f"⚠ Performans bilgisi alınamadı: {e}"

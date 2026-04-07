@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    { "path": "lib/api-spec" },
+    { "path": "lib/api-client-react" },
+    { "path": "lib/api-zod" },
+    { "path": "lib/db" },
+    { "path": "artifacts/api-server" },
+    { "path": "artifacts/market-intel" }
+  ]
+}

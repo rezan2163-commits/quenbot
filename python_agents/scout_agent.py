@@ -1,0 +1,460 @@
+import asyncio
+import json
+import logging
+from datetime import datetime
+from typing import Dict, List, Any, Optional
+
+import websockets
+import aiohttp
+
+from config import Config
+from database import Database
+
+logger = logging.getLogger(__name__)
+
+class ScoutAgent:
+    def __init__(self, db: Database, brain=None):
+        self.db = db
+        self.brain = brain
+        self.running = False
+        self.connections: Dict[str, Any] = {}
+        self.last_activity = None
+        self.price_cache: Dict[str, float] = {}
+        self.http_session: Optional[aiohttp.ClientSession] = None
+        self.last_rest_fetch: Dict[str, datetime] = {}
+        self._active_watchlist: List[str] = []
+        self.trade_counter = 0
+
+    async def initialize(self):
+        """Initialize the scout agent."""
+        logger.info("Initializing Scout Agent...")
+        self.http_session = aiohttp.ClientSession()
+        await self._refresh_watchlist()
+        for symbol in self._active_watchlist:
+            self.price_cache[symbol] = 0.0
+            self.last_rest_fetch[symbol] = datetime.utcnow()
+
+    async def _refresh_watchlist(self):
+        """Kullanıcı watchlist'ini DB'den yükle, yoksa config'den al"""
+        try:
+            user_wl = await self.db.get_user_watchlist()
+            if user_wl:
+                self._active_watchlist = list(set(w['symbol'] for w in user_wl))
+                logger.info(f"📋 User watchlist loaded: {len(self._active_watchlist)} symbols")
+            else:
+                self._active_watchlist = Config.WATCHLIST.copy()
+                logger.info(f"📋 Using default watchlist: {len(self._active_watchlist)} symbols")
+        except Exception:
+            self._active_watchlist = Config.WATCHLIST.copy()
+
+    def get_watchlist(self) -> List[str]:
+        return self._active_watchlist if self._active_watchlist else Config.WATCHLIST
+
+    async def start(self):
+        """Start the scout agent."""
+        self.running = True
+        logger.info("Starting Scout Agent...")
+
+        tasks = [
+            self._monitor_binance_market('spot'),
+            self._monitor_binance_market('futures'),
+            self._monitor_bybit_market('spot'),
+            self._monitor_bybit_market('futures'),
+            self._rest_fallback_fetcher(),
+            self._price_movement_detector(),
+            self._watchlist_refresher(),
+        ]
+
+        try:
+            await asyncio.gather(*tasks)
+        except Exception as e:
+            logger.error(f"Scout agent error: {e}")
+            raise
+        finally:
+            await self.stop()
+
+    async def stop(self):
+        """Stop the scout agent."""
+        self.running = False
+        logger.info("Stopping Scout Agent...")
+
+        if self.http_session:
+            await self.http_session.close()
+
+        for exchange, connection in self.connections.items():
+            try:
+                if connection and not connection.closed:
+                    await connection.close()
+                    logger.info(f"Closed {exchange} connection")
+            except Exception as e:
+                logger.error(f"Error closing connection {exchange}: {e}")
+
+        self.connections.clear()
+
+    async def _monitor_binance_market(self, market_type: str):
+        """Monitor the Binance trade stream for a specific market type using 2026 API format."""
+        # For futures, use REST fallback instead of unreliable websocket
+        if market_type == 'futures':
+            logger.info(f"⚠ Binance futures using REST fallback (WebSocket endpoint unstable)")
+            return
+            
+        ws_base = Config.BINANCE_SPOT_WS_URL
+        
+        while self.running:
+            try:
+                # Build streams for all watchlist symbols: btcusdt@trade, ethusdt@trade, etc.
+                streams = "/".join([f"{symbol.lower()}@trade" for symbol in self.get_watchlist()])
+                uri = f"{ws_base}/{streams}"
+
+                async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as websocket:
+                    self.connections[f'binance_{market_type}'] = websocket
+                    logger.info(f"✓ Connected to Binance {market_type.upper()} WebSocket")
+
+                    async for message in websocket:
+                        if not self.running:
+                            break
+                        await self._process_binance_message(message, market_type)
+                        self.last_activity = datetime.utcnow()
+
+            except Exception as e:
+                logger.error(f"✗ Binance {market_type} WebSocket error: {e}")
+                await asyncio.sleep(Config.get_agent_config('scout')['reconnect_delay'])
+
+    async def _monitor_bybit_market(self, market_type: str):
+        """Monitor the Bybit trade stream using V5 API format."""
+        # V5 API uses different URL patterns
+        if market_type == 'spot':
+            ws_url = Config.BYBIT_SPOT_WS_URL
+        else:
+            ws_url = Config.BYBIT_FUTURES_WS_URL
+            
+        while self.running:
+            try:
+                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as websocket:
+                    self.connections[f'bybit_{market_type}'] = websocket
+                    logger.info(f"✓ Connected to Bybit {market_type.upper()} WebSocket: {ws_url}")
+
+                    # Bybit V5 API: subscribe to publicTrade channel for each symbol
+                    subscribe_msg = {
+                        "op": "subscribe",
+                        "args": [f"publicTrade.{symbol}" for symbol in self.get_watchlist()]
+                    }
+                    await websocket.send(json.dumps(subscribe_msg))
+                    logger.info(f"Sent subscription to Bybit {market_type}: {len(self.get_watchlist())} symbols")
+
+                    async for message in websocket:
+                        if not self.running:
+                            break
+                        await self._process_bybit_message(message, market_type)
+                        self.last_activity = datetime.utcnow()
+
+            except Exception as e:
+                logger.error(f"✗ Bybit {market_type} WebSocket error: {e}")
+                await asyncio.sleep(Config.get_agent_config('scout')['reconnect_delay'])
+
+    async def _rest_fallback_fetcher(self):
+        """Periodically fetch recent trades via REST API as fallback."""
+        scout_config = Config.get_agent_config('scout')
+        fetch_interval = scout_config.get('rest_fetch_interval_seconds', 30)
+        
+        while self.running:
+            try:
+                await asyncio.sleep(fetch_interval)
+                
+                # Fetch from both Binance and Bybit for both spot and futures
+                tasks = []
+                for symbol in Config.WATCHLIST:
+                    tasks.append(self._fetch_binance_rest('spot', symbol))
+                    tasks.append(self._fetch_binance_rest('futures', symbol))
+                    tasks.append(self._fetch_bybit_rest('spot', symbol))
+                    tasks.append(self._fetch_bybit_rest('futures', symbol))
+                
+                await asyncio.gather(*tasks, return_exceptions=True)
+                logger.info(f"REST API fallback fetch completed for {len(self.get_watchlist())} symbols")
+                
+            except Exception as e:
+                logger.error(f"REST fallback fetcher error: {e}")
+
+    async def _fetch_binance_rest(self, market_type: str, symbol: str):
+        """Fetch recent trades from Binance REST API."""
+        try:
+            endpoint = f"{Config.BINANCE_REST_API}/api/v3/trades"
+            params = {"symbol": symbol, "limit": Config.get_agent_config('scout').get('rest_fetch_limit', 100)}
+            
+            async with self.http_session.get(endpoint, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    trades = await resp.json()
+                    for trade in trades:
+                        price = float(trade['price'])
+                        quantity = float(trade['qty'])
+                        side = 'sell' if trade['isBuyerMaker'] else 'buy'
+                        timestamp = datetime.utcfromtimestamp(trade['time'] / 1000)
+                        
+                        trade_data = {
+                            'exchange': 'binance',
+                            'market_type': market_type,
+                            'symbol': symbol,
+                            'price': price,
+                            'quantity': quantity,
+                            'timestamp': timestamp,
+                            'side': side,
+                            'trade_id': f"binance_{market_type}_{symbol}_{trade['id']}"
+                        }
+                        
+                        await self.db.insert_trade(trade_data)
+                        self.price_cache[symbol] = price
+                    
+                    logger.debug(f"Fetched {len(trades)} trades from Binance {market_type}: {symbol}")
+                else:
+                    logger.warning(f"Binance REST API error for {symbol} ({market_type}): status {resp.status}")
+                    
+        except Exception as e:
+            logger.debug(f"Binance REST fetch error for {symbol} ({market_type}): {e}")
+
+    async def _fetch_bybit_rest(self, market_type: str, symbol: str):
+        """Fetch recent trades from Bybit REST API (V5 format)."""
+        try:
+            endpoint = f"{Config.BYBIT_REST_API}/v5/market/recent-trade"
+            category = "spot" if market_type == "spot" else "linear"
+            params = {
+                "category": category,
+                "symbol": symbol,
+                "limit": Config.get_agent_config('scout').get('rest_fetch_limit', 100)
+            }
+            
+            async with self.http_session.get(endpoint, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    trades = data.get('result', {}).get('list', [])
+                    
+                    for trade in trades:
+                        price = float(trade['price'])
+                        quantity = float(trade['size'])
+                        side = 'buy' if trade['side'] == 'Buy' else 'sell'
+                        timestamp = datetime.utcfromtimestamp(int(trade['time']) / 1000)
+                        
+                        trade_data = {
+                            'exchange': 'bybit',
+                            'market_type': market_type,
+                            'symbol': symbol,
+                            'price': price,
+                            'quantity': quantity,
+                            'timestamp': timestamp,
+                            'side': side,
+                            'trade_id': f"bybit_{market_type}_{symbol}_{trade['execId']}"
+                        }
+                        
+                        await self.db.insert_trade(trade_data)
+                        self.price_cache[symbol] = price
+                    
+                    logger.debug(f"Fetched {len(trades)} trades from Bybit {market_type}: {symbol}")
+                else:
+                    logger.warning(f"Bybit REST API error for {symbol} ({market_type}): status {resp.status}")
+                    
+        except Exception as e:
+            logger.debug(f"Bybit REST fetch error for {symbol} ({market_type}): {e}")
+
+    async def _process_binance_message(self, message: str, market_type: str):
+        """Process Binance trade events from WebSocket."""
+        try:
+            payload = json.loads(message)
+            
+            # Binance sends trade data in 'data' field or directly
+            data = payload.get('data') or payload
+            
+            # Check if this is a trade event
+            if not isinstance(data, dict):
+                return
+                
+            # Binance newer format sends event type differently
+            event_type = data.get('e') or payload.get('e')
+            if event_type not in ['trade', 'aggTrade']:
+                return
+
+            symbol = data.get('s')
+            if not symbol or symbol not in self.get_watchlist():
+                return
+
+            try:
+                price = float(data.get('p') or data.get('price', 0))
+                quantity = float(data.get('q') or data.get('qty', 0))
+                
+                # Determine side
+                if 'm' in data:
+                    side = 'sell' if data['m'] else 'buy'
+                else:
+                    side = 'buy'  # default
+                
+                timestamp = datetime.utcfromtimestamp((data.get('T') or data.get('time', 0)) / 1000)
+
+                trade_data = {
+                    'exchange': 'binance',
+                    'market_type': market_type,
+                    'symbol': symbol,
+                    'price': price,
+                    'quantity': quantity,
+                    'timestamp': timestamp,
+                    'side': side,
+                    'trade_id': f"binance_{market_type}_{symbol}_{data.get('t', int(timestamp.timestamp() * 1000))}"
+                }
+
+                await self.db.insert_trade(trade_data)
+                self.price_cache[symbol] = price
+                self.trade_counter += 1
+            except (ValueError, KeyError) as e:
+                logger.warning(f"Failed to parse Binance trade data: {e}")
+
+        except json.JSONDecodeError as e:
+            logger.debug(f"JSON decode error in Binance message: {e}")
+        except Exception as e:
+            logger.error(f"Error processing Binance message: {e}")
+
+    async def _process_bybit_message(self, message: str, market_type: str):
+        """Process Bybit trade messages from WebSocket (V5 API format)."""
+        try:
+            payload = json.loads(message)
+            
+            # Bybit V5 format: { "topic": "publicTrade.BTCUSDT", "data": [...], ...}
+            topic = payload.get('topic', '')
+            if not topic.startswith('publicTrade.'):
+                return
+
+            data_list = payload.get('data')
+            if not data_list:
+                return
+
+            if not isinstance(data_list, list):
+                data_list = [data_list]
+
+            for trade in data_list:
+                try:
+                    symbol = trade.get('symbol')
+                    if not symbol or symbol not in self.get_watchlist():
+                        continue
+
+                    price = float(trade.get('price', 0))
+                    quantity = float(trade.get('size', trade.get('qty', 0)))
+                    side = 'buy' if trade.get('side') == 'Buy' else 'sell'
+                    timestamp = datetime.utcfromtimestamp(int(trade.get('time', 0)) / 1000)
+
+                    trade_data = {
+                        'exchange': 'bybit',
+                        'market_type': market_type,
+                        'symbol': symbol,
+                        'price': price,
+                        'quantity': quantity,
+                        'timestamp': timestamp,
+                        'side': side,
+                        'trade_id': f"bybit_{market_type}_{symbol}_{trade.get('execId', int(timestamp.timestamp() * 1000))}"
+                    }
+
+                    await self.db.insert_trade(trade_data)
+                    self.price_cache[symbol] = price
+                    logger.debug(f"Bybit {market_type} trade: {symbol} {side} @ {price} x {quantity}")
+
+                except (ValueError, KeyError) as e:
+                    logger.warning(f"Failed to parse Bybit trade data: {e}")
+
+        except json.JSONDecodeError as e:
+            logger.debug(f"JSON decode error in Bybit message: {e}")
+        except Exception as e:
+            logger.error(f"Error processing Bybit message: {e}")
+
+    async def _price_movement_detector(self):
+        """Detect significant price movements across all watchlist symbols."""
+        while self.running:
+            try:
+                await asyncio.sleep(60)
+                for market_type in Config.MARKET_TYPES:
+                    for symbol in self.get_watchlist():
+                        await self._check_price_movement(symbol, market_type)
+            except Exception as e:
+                logger.error(f"Price movement detector error: {e}")
+                await asyncio.sleep(30)
+
+    async def _check_price_movement(self, symbol: str, market_type: str):
+        """Check for significant price movement for a symbol and market type."""
+        try:
+            recent_trades = await self.db.get_recent_trades(symbol, limit=100, market_type=market_type)
+            if len(recent_trades) < 10:
+                return
+
+            start_price = recent_trades[-1]['price']
+            end_price = recent_trades[0]['price']
+            change_pct = abs(end_price - start_price) / max(start_price, 1e-8)
+
+            buy_volume = sum(t['quantity'] for t in recent_trades if t['side'] == 'buy')
+            sell_volume = sum(t['quantity'] for t in recent_trades if t['side'] == 'sell')
+            direction = 'long' if buy_volume >= sell_volume else 'short'
+            aggressiveness = float(buy_volume / (sell_volume + 1)) if direction == 'long' else float(sell_volume / (buy_volume + 1))
+
+            if change_pct >= Config.PRICE_MOVEMENT_THRESHOLD:
+                price_profile = [trade['price'] for trade in reversed(recent_trades)]
+                norm_price_profile = self._build_movement_vector(price_profile)
+
+                movement_data = {
+                    'exchange': recent_trades[0]['exchange'],
+                    'market_type': market_type,
+                    'symbol': symbol,
+                    'start_price': start_price,
+                    'end_price': end_price,
+                    'change_pct': change_pct,
+                    'volume': sum(trade['quantity'] for trade in recent_trades),
+                    'buy_volume': buy_volume,
+                    'sell_volume': sell_volume,
+                    'direction': direction,
+                    'aggressiveness': aggressiveness,
+                    'start_time': recent_trades[-1]['timestamp'],
+                    'end_time': recent_trades[0]['timestamp'],
+                    't10_data': {
+                        'trade_count': len(recent_trades),
+                        'average_price': sum(t['price'] for t in recent_trades) / len(recent_trades),
+                        'total_volume': buy_volume + sell_volume,
+                        'buy_volume': buy_volume,
+                        'sell_volume': sell_volume,
+                        'direction': direction,
+                        'price_profile': norm_price_profile,
+                    }
+                }
+                await self.db.insert_price_movement(movement_data)
+                logger.info(f"📊 Movement detected [{market_type}] {symbol}: {change_pct:.2%}, direction={direction}, agg={aggressiveness:.2f}")
+
+        except Exception as e:
+            logger.error(f"Error checking price movement for {symbol} ({market_type}): {e}")
+
+    def _build_movement_vector(self, prices: List[float]) -> List[float]:
+        """Build a normalized movement vector for similarity comparison."""
+        if not prices:
+            return []
+        base = prices[0]
+        return [(price - base) / max(base, 1e-8) for price in prices]
+
+    async def health_check(self) -> Dict[str, Any]:
+        """Return health status of the scout agent."""
+        try:
+            healthy = len(self.connections) > 0 and any(
+                conn and not conn.closed for conn in self.connections.values()
+            )
+            active_connections = sum(1 for conn in self.connections.values() if conn and not conn.closed)
+            
+            return {
+                "healthy": healthy,
+                "active_connections": active_connections,
+                "total_connections": len(self.connections),
+                "last_activity": self.last_activity.isoformat() if self.last_activity else None,
+                "monitored_symbols": len(self._active_watchlist),
+                "watchlist": self._active_watchlist,
+                "price_cache_size": len(self.price_cache),
+                "trade_counter": self.trade_counter,
+            }
+        except Exception as e:
+            return {"healthy": False, "error": str(e)}
+
+    async def _watchlist_refresher(self):
+        """Watchlist'i periyodik olarak DB'den güncelle"""
+        while self.running:
+            try:
+                await asyncio.sleep(120)  # 2 dakikada bir
+                await self._refresh_watchlist()
+            except Exception as e:
+                logger.debug(f"Watchlist refresh error: {e}")
