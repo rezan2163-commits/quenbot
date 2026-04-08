@@ -252,8 +252,13 @@ class GhostSimulatorAgent:
 
             # StateTracker'a trade kaydet
             if self.state_tracker:
-                await self.state_tracker.record_trade(pnl_pct, was_correct, symbol,
-                                                       sim_data.get('metadata', {}).get('signal_type', ''))
+                await self.state_tracker.record_trade({
+                    'pnl': pnl,
+                    'pnl_pct': pnl_pct,
+                    'symbol': symbol,
+                    'signal_type': sim_data.get('metadata', {}).get('signal_type', 'unknown'),
+                    'side': side,
+                })
                 self.state_tracker.remove_active_symbol(symbol)
 
             # RiskManager cooldown

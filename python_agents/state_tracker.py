@@ -224,19 +224,22 @@ class StateTracker:
             async with self.db.pool.acquire() as conn:
                 await conn.execute("""
                     INSERT INTO state_history
-                    (timestamp, cumulative_pnl, daily_pnl, open_positions,
-                     drawdown_pct, consecutive_losses, win_rate, metadata)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    (timestamp, mode, cumulative_pnl, daily_pnl,
+                     daily_trade_count, current_drawdown, win_rate,
+                     active_positions, total_trades, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 """, datetime.utcnow(),
+                    self.state['mode'],
                     self.state['cumulative_pnl'],
                     self.state['daily_pnl'],
-                    len(self.state['active_symbols']),
+                    self.state['daily_trade_count'],
                     self.state['current_drawdown'],
-                    self.state['consecutive_losses'],
                     self.get_win_rate(),
+                    len(self.state['active_symbols']),
+                    self.state['total_trades'],
                     json.dumps({
-                        'mode': self.state['mode'],
-                        'total_trades': self.state['total_trades'],
+                        'consecutive_losses': self.state['consecutive_losses'],
+                        'consecutive_wins': self.state['consecutive_wins'],
                     }))
         except Exception as e:
             logger.debug(f"History snapshot error: {e}")
@@ -268,4 +271,16 @@ class StateTracker:
             'peak_pnl': self.state['peak_pnl'],
             'active_positions': len(self.state['active_symbols']),
             'active_symbols': self.state['active_symbols'],
+            'best_streak': self.state['consecutive_wins'],
+            'worst_streak': self.state['consecutive_losses'],
+            'current_drawdown': self.state['current_drawdown'],
         }
+
+    def update_mode(self):
+        """Mode geçişini kontrol et (health monitor'dan çağrılır)"""
+        self._check_daily_reset()
+        self._check_mode_transition()
+
+    async def snapshot_history(self):
+        """State history snapshot'ı kaydet (health monitor'dan çağrılır)"""
+        await self._save_history_snapshot()
