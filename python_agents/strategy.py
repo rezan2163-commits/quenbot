@@ -113,7 +113,8 @@ def evolutionary_algorithm(prices: np.ndarray, population_size: int = 50, genera
 
         top_half = sorted_population[: max(2, int(population_size * 0.5))]
         while len(selected) < population_size:
-            parent1, parent2 = np.random.choice(top_half, 2, replace=False)
+            idxs = np.random.choice(len(top_half), 2, replace=False)
+            parent1, parent2 = top_half[idxs[0]], top_half[idxs[1]]
             child = [(parent1[i] + parent2[i]) / 2 for i in range(2)]
             if np.random.random() < 0.2:
                 child[np.random.randint(0, 2)] += np.random.uniform(-0.1, 0.1)
