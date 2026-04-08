@@ -16,7 +16,9 @@ type Candle = { minute: string; open: number; high: number; low: number; close: 
 type ChatMsg = { id: number; role: string; message: string; agent_name: string; created_at: string };
 type WatchlistItem = { id: number; symbol: string; exchange: string; market_type: string; active: boolean };
 type BrainStatus = { pattern_count: number; learning: { total: number; correct: number; accuracy: number; avg_pnl: number }; recent_patterns: RecordRow[]; signal_type_stats: RecordRow[] };
-type Tab = "overview" | "markets" | "orderflow" | "bot" | "brain" | "chat" | "system";
+type LiveDataStream = { latest_trades: RecordRow[]; exchange_freshness: RecordRow[]; five_min_breakdown: RecordRow[] };
+type TableStats = { table_name: string; row_count: number }[];
+type Tab = "overview" | "markets" | "orderflow" | "bot" | "livedata" | "brain" | "chat" | "admin" | "system";
 
 /* ───────── Helpers ───────── */
 const fmt = (v: number, d = 2) => new Intl.NumberFormat("en-US", { maximumFractionDigits: d }).format(v);
@@ -88,8 +90,42 @@ function CandleChart({ candles, height = 200 }: { candles: Candle[]; height?: nu
   );
 }
 
+/* ═══════════════════ LOGIN SCREEN ═══════════════════ */
+function LoginScreen({ onLogin }: { onLogin: () => void }) {
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = async () => {
+    if (!pin.trim()) return;
+    setLoading(true);
+    setError("");
+    try {
+      const r = await fetch("/api/admin/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin: pin.trim() }) });
+      const data = await r.json();
+      if (data.ok) { sessionStorage.setItem("qb_auth", "1"); onLogin(); }
+      else setError(data.error || "Geçersiz PIN");
+    } catch { setError("Sunucuya bağlanılamadı"); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div className="login-screen">
+      <div className="login-box">
+        <div className="login-logo">Q</div>
+        <div className="login-title">QuenBot</div>
+        <div className="login-sub">Yönetim Paneli Girişi</div>
+        <input className="login-input" type="password" maxLength={10} placeholder="••••" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && handleLogin()} autoFocus />
+        <button className="login-btn" onClick={handleLogin} disabled={loading || !pin.trim()}>{loading ? "Giriş yapılıyor..." : "Giriş Yap"}</button>
+        {error && <div className="login-error">{error}</div>}
+      </div>
+    </div>
+  );
+}
+
 /* ═══════════════════ MAIN APP ═══════════════════ */
 function App() {
+  const [authed, setAuthed] = useState(sessionStorage.getItem("qb_auth") === "1");
   const [tab, setTab] = useState<Tab>("overview");
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [livePrices, setLivePrices] = useState<LivePrice[]>([]);
@@ -110,7 +146,6 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [refreshCount, setRefreshCount] = useState(0);
-  // Yeni state'ler
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatSending, setChatSending] = useState(false);
@@ -120,6 +155,17 @@ function App() {
   const [wlExchange, setWlExchange] = useState("all");
   const [wlMarketType, setWlMarketType] = useState("spot");
   const chatEndRef = useRef<HTMLDivElement>(null);
+  // Yeni state'ler
+  const [liveStream, setLiveStream] = useState<LiveDataStream | null>(null);
+  const [tableStats, setTableStats] = useState<TableStats>([]);
+  const [agentConfigs, setAgentConfigs] = useState<RecordRow[]>([]);
+  const [auditRecords, setAuditRecords] = useState<RecordRow[]>([]);
+  const [failureAnalysis, setFailureAnalysis] = useState<RecordRow[]>([]);
+  const [pnlTimeline, setPnlTimeline] = useState<RecordRow[]>([]);
+  const [brainPatterns, setBrainPatterns] = useState<RecordRow[]>([]);
+  const [learningStats, setLearningStats] = useState<RecordRow[]>([]);
+
+  if (!authed) return <LoginScreen onLogin={() => setAuthed(true)} />;
 
   const fetchAll = useCallback(async () => {
     try {
@@ -130,10 +176,15 @@ function App() {
         "/api/analytics/system-stats", "/api/signals", "/api/simulations",
         "/api/scout/trades?limit=20", "/api/scout/movements?limit=15",
         `/api/analytics/price-history/${selectedSymbol}`,
-        "/api/chat/messages?limit=50", "/api/watchlist", "/api/brain/status"
+        "/api/chat/messages?limit=50", "/api/watchlist", "/api/brain/status",
+        "/api/live/data-stream", "/api/admin/table-stats",
+        "/api/admin/config", "/api/admin/audit-records?limit=20",
+        "/api/admin/failure-analysis?limit=20",
+        "/api/analytics/pnl-timeline",
+        "/api/brain/patterns?limit=30", "/api/brain/learning-stats"
       ];
       const results = await Promise.all(ep.map(async url => { try { const r = await fetch(url); return r.ok ? r.json() : null; } catch { return null; } }));
-      const [s, p, b, tm, of2, tl, vd, ss, sig, sim, tr, mv, ch, chatM, wl, bs] = results;
+      const [s, p, b, tm, of2, tl, vd, ss, sig, sim, tr, mv, ch, chatM, wl, bs, ls, ts, ac, ar, fa, pt, bp, lst] = results;
       if (s) setSummary(s);
       if (p) { setPrevPrices(Object.fromEntries(livePrices.map(lp => [lp.symbol, lp.price]))); setLivePrices(p); }
       if (b) setBotSummary(b);
@@ -150,6 +201,14 @@ function App() {
       if (chatM) setChatMessages(chatM);
       if (wl) setWatchlist(wl);
       if (bs) setBrainStatus(bs);
+      if (ls) setLiveStream(ls);
+      if (ts) setTableStats(ts);
+      if (ac) setAgentConfigs(ac);
+      if (ar) setAuditRecords(ar);
+      if (fa) setFailureAnalysis(fa);
+      if (pt) setPnlTimeline(pt);
+      if (bp) setBrainPatterns(bp);
+      if (lst) setLearningStats(lst);
       setError(null); setLastUpdate(new Date()); setRefreshCount(c => c + 1);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setLoading(false); }
@@ -185,32 +244,54 @@ function App() {
     } catch (e) { console.error(e); }
   };
 
+  const logout = () => { sessionStorage.removeItem("qb_auth"); setAuthed(false); };
+
   const totalVolume1h = useMemo(() => volumeData.reduce((s, v) => s + (v.total_volume || 0), 0), [volumeData]);
   const tradeVolumes = useMemo(() => timeline.map(t => t.volume || 0), [timeline]);
   const tradeCounts = useMemo(() => timeline.map(t => t.count || 0), [timeline]);
 
-  const tabs: { key: Tab; label: string; icon: string }[] = [
-    { key: "overview", label: "Genel Bakış", icon: "📊" },
-    { key: "markets", label: "Piyasalar", icon: "📈" },
-    { key: "orderflow", label: "Order Flow", icon: "⚡" },
-    { key: "bot", label: "Bot & Sinyaller", icon: "🤖" },
-    { key: "brain", label: "AI Beyin", icon: "🧠" },
-    { key: "chat", label: "Sohbet", icon: "💬" },
-    { key: "system", label: "Sistem", icon: "⚙️" },
+  const navSections: { title: string; items: { key: Tab; label: string; icon: string; badge?: string }[] }[] = [
+    { title: "Pano", items: [
+      { key: "overview", label: "Genel Bakış", icon: "📊" },
+      { key: "livedata", label: "Canlı Veri Akışı", icon: "🔴", badge: liveStream ? String(liveStream.latest_trades?.length ?? 0) : undefined },
+    ]},
+    { title: "Analiz", items: [
+      { key: "markets", label: "Piyasalar", icon: "📈" },
+      { key: "orderflow", label: "Order Flow", icon: "⚡" },
+    ]},
+    { title: "Bot", items: [
+      { key: "bot", label: "Sinyaller & Simülasyon", icon: "🤖" },
+      { key: "brain", label: "AI Beyin", icon: "🧠" },
+      { key: "chat", label: "Sohbet", icon: "💬" },
+    ]},
+    { title: "Yönetim", items: [
+      { key: "admin", label: "Admin Panel", icon: "🛠" },
+      { key: "system", label: "Sistem", icon: "⚙️" },
+    ]},
   ];
 
   return (
     <div className="app">
       {/* ── Sidebar ── */}
       <aside className="sidebar">
-        <div className="sidebar-brand"><div className="brand-icon">Q</div><div className="brand-text"><strong>QuenBot</strong><span>Market Intelligence</span></div></div>
+        <div className="sidebar-brand"><div className="brand-icon">Q</div><div className="brand-text"><strong>QuenBot</strong><span>Market Intelligence v2</span></div></div>
         <nav className="sidebar-nav">
-          {tabs.map(t => (<button key={t.key} className={cls("nav-btn", tab === t.key && "nav-btn-active")} onClick={() => setTab(t.key)}><span className="nav-icon">{t.icon}</span><span>{t.label}</span></button>))}
+          {navSections.map(sec => (
+            <React.Fragment key={sec.title}>
+              <div className="nav-section">{sec.title}</div>
+              {sec.items.map(t => (
+                <button key={t.key} className={cls("nav-btn", tab === t.key && "nav-btn-active")} onClick={() => setTab(t.key)}>
+                  <span className="nav-icon">{t.icon}</span><span>{t.label}</span>
+                  {t.badge && <span className="nav-badge">{t.badge}</span>}
+                </button>
+              ))}
+            </React.Fragment>
+          ))}
         </nav>
         <div className="sidebar-footer">
           <div className="live-indicator"><span className="live-dot" /><span>Canlı Veri Akışı</span></div>
-          <div className="text-muted text-xs">Son: {fmtTime(lastUpdate.toISOString())}</div>
-          <div className="text-muted text-xs">Yenileme #{refreshCount}</div>
+          <div className="text-muted text-xs">Son: {fmtTime(lastUpdate.toISOString())} • #{refreshCount}</div>
+          <button className="sidebar-logout" onClick={logout}>🚪 Çıkış Yap</button>
         </div>
       </aside>
 
@@ -268,6 +349,87 @@ function App() {
               {volumeData.map((v, i) => (<div key={i} className="exchange-card"><div className="exchange-name">{v.exchange.toUpperCase()} <span className="badge badge-sm">{v.market_type}</span></div><div className="exchange-vol">${fmt(v.total_volume, 0)}</div><div className="text-muted text-xs">{fmt(v.trade_count, 0)} trade</div></div>))}
             </div>
           </div>
+
+          {/* PnL Timeline */}
+          {pnlTimeline.length > 0 && (
+            <div className="card">
+              <div className="card-header"><h3>Kümülatif PnL Zaman Çizgisi</h3><span className="badge badge-green">Simülasyonlar</span></div>
+              <MiniBarChart data={pnlTimeline.map(p => p.cumulative_pnl ?? 0)} height={80} color={pnlTimeline.length > 0 && (pnlTimeline[pnlTimeline.length - 1]?.cumulative_pnl ?? 0) >= 0 ? "var(--green)" : "var(--red)"} />
+            </div>
+          )}
+        </>)}
+
+        {/* ═══ LIVE DATA STREAM ═══ */}
+        {tab === "livedata" && (<>
+          <div className="tab-header"><h2>Canlı Veri Akışı Doğrulama</h2><span className="badge badge-live">CANLI</span></div>
+
+          {/* Exchange Freshness */}
+          <div className="card">
+            <div className="card-header"><h3>Borsa Veri Tazeliği</h3><span className="badge badge-cyan">Gerçek Zamanlı</span></div>
+            {liveStream && liveStream.exchange_freshness?.length > 0 ? (
+              <div className="stream-grid">
+                {liveStream.exchange_freshness.map((ef, i) => {
+                  const ageSec = ef.age_seconds ?? 999;
+                  const freshClass = ageSec < 10 ? "stream-card-fresh" : ageSec < 60 ? "stream-card-stale" : "stream-card-dead";
+                  const dotColor = ageSec < 10 ? "var(--green)" : ageSec < 60 ? "var(--amber)" : "var(--red)";
+                  return (
+                    <div key={i} className={cls("stream-card", freshClass)}>
+                      <div className="stream-dot" style={{ background: dotColor }} />
+                      <div className="stream-symbol">{ef.exchange?.toUpperCase()} {ef.market_type}</div>
+                      <div className="stream-meta">
+                        <span>Son: {ageSec.toFixed(0)}sn önce</span>
+                        <span>Son 5dk: {ef.trades_5min ?? 0} trade</span>
+                        <span>{ef.latest_time ? fmtTime(ef.latest_time) : "—"}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : <div className="empty-state">Tazelik verisi yükleniyor...</div>}
+          </div>
+
+          {/* 5-Min Breakdown */}
+          <div className="card">
+            <div className="card-header"><h3>5 Dakikalık Veri Akışı Dağılımı</h3></div>
+            {liveStream && liveStream.five_min_breakdown?.length > 0 ? (
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Periyot</th><th>Trade Sayısı</th><th>Toplam Hacim</th></tr></thead><tbody>
+                {liveStream.five_min_breakdown.map((row, i) => (
+                  <tr key={i}>
+                    <td>{row.period ? fmtTime(row.period) : "—"}</td>
+                    <td><strong>{fmt(row.trade_count ?? 0, 0)}</strong></td>
+                    <td>${fmt(row.total_volume ?? 0, 0)}</td>
+                  </tr>
+                ))}
+              </tbody></table></div>
+            ) : <div className="empty-state">5 dakikalık döküm bekleniyor...</div>}
+          </div>
+
+          {/* Latest Trades */}
+          <div className="card">
+            <div className="card-header"><h3>Son Gelen Trade Verileri</h3><span className="badge badge-blue">Ham Veri</span></div>
+            {liveStream && liveStream.latest_trades?.length > 0 ? (
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Borsa</th><th>Fiyat</th><th>Miktar</th><th>Taraf</th><th>Zaman</th></tr></thead><tbody>
+                {liveStream.latest_trades.map((t, i) => (
+                  <tr key={i}>
+                    <td><strong>{t.symbol}</strong></td>
+                    <td>{t.exchange}</td>
+                    <td className="text-mono">{fmtUsd(Number(t.price || 0))}</td>
+                    <td className="text-mono">{fmt(Number(t.quantity || 0), 6)}</td>
+                    <td><span className={cls("side-badge", t.side === "buy" ? "side-long" : "side-short")}>{t.side === "buy" ? "ALIŞ" : "SATIŞ"}</span></td>
+                    <td>{t.timestamp ? fmtTime(t.timestamp) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody></table></div>
+            ) : <div className="empty-state">Trade verisi bekleniyor...</div>}
+          </div>
+
+          {/* Summary */}
+          <div className="kpi-strip">
+            <KPI label="Toplam Borsa Bağlantısı" value={String(liveStream?.exchange_freshness?.length ?? 0)} icon="🔗" accent="cyan" />
+            <KPI label="Son 5dk Trade" value={liveStream ? fmt((liveStream.five_min_breakdown ?? []).reduce((s, r) => s + (r.trade_count ?? 0), 0), 0) : "—"} icon="📦" accent="blue" />
+            <KPI label="Aktif Akış" value={liveStream ? String((liveStream.exchange_freshness ?? []).filter(e => (e.age_seconds ?? 999) < 30).length) : "0"} sub="< 30sn" icon="✅" accent="green" />
+            <KPI label="Uyarı" value={liveStream ? String((liveStream.exchange_freshness ?? []).filter(e => (e.age_seconds ?? 999) >= 60).length) : "0"} sub="> 60sn" icon="⚠️" accent={liveStream && (liveStream.exchange_freshness ?? []).some(e => (e.age_seconds ?? 999) >= 60) ? "red" : undefined} />
+          </div>
         </>)}
 
         {/* ═══ MARKETS ═══ */}
@@ -282,7 +444,7 @@ function App() {
             <div className="grid-3">
               <div className="card card-highlight"><div className="big-price">{fmtUsd(p.price)}</div><div className={cls("big-change", (mover?.change_pct ?? 0) >= 0 ? "text-green" : "text-red")}>{fmtPct(mover?.change_pct ?? 0)} <span className="text-muted text-xs">(1s)</span></div></div>
               <div className="card"><div className="card-header"><h3>Açılış (1s)</h3></div><div className="stat-big">{fmtUsd(mover?.open_price ?? 0)}</div></div>
-              <div className="card"><div className="card-header"><h3>Son Güncelleme</h3></div><div className="stat-big">{fmtTime(p.timestamp)}</div><div className="text-muted">{p.exchange}</div></div>
+              <div className="card"><div className="card-header"><h3>Son Güncelleme</h3></div><div className="stat-big">{fmtTime(p.timestamp)}</div><div className="text-muted" style={{ padding: "0 20px 16px" }}>{p.exchange}</div></div>
             </div>); })()}
           <div className="card"><div className="card-header"><h3>{selectedSymbol} Fiyat Grafiği (1dk mum, 60dk)</h3><span className="badge badge-blue">{candles.length} mum</span></div><CandleChart candles={candles} height={240} /></div>
           {(() => { const flow = orderFlow.find(o => o.symbol === selectedSymbol); if (!flow) return null; return (
@@ -318,60 +480,10 @@ function App() {
           </div>
           <div className="grid-2">
             <div className="card card-center"><h3>Win Rate</h3><ProgressRing value={botSummary?.win_rate ?? 0} size={120} stroke={10} color={botSummary && botSummary.win_rate >= 50 ? "var(--green)" : "var(--red)"} /><div className="text-muted" style={{ marginTop: 12 }}>{botSummary?.wins ?? 0}W / {botSummary?.losses ?? 0}L</div></div>
-            <div className="card"><div className="card-header"><h3>Son Sinyaller</h3><span className="badge">{signals.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Tip</th><th>Güven</th><th>Fiyat</th><th>Durum</th><th>Zaman</th></tr></thead><tbody>{signals.slice(0, 10).map((s, i) => (<tr key={i}><td><strong>{s.symbol}</strong></td><td>{s.signal_type}</td><td>{(Number(s.confidence) * 100).toFixed(0)}%</td><td>{fmtUsd(Number(s.price))}</td><td><span className={cls("status-badge", `status-${s.status}`)}>{s.status}</span></td><td>{fmtTime(s.timestamp)}</td></tr>))}</tbody></table>{signals.length === 0 && <div className="empty-state">Henüz sinyal üretilmedi. Stratejist agent yeterli veri topladığında sinyaller burada görünecek.</div>}</div></div>
+            <div className="card"><div className="card-header"><h3>Son Sinyaller</h3><span className="badge">{signals.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Tip</th><th>Güven</th><th>Fiyat</th><th>Durum</th><th>Zaman</th></tr></thead><tbody>{signals.slice(0, 10).map((s, i) => (<tr key={i}><td><strong>{s.symbol}</strong></td><td>{s.signal_type}</td><td>{(Number(s.confidence) * 100).toFixed(0)}%</td><td>{fmtUsd(Number(s.price))}</td><td><span className={cls("status-badge", `status-${s.status}`)}>{s.status}</span></td><td>{fmtTime(s.timestamp)}</td></tr>))}</tbody></table>{signals.length === 0 && <div className="empty-state">Henüz sinyal üretilmedi</div>}</div></div>
           </div>
-          <div className="card"><div className="card-header"><h3>Simülasyonlar</h3><span className="badge">{simulations.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Yön</th><th>Giriş</th><th>Çıkış</th><th>PnL</th><th>PnL %</th><th>Durum</th></tr></thead><tbody>{simulations.slice(0, 15).map((s, i) => (<tr key={i}><td><strong>{s.symbol}</strong></td><td><span className={cls("side-badge", s.side === "long" ? "side-long" : "side-short")}>{s.side}</span></td><td>{fmtUsd(Number(s.entry_price))}</td><td>{s.exit_price ? fmtUsd(Number(s.exit_price)) : "—"}</td><td className={Number(s.pnl || 0) >= 0 ? "text-green" : "text-red"}>{s.pnl ? fmtUsd(Number(s.pnl)) : "—"}</td><td>{s.pnl_pct ? `${Number(s.pnl_pct).toFixed(2)}%` : "—"}</td><td><span className={cls("status-badge", `status-${s.status}`)}>{s.status}</span></td></tr>))}</tbody></table>{simulations.length === 0 && <div className="empty-state">Ghost simulator aktif sinyalleri bekleniyor.</div>}</div></div>
-          <div className="card"><div className="card-header"><h3>Tespit Edilen Hareketler</h3><span className="badge badge-amber">{movements.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Borsa</th><th>Tip</th><th>Değişim</th><th>Yön</th><th>Hacim</th><th>Başlangıç</th><th>Bitiş</th></tr></thead><tbody>{movements.slice(0, 12).map((m, i) => (<tr key={i}><td><strong>{m.symbol}</strong></td><td>{m.exchange}</td><td><span className="badge badge-sm">{m.market_type}</span></td><td className={Number(m.change_pct) >= 0 ? "text-green" : "text-red"}>{fmtPct(Number(m.change_pct) * 100)}</td><td>{m.direction}</td><td>{fmt(Number(m.volume), 2)}</td><td>{fmtTimeShort(m.start_time)}</td><td>{fmtTimeShort(m.end_time)}</td></tr>))}</tbody></table>{movements.length === 0 && <div className="empty-state">Henüz %2'den büyük fiyat hareketi tespit edilmedi.</div>}</div></div>
-        </>)}
-
-        {/* ═══ SYSTEM ═══ */}
-        {tab === "system" && (<>
-          <div className="tab-header"><h2>Sistem Durumu</h2></div>
-          <div className="kpi-strip">
-            <KPI label="Veritabanı" value={systemStats ? `${systemStats.db_size_mb} MB` : "—"} icon="💾" />
-            <KPI label="Toplam Trade" value={systemStats ? fmt(systemStats.total_trades, 0) : "—"} icon="📦" />
-            <KPI label="Trade/dk" value={systemStats ? fmt(systemStats.trades_per_minute, 0) : "—"} icon="⚡" accent="blue" />
-            <KPI label="Çalışma Süresi" value={systemStats ? ago(systemStats.uptime_minutes) : "—"} icon="⏱" accent="green" />
-          </div>
-          <div className="grid-2">
-            <div className="card"><div className="card-header"><h3>Agent Durumları</h3></div><div className="agent-grid">{["Scout Agent", "Strategist Agent", "Ghost Simulator", "Auditor Agent", "Brain Module"].map((name, i) => (<div key={i} className="agent-card"><div className="agent-status-dot" /><div><div className="agent-name">{name}</div><div className="text-muted text-xs">Çalışıyor</div></div></div>))}</div></div>
-            <div className="card"><div className="card-header"><h3>Bağlantılar</h3></div><div className="conn-list"><div className="conn-item"><span className="conn-dot conn-ok" />Binance Spot WebSocket</div><div className="conn-item"><span className="conn-dot conn-warn" />Binance Futures (REST fallback)</div><div className="conn-item"><span className="conn-dot conn-ok" />Bybit Spot WebSocket</div><div className="conn-item"><span className="conn-dot conn-ok" />Bybit Futures WebSocket</div><div className="conn-item"><span className="conn-dot conn-ok" />PostgreSQL</div><div className="conn-item"><span className="conn-dot conn-ok" />Brain AI Module</div></div></div>
-          </div>
-
-          {/* Watchlist Yönetimi */}
-          <div className="card">
-            <div className="card-header"><h3>İzleme Listesi Yönetimi</h3><span className="badge badge-blue">{watchlist.length} aktif</span></div>
-            <div className="wl-add-form">
-              <input className="wl-input" placeholder="Sembol (örn: BTCUSDT)" value={wlSymbol} onChange={e => setWlSymbol(e.target.value)} onKeyDown={e => e.key === "Enter" && addToWatchlist()} />
-              <select className="wl-select" value={wlExchange} onChange={e => setWlExchange(e.target.value)}>
-                <option value="all">Tüm Borsalar</option>
-                <option value="binance">Binance</option>
-                <option value="bybit">Bybit</option>
-              </select>
-              <select className="wl-select" value={wlMarketType} onChange={e => setWlMarketType(e.target.value)}>
-                <option value="spot">Spot</option>
-                <option value="futures">Futures</option>
-              </select>
-              <button className="wl-add-btn" onClick={addToWatchlist}>+ Ekle</button>
-            </div>
-            {watchlist.length > 0 ? (
-              <div className="wl-list">
-                {watchlist.map(w => (
-                  <div key={w.id} className="wl-item">
-                    <span className="wl-symbol">{w.symbol}</span>
-                    <span className="badge badge-sm">{w.exchange}</span>
-                    <span className="badge badge-sm badge-blue">{w.market_type}</span>
-                    <button className="wl-remove-btn" onClick={() => removeFromWatchlist(w)}>✕</button>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="empty-state">Henüz özel izleme listesi oluşturulmadı. Config'deki varsayılan liste kullanılıyor.</div>
-            )}
-          </div>
-
-          <div className="card"><div className="card-header"><h3>İzlenen Semboller</h3></div><div className="symbol-chips">{livePrices.map(p => (<div key={p.symbol} className="symbol-chip"><span>{p.symbol}</span><span className="text-muted">{fmtUsd(p.price)}</span></div>))}</div></div>
-          <div className="card"><div className="card-header"><h3>Zaman Bilgisi</h3></div><div className="info-grid"><div><span className="text-muted">İlk Trade:</span> {systemStats?.oldest_trade ? new Date(systemStats.oldest_trade).toLocaleString() : "—"}</div><div><span className="text-muted">Son Trade:</span> {systemStats?.newest_trade ? new Date(systemStats.newest_trade).toLocaleString() : "—"}</div><div><span className="text-muted">Şu an:</span> {new Date().toLocaleString()}</div></div></div>
+          <div className="card"><div className="card-header"><h3>Simülasyonlar</h3><span className="badge">{simulations.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Yön</th><th>Giriş</th><th>Çıkış</th><th>PnL</th><th>PnL %</th><th>Durum</th></tr></thead><tbody>{simulations.slice(0, 15).map((s, i) => (<tr key={i}><td><strong>{s.symbol}</strong></td><td><span className={cls("side-badge", s.side === "long" ? "side-long" : "side-short")}>{s.side}</span></td><td>{fmtUsd(Number(s.entry_price))}</td><td>{s.exit_price ? fmtUsd(Number(s.exit_price)) : "—"}</td><td className={Number(s.pnl || 0) >= 0 ? "text-green" : "text-red"}>{s.pnl ? fmtUsd(Number(s.pnl)) : "—"}</td><td>{s.pnl_pct ? `${Number(s.pnl_pct).toFixed(2)}%` : "—"}</td><td><span className={cls("status-badge", `status-${s.status}`)}>{s.status}</span></td></tr>))}</tbody></table>{simulations.length === 0 && <div className="empty-state">Ghost simulator henüz aktif değil</div>}</div></div>
+          <div className="card"><div className="card-header"><h3>Tespit Edilen Hareketler</h3><span className="badge badge-amber">{movements.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Borsa</th><th>Tip</th><th>Değişim</th><th>Yön</th><th>Hacim</th><th>Başlangıç</th><th>Bitiş</th></tr></thead><tbody>{movements.slice(0, 12).map((m, i) => (<tr key={i}><td><strong>{m.symbol}</strong></td><td>{m.exchange}</td><td><span className="badge badge-sm">{m.market_type}</span></td><td className={Number(m.change_pct) >= 0 ? "text-green" : "text-red"}>{fmtPct(Number(m.change_pct) * 100)}</td><td>{m.direction}</td><td>{fmt(Number(m.volume), 2)}</td><td>{fmtTimeShort(m.start_time)}</td><td>{fmtTimeShort(m.end_time)}</td></tr>))}</tbody></table>{movements.length === 0 && <div className="empty-state">Henüz %2'den büyük hareket tespit edilmedi</div>}</div></div>
         </>)}
 
         {/* ═══ BRAIN ═══ */}
@@ -389,9 +501,7 @@ function App() {
             <div className="card card-center">
               <h3>Öğrenme Doğruluğu</h3>
               <ProgressRing value={brainStatus?.learning.accuracy ?? 0} size={140} stroke={12} color={brainStatus && brainStatus.learning.accuracy >= 50 ? "var(--green)" : "var(--amber)"} />
-              <div className="text-muted" style={{ marginTop: 16 }}>
-                {brainStatus ? `${brainStatus.learning.correct} doğru / ${brainStatus.learning.total} toplam` : "Veri bekleniyor..."}
-              </div>
+              <div className="text-muted" style={{ marginTop: 16 }}>{brainStatus ? `${brainStatus.learning.correct} doğru / ${brainStatus.learning.total} toplam` : "Veri bekleniyor..."}</div>
             </div>
             <div className="card">
               <div className="card-header"><h3>Sinyal Tipi Başarıları</h3></div>
@@ -403,26 +513,43 @@ function App() {
                     <td className={s.avg_pnl >= 0 ? "text-green" : "text-red"}>{s.avg_pnl?.toFixed(2)}%</td></tr>
                   ))}
                 </tbody></table></div>
-              ) : <div className="empty-state">Henüz sinyal tipi istatistiği yok. Sistem öğrenmeye devam ediyor...</div>}
+              ) : <div className="empty-state">Henüz sinyal tipi istatistiği yok</div>}
             </div>
           </div>
 
+          {/* Günlük Öğrenme Doğruluğu */}
+          {learningStats.length > 0 && (
+            <div className="card">
+              <div className="card-header"><h3>Günlük Öğrenme Trendi</h3><span className="badge badge-cyan">Son 30 Gün</span></div>
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Tarih</th><th>Toplam</th><th>Doğru</th><th>Doğruluk</th><th>Ort PnL</th></tr></thead><tbody>
+                {learningStats.map((d, i) => (
+                  <tr key={i}>
+                    <td>{d.day}</td><td>{d.total}</td><td>{d.correct}</td>
+                    <td className={d.accuracy >= 50 ? "text-green" : "text-red"}>{d.accuracy?.toFixed(1)}%</td>
+                    <td className={d.avg_pnl >= 0 ? "text-green" : "text-red"}>{d.avg_pnl?.toFixed(2)}%</td>
+                  </tr>
+                ))}
+              </tbody></table></div>
+            </div>
+          )}
+
+          {/* Brain Patterns */}
           <div className="card">
-            <div className="card-header"><h3>Son Kaydedilen Pattern'lar</h3><span className="badge">{brainStatus?.recent_patterns.length ?? 0}</span></div>
-            {brainStatus && brainStatus.recent_patterns.length > 0 ? (
-              <div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>15dk Sonuç</th><th>1s Sonuç</th><th>4s Sonuç</th><th>1g Sonuç</th><th>Kayıt</th></tr></thead><tbody>
-                {brainStatus.recent_patterns.map((p, i) => (
+            <div className="card-header"><h3>Bellek: Kayıtlı Patternlar</h3><span className="badge badge-purple">{brainPatterns.length}</span></div>
+            {brainPatterns.length > 0 ? (
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>15dk</th><th>1s</th><th>4s</th><th>1g</th><th>Kayıt</th></tr></thead><tbody>
+                {brainPatterns.map((p, i) => (
                   <tr key={i}>
                     <td><strong>{p.symbol}</strong></td>
-                    <td className={p.outcome_15m && p.outcome_15m > 0 ? "text-green" : p.outcome_15m && p.outcome_15m < 0 ? "text-red" : "text-muted"}>{p.outcome_15m != null ? `${(p.outcome_15m * 100).toFixed(2)}%` : "⏳"}</td>
-                    <td className={p.outcome_1h && p.outcome_1h > 0 ? "text-green" : p.outcome_1h && p.outcome_1h < 0 ? "text-red" : "text-muted"}>{p.outcome_1h != null ? `${(p.outcome_1h * 100).toFixed(2)}%` : "⏳"}</td>
-                    <td className={p.outcome_4h && p.outcome_4h > 0 ? "text-green" : p.outcome_4h && p.outcome_4h < 0 ? "text-red" : "text-muted"}>{p.outcome_4h != null ? `${(p.outcome_4h * 100).toFixed(2)}%` : "⏳"}</td>
-                    <td className={p.outcome_1d && p.outcome_1d > 0 ? "text-green" : p.outcome_1d && p.outcome_1d < 0 ? "text-red" : "text-muted"}>{p.outcome_1d != null ? `${(p.outcome_1d * 100).toFixed(2)}%` : "⏳"}</td>
+                    <td className={p.outcome_15m > 0 ? "text-green" : p.outcome_15m < 0 ? "text-red" : "text-muted"}>{p.outcome_15m != null ? `${(p.outcome_15m * 100).toFixed(2)}%` : "⏳"}</td>
+                    <td className={p.outcome_1h > 0 ? "text-green" : p.outcome_1h < 0 ? "text-red" : "text-muted"}>{p.outcome_1h != null ? `${(p.outcome_1h * 100).toFixed(2)}%` : "⏳"}</td>
+                    <td className={p.outcome_4h > 0 ? "text-green" : p.outcome_4h < 0 ? "text-red" : "text-muted"}>{p.outcome_4h != null ? `${(p.outcome_4h * 100).toFixed(2)}%` : "⏳"}</td>
+                    <td className={p.outcome_1d > 0 ? "text-green" : p.outcome_1d < 0 ? "text-red" : "text-muted"}>{p.outcome_1d != null ? `${(p.outcome_1d * 100).toFixed(2)}%` : "⏳"}</td>
                     <td className="text-muted">{fmtTime(p.created_at)}</td>
                   </tr>
                 ))}
               </tbody></table></div>
-            ) : <div className="empty-state">Pattern verisi birikiyor. Brain modülü geçmiş ve anlık trade verilerinden pattern oluşturuyor...</div>}
+            ) : <div className="empty-state">Pattern verisi birikiyor...</div>}
           </div>
 
           <div className="card">
@@ -446,21 +573,23 @@ function App() {
                 <div className="chat-welcome">
                   <div className="chat-welcome-icon">🤖</div>
                   <h3>QuenBot AI'a Hoşgeldiniz</h3>
-                  <p>Botlarla doğal dilde konuşabilirsiniz. Bazı örnekler:</p>
+                  <p>Botlarla doğal dilde konuşabilirsiniz. İstediğinizi yazın!</p>
                   <div className="chat-examples">
-                    <button onClick={() => { setChatInput("durum"); }} className="chat-example-btn">📊 Sistem durumu</button>
-                    <button onClick={() => { setChatInput("fiyat btc"); }} className="chat-example-btn">💰 BTC fiyatı</button>
-                    <button onClick={() => { setChatInput("sinyal"); }} className="chat-example-btn">📡 Aktif sinyaller</button>
-                    <button onClick={() => { setChatInput("performans"); }} className="chat-example-btn">📈 Bot performansı</button>
-                    <button onClick={() => { setChatInput("beyin"); }} className="chat-example-btn">🧠 AI beyin durumu</button>
-                    <button onClick={() => { setChatInput("order flow"); }} className="chat-example-btn">⚡ Order flow</button>
+                    <button onClick={() => setChatInput("BTC fiyatı ne?")} className="chat-example-btn">💰 BTC fiyatı ne?</button>
+                    <button onClick={() => setChatInput("Sistem nasıl çalışıyor?")} className="chat-example-btn">📊 Sistem nasıl?</button>
+                    <button onClick={() => setChatInput("Açık sinyal var mı?")} className="chat-example-btn">📡 Sinyaller</button>
+                    <button onClick={() => setChatInput("Ghost trader ne durumda?")} className="chat-example-btn">👻 Simülasyonlar</button>
+                    <button onClick={() => setChatInput("Beyin ne öğrendi?")} className="chat-example-btn">🧠 AI Beyin</button>
+                    <button onClick={() => setChatInput("Veri akışı sağlıklı mı?")} className="chat-example-btn">🔴 Veri akışı</button>
+                    <button onClick={() => setChatInput("Piyasada ne oluyor?")} className="chat-example-btn">📈 Piyasa durumu</button>
+                    <button onClick={() => setChatInput("Yardım")} className="chat-example-btn">❓ Yardım</button>
                   </div>
                 </div>
               )}
               {chatMessages.map(msg => (
                 <div key={msg.id} className={cls("chat-msg", msg.role === "user" ? "chat-msg-user" : "chat-msg-bot")}>
                   <div className="chat-msg-header">
-                    <span className="chat-msg-name">{msg.role === "user" ? "Sen" : "🤖 QuenBot AI"}</span>
+                    <span className="chat-msg-name">{msg.role === "user" ? "Sen" : `🤖 ${msg.agent_name || "QuenBot AI"}`}</span>
                     <span className="chat-msg-time">{fmtTime(msg.created_at)}</span>
                   </div>
                   <div className="chat-msg-body">{msg.message.split('\n').map((line, i) => <div key={i}>{line || <br />}</div>)}</div>
@@ -469,10 +598,128 @@ function App() {
               <div ref={chatEndRef} />
             </div>
             <div className="chat-input-bar">
-              <input className="chat-input" placeholder="Botlara bir mesaj yazın..." value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === "Enter" && sendChatMessage()} disabled={chatSending} />
+              <input className="chat-input" placeholder="Botlara bir mesaj yazın... (doğal dilde konuşabilirsiniz)" value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === "Enter" && sendChatMessage()} disabled={chatSending} />
               <button className="chat-send-btn" onClick={sendChatMessage} disabled={chatSending || !chatInput.trim()}>{chatSending ? "..." : "Gönder"}</button>
             </div>
           </div>
+        </>)}
+
+        {/* ═══ ADMIN ═══ */}
+        {tab === "admin" && (<>
+          <div className="tab-header"><h2>Yönetim Paneli</h2><span className="badge badge-red">Admin</span></div>
+
+          {/* DB Stats */}
+          <div className="card">
+            <div className="card-header"><h3>Veritabanı Tablo İstatistikleri</h3><span className="badge badge-blue">{tableStats.length} tablo</span></div>
+            {tableStats.length > 0 ? (
+              <div className="db-stats-grid">
+                {tableStats.map((t, i) => (
+                  <div key={i} className="db-stat-card">
+                    <div className="db-stat-name">{t.table_name}</div>
+                    <div className="db-stat-value">{fmt(t.row_count, 0)}</div>
+                  </div>
+                ))}
+              </div>
+            ) : <div className="empty-state">Tablo istatistikleri yükleniyor...</div>}
+          </div>
+
+          {/* Agent Config */}
+          <div className="card">
+            <div className="card-header"><h3>Agent Konfigürasyonları</h3><span className="badge badge-cyan">{agentConfigs.length}</span></div>
+            {agentConfigs.length > 0 ? (
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Agent</th><th>Anahtar</th><th>Değer</th><th>Güncelleme</th></tr></thead><tbody>
+                {agentConfigs.map((c, i) => (
+                  <tr key={i}>
+                    <td><strong>{c.agent_name}</strong></td>
+                    <td>{c.config_key}</td>
+                    <td className="text-mono">{c.config_value}</td>
+                    <td className="text-muted">{c.updated_at ? fmtTime(c.updated_at) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody></table></div>
+            ) : <div className="empty-state">Henüz agent konfigürasyonu yok. Sistem varsayılan değerleri kullanıyor.</div>}
+          </div>
+
+          {/* Audit Records */}
+          <div className="card">
+            <div className="card-header"><h3>Denetim Kayıtları</h3><span className="badge badge-amber">{auditRecords.length}</span></div>
+            {auditRecords.length > 0 ? (
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Agent</th><th>Aksiyon</th><th>Sembol</th><th>Detay</th><th>Zaman</th></tr></thead><tbody>
+                {auditRecords.map((r, i) => (
+                  <tr key={i}>
+                    <td><strong>{r.agent_name}</strong></td>
+                    <td><span className="badge badge-sm badge-blue">{r.action_type}</span></td>
+                    <td>{r.symbol || "—"}</td>
+                    <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>{r.details || "—"}</td>
+                    <td className="text-muted">{r.created_at ? fmtTime(r.created_at) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody></table></div>
+            ) : <div className="empty-state">Henüz denetim kaydı yok</div>}
+          </div>
+
+          {/* Failure Analysis */}
+          <div className="card">
+            <div className="card-header"><h3>Hata & Başarısızlık Analizi</h3><span className="badge badge-red">{failureAnalysis.length}</span></div>
+            {failureAnalysis.length > 0 ? (
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Agent</th><th>Sembol</th><th>Hata Tipi</th><th>Açıklama</th><th>Zaman</th></tr></thead><tbody>
+                {failureAnalysis.map((f, i) => (
+                  <tr key={i}>
+                    <td><strong>{f.agent_name}</strong></td>
+                    <td>{f.symbol || "—"}</td>
+                    <td><span className="badge badge-sm badge-red">{f.failure_type}</span></td>
+                    <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>{f.description || "—"}</td>
+                    <td className="text-muted">{f.created_at ? fmtTime(f.created_at) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody></table></div>
+            ) : <div className="empty-state">Henüz hata kaydı yok - bu iyi bir işaret!</div>}
+          </div>
+        </>)}
+
+        {/* ═══ SYSTEM ═══ */}
+        {tab === "system" && (<>
+          <div className="tab-header"><h2>Sistem Durumu</h2></div>
+          <div className="kpi-strip">
+            <KPI label="Veritabanı" value={systemStats ? `${systemStats.db_size_mb} MB` : "—"} icon="💾" />
+            <KPI label="Toplam Trade" value={systemStats ? fmt(systemStats.total_trades, 0) : "—"} icon="📦" />
+            <KPI label="Trade/dk" value={systemStats ? fmt(systemStats.trades_per_minute, 0) : "—"} icon="⚡" accent="blue" />
+            <KPI label="Çalışma Süresi" value={systemStats ? ago(systemStats.uptime_minutes) : "—"} icon="⏱" accent="green" />
+          </div>
+          <div className="grid-2">
+            <div className="card"><div className="card-header"><h3>Agent Durumları</h3></div><div className="agent-grid">{["Scout Agent", "Strategist Agent", "Ghost Simulator", "Auditor Agent", "Brain Module", "Chat Engine"].map((name, i) => (<div key={i} className="agent-card"><div className="agent-status-dot" /><div><div className="agent-name">{name}</div><div className="text-muted text-xs">Çalışıyor</div></div></div>))}</div></div>
+            <div className="card"><div className="card-header"><h3>Bağlantılar</h3></div><div className="conn-list"><div className="conn-item"><span className="conn-dot conn-ok" />Binance Spot WebSocket</div><div className="conn-item"><span className="conn-dot conn-warn" />Binance Futures (REST fallback)</div><div className="conn-item"><span className="conn-dot conn-ok" />Bybit Spot WebSocket</div><div className="conn-item"><span className="conn-dot conn-ok" />Bybit Futures WebSocket</div><div className="conn-item"><span className="conn-dot conn-ok" />PostgreSQL</div><div className="conn-item"><span className="conn-dot conn-ok" />Brain AI Module</div><div className="conn-item"><span className="conn-dot conn-ok" />Chat Engine v2</div></div></div>
+          </div>
+
+          {/* Watchlist Yönetimi */}
+          <div className="card">
+            <div className="card-header"><h3>İzleme Listesi Yönetimi</h3><span className="badge badge-blue">{watchlist.length} aktif</span></div>
+            <div className="wl-add-form">
+              <input className="wl-input" placeholder="Sembol (örn: BTCUSDT)" value={wlSymbol} onChange={e => setWlSymbol(e.target.value)} onKeyDown={e => e.key === "Enter" && addToWatchlist()} />
+              <select className="wl-select" value={wlExchange} onChange={e => setWlExchange(e.target.value)}>
+                <option value="all">Tüm Borsalar</option><option value="binance">Binance</option><option value="bybit">Bybit</option>
+              </select>
+              <select className="wl-select" value={wlMarketType} onChange={e => setWlMarketType(e.target.value)}>
+                <option value="spot">Spot</option><option value="futures">Futures</option>
+              </select>
+              <button className="wl-add-btn" onClick={addToWatchlist}>+ Ekle</button>
+            </div>
+            {watchlist.length > 0 ? (
+              <div className="wl-list">
+                {watchlist.map(w => (
+                  <div key={w.id} className="wl-item">
+                    <span className="wl-symbol">{w.symbol}</span>
+                    <span className="badge badge-sm">{w.exchange}</span>
+                    <span className="badge badge-sm badge-blue">{w.market_type}</span>
+                    <button className="wl-remove-btn" onClick={() => removeFromWatchlist(w)}>✕</button>
+                  </div>
+                ))}
+              </div>
+            ) : <div className="empty-state">Henüz özel izleme listesi oluşturulmadı</div>}
+          </div>
+
+          <div className="card"><div className="card-header"><h3>İzlenen Semboller</h3></div><div className="symbol-chips">{livePrices.map(p => (<div key={p.symbol} className="symbol-chip"><span>{p.symbol}</span><span className="text-muted">{fmtUsd(p.price)}</span></div>))}</div></div>
+          <div className="card"><div className="card-header"><h3>Zaman Bilgisi</h3></div><div className="info-grid"><div><span className="text-muted">İlk Trade:</span> {systemStats?.oldest_trade ? new Date(systemStats.oldest_trade).toLocaleString() : "—"}</div><div><span className="text-muted">Son Trade:</span> {systemStats?.newest_trade ? new Date(systemStats.newest_trade).toLocaleString() : "—"}</div><div><span className="text-muted">Şu an:</span> {new Date().toLocaleString()}</div></div></div>
         </>)}
       </main>
     </div>

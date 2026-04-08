@@ -8,7 +8,8 @@ from dotenv import load_dotenv
 
 from config import Config
 from database import Database
-from brain import BrainModule, ChatHandler
+from brain import BrainModule
+from chat_engine import ChatEngine
 from scout_agent import ScoutAgent
 from strategist_agent import StrategistAgent
 from ghost_simulator_agent import GhostSimulatorAgent
@@ -31,7 +32,7 @@ class AgentOrchestrator:
     def __init__(self):
         self.db = Database()
         self.brain = None
-        self.chat_handler = None
+        self.chat_engine = None
         self.scout = None
         self.strategist = None
         self.ghost_simulator = None
@@ -53,9 +54,6 @@ class AgentOrchestrator:
         await self.brain.initialize()
         logger.info(f"🧠 Brain initialized ({self.brain.get_brain_status()['total_patterns']} patterns)")
 
-        # Chat handler
-        self.chat_handler = ChatHandler(self.db, self.brain)
-
         # Initialize agents with brain connection
         self.scout = ScoutAgent(self.db, brain=self.brain)
         self.strategist = StrategistAgent(self.db, brain=self.brain)
@@ -67,11 +65,12 @@ class AgentOrchestrator:
         await self.ghost_simulator.initialize()
         await self.auditor.initialize()
 
-        # Chat handler'a agent'ları kaydet
-        self.chat_handler.register_agent('Scout', self.scout)
-        self.chat_handler.register_agent('Strategist', self.strategist)
-        self.chat_handler.register_agent('Ghost', self.ghost_simulator)
-        self.chat_handler.register_agent('Auditor', self.auditor)
+        # Chat engine - doğal dil AI yanıt motoru
+        self.chat_engine = ChatEngine(self.db, self.brain)
+        self.chat_engine.register_agent('Scout', self.scout)
+        self.chat_engine.register_agent('Strategist', self.strategist)
+        self.chat_engine.register_agent('Ghost', self.ghost_simulator)
+        self.chat_engine.register_agent('Auditor', self.auditor)
 
         logger.info("✓ All agents initialized with Brain connection")
         logger.info(f"✓ Monitoring {len(Config.WATCHLIST)} symbols: {Config.WATCHLIST}")
@@ -116,19 +115,19 @@ class AgentOrchestrator:
             logger.error(f"Error during shutdown: {e}")
 
     async def _chat_processor(self):
-        """Chat mesajlarını periyodik kontrol et ve cevapla"""
+        """Chat mesajlarını hızlı kontrol et ve anında cevapla"""
+        last_processed_id = 0
         while self.running:
             try:
-                await asyncio.sleep(3)
-                # Son işlenmemiş kullanıcı mesajlarını kontrol et
-                messages = await self.db.get_chat_messages(limit=5)
+                await asyncio.sleep(1)  # 1 saniyede bir kontrol (hızlı yanıt)
+                messages = await self.db.get_chat_messages(limit=10)
                 for msg in messages:
-                    if msg['role'] == 'user' and not any(
-                        m['role'] == 'assistant' and m['created_at'] > msg['created_at']
-                        for m in messages
-                    ):
-                        response = await self.chat_handler.process_message(msg['message'])
+                    if msg['role'] == 'user' and msg['id'] > last_processed_id:
+                        # Hemen yanıtla - async ve hızlı
+                        response = await self.chat_engine.respond(msg['message'])
                         await self.db.insert_chat_message('assistant', response, 'QuenBot AI')
+                        last_processed_id = msg['id']
+                        logger.info(f"💬 Chat: '{msg['message'][:50]}' → answered")
             except Exception as e:
                 logger.debug(f"Chat processor: {e}")
 

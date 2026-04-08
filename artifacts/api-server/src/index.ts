@@ -464,6 +464,293 @@ app.get("/api/brain/learning-log", async (req, res) => {
   }
 });
 
+// ─── Admin Auth ───
+const ADMIN_PIN = process.env.ADMIN_PIN || "1453";
+
+app.post("/api/admin/login", (req, res) => {
+  const { pin } = req.body;
+  if (pin === ADMIN_PIN) {
+    res.json({ success: true, token: Buffer.from(`admin:${Date.now()}`).toString("base64") });
+  } else {
+    res.status(401).json({ success: false, error: "Yanlış PIN" });
+  }
+});
+
+// ─── Live Data Stream - Canlı Veri Akışı Doğrulama ───
+
+app.get("/api/live/data-stream", async (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 30);
+    // Son N trade'i anlık çek
+    const latestTrades = await sql`
+      SELECT id, exchange, market_type, symbol, price::double precision AS price,
+             quantity::double precision AS quantity, side, timestamp, trade_id
+      FROM trades ORDER BY timestamp DESC LIMIT ${limit}
+    `;
+    // Her exchange/market_type için son trade zamanı
+    const freshness = await sql`
+      SELECT exchange, market_type,
+             MAX(timestamp) AS last_trade_time,
+             COUNT(*)::int AS trade_count_1m
+      FROM trades
+      WHERE timestamp >= NOW() - INTERVAL '1 minute'
+      GROUP BY exchange, market_type
+      ORDER BY last_trade_time DESC
+    `;
+    // Son 5 dakikada exchange/symbol bazli trade sayilari
+    const breakdown = await sql`
+      SELECT exchange, symbol, market_type,
+             COUNT(*)::int AS count,
+             MAX(price::double precision) AS max_price,
+             MIN(price::double precision) AS min_price,
+             MAX(timestamp) AS last_time
+      FROM trades
+      WHERE timestamp >= NOW() - INTERVAL '5 minutes'
+      GROUP BY exchange, symbol, market_type
+      ORDER BY count DESC
+    `;
+    res.json({ latest_trades: latestTrades, freshness, breakdown });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Admin Config Yönetimi ───
+
+app.get("/api/admin/config", async (req, res) => {
+  try {
+    const configs = await sql`SELECT * FROM agent_config ORDER BY agent_name, config_key`;
+    res.json(configs);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/admin/config", async (req, res) => {
+  try {
+    const { agent_name, config_key, config_value } = req.body;
+    if (!agent_name || !config_key) {
+      return res.status(400).json({ error: "agent_name and config_key required" });
+    }
+    const safeAgent = String(agent_name).slice(0, 50);
+    const safeKey = String(config_key).slice(0, 100);
+    await sql`
+      INSERT INTO agent_config (agent_name, config_key, config_value, updated_at)
+      VALUES (${safeAgent}, ${safeKey}, ${JSON.stringify(config_value)}, NOW())
+      ON CONFLICT (agent_name, config_key)
+      DO UPDATE SET config_value = ${JSON.stringify(config_value)}, updated_at = NOW()
+    `;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Audit Log ───
+
+app.get("/api/admin/audit-records", async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT id, timestamp, total_simulations, successful_simulations, failed_simulations,
+             success_rate::double precision AS success_rate,
+             avg_win_pct::double precision AS avg_win_pct,
+             avg_loss_pct::double precision AS avg_loss_pct,
+             metadata, created_at
+      FROM audit_records ORDER BY timestamp DESC LIMIT 50
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/admin/failure-analysis", async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT id, timestamp, signal_type, failure_count,
+             avg_loss_pct::double precision AS avg_loss_pct,
+             recommendation, metadata, created_at
+      FROM failure_analysis ORDER BY timestamp DESC LIMIT 50
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── DB Table Stats ───
+
+app.get("/api/admin/table-stats", async (req, res) => {
+  try {
+    const tables = ['trades', 'price_movements', 'signals', 'simulations', 'pattern_records',
+                    'brain_learning_log', 'chat_messages', 'audit_records', 'failure_analysis',
+                    'user_watchlist', 'watchlist', 'blacklist_patterns', 'agent_config', 'audit_reports'];
+    const stats = [];
+    for (const table of tables) {
+      try {
+        const [row] = await sql.unsafe(`SELECT COUNT(*)::int AS count FROM ${table}`);
+        stats.push({ table, count: row.count });
+      } catch {
+        stats.push({ table, count: -1 });
+      }
+    }
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Trade History by Symbol (paginated) ───
+
+app.get("/api/trades/history/:symbol", async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(100, Number(req.query.limit || 50));
+    const offset = (page - 1) * limit;
+    const [total] = await sql`SELECT COUNT(*)::int AS count FROM trades WHERE symbol = ${symbol}`;
+    const rows = await sql`
+      SELECT id, exchange, market_type, symbol, price::double precision AS price,
+             quantity::double precision AS quantity, side, timestamp
+      FROM trades WHERE symbol = ${symbol}
+      ORDER BY timestamp DESC LIMIT ${limit} OFFSET ${offset}
+    `;
+    res.json({ data: rows, total: total.count, page, pages: Math.ceil(total.count / limit) });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Signal History (all, with filter) ───
+
+app.get("/api/signals/history", async (req, res) => {
+  try {
+    const status = req.query.status as string | undefined;
+    const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
+    const limit = Math.min(200, Number(req.query.limit || 100));
+    let rows;
+    if (status && symbol) {
+      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price FROM signals WHERE status = ${status} AND symbol = ${symbol} ORDER BY timestamp DESC LIMIT ${limit}`;
+    } else if (status) {
+      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price FROM signals WHERE status = ${status} ORDER BY timestamp DESC LIMIT ${limit}`;
+    } else if (symbol) {
+      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price FROM signals WHERE symbol = ${symbol} ORDER BY timestamp DESC LIMIT ${limit}`;
+    } else {
+      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price FROM signals ORDER BY timestamp DESC LIMIT ${limit}`;
+    }
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Simulation Detail ───
+
+app.get("/api/simulations/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const [sim] = await sql`
+      SELECT s.*, sig.signal_type, sig.confidence::double precision AS signal_confidence,
+             sig.metadata AS signal_metadata
+      FROM simulations s LEFT JOIN signals sig ON s.signal_id = sig.id
+      WHERE s.id = ${id}
+    `;
+    if (!sim) return res.status(404).json({ error: "Not found" });
+    res.json(sim);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── PnL Timeline ───
+
+app.get("/api/analytics/pnl-timeline", async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT id, symbol, side,
+             entry_price::double precision AS entry_price,
+             exit_price::double precision AS exit_price,
+             pnl::double precision AS pnl,
+             pnl_pct::double precision AS pnl_pct,
+             entry_time, exit_time, status
+      FROM simulations
+      WHERE status = 'closed'
+      ORDER BY exit_time ASC
+    `;
+    // Cumulative PnL
+    let cumulative = 0;
+    const timeline = rows.map((r: any) => {
+      cumulative += r.pnl || 0;
+      return { ...r, cumulative_pnl: cumulative };
+    });
+    res.json(timeline);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Brain Memory Access ───
+
+app.get("/api/brain/patterns", async (req, res) => {
+  try {
+    const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
+    const limit = Math.min(100, Number(req.query.limit || 30));
+    let rows;
+    if (symbol) {
+      rows = await sql`
+        SELECT id, symbol, exchange, market_type, snapshot_data,
+               outcome_15m::double precision, outcome_1h::double precision,
+               outcome_4h::double precision, outcome_1d::double precision, created_at
+        FROM pattern_records WHERE symbol = ${symbol} ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT id, symbol, exchange, market_type, snapshot_data,
+               outcome_15m::double precision, outcome_1h::double precision,
+               outcome_4h::double precision, outcome_1d::double precision, created_at
+        FROM pattern_records ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/brain/learning-stats", async (req, res) => {
+  try {
+    const [total] = await sql`SELECT COUNT(*)::int AS count FROM brain_learning_log`;
+    const [correct] = await sql`SELECT COUNT(*)::int AS count FROM brain_learning_log WHERE was_correct = TRUE`;
+    const [avgPnl] = await sql`SELECT COALESCE(AVG(pnl_pct), 0)::double precision AS val FROM brain_learning_log`;
+    // Per day accuracy
+    const dailyAccuracy = await sql`
+      SELECT date_trunc('day', created_at) AS day,
+             COUNT(*)::int AS total,
+             COUNT(CASE WHEN was_correct THEN 1 END)::int AS correct
+      FROM brain_learning_log
+      GROUP BY day ORDER BY day DESC LIMIT 14
+    `;
+    // Per signal type
+    const byType = await sql`
+      SELECT signal_type,
+             COUNT(*)::int AS total,
+             COUNT(CASE WHEN was_correct THEN 1 END)::int AS correct,
+             COALESCE(AVG(pnl_pct), 0)::double precision AS avg_pnl,
+             SUM(pnl_pct)::double precision AS total_pnl
+      FROM brain_learning_log GROUP BY signal_type ORDER BY total DESC
+    `;
+    res.json({
+      total: total.count, correct: correct.count,
+      accuracy: total.count > 0 ? (correct.count / total.count * 100) : 0,
+      avg_pnl: avgPnl.val,
+      daily_accuracy: dailyAccuracy,
+      by_type: byType,
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 app.listen(port, async () => {
   await connectDatabase();
   await createTables();
