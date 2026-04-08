@@ -103,7 +103,7 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
     try {
       const r = await fetch("/api/admin/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin: pin.trim() }) });
       const data = await r.json();
-      if (data.ok) { sessionStorage.setItem("qb_auth", "1"); onLogin(); }
+      if (data.success) { sessionStorage.setItem("qb_auth", "1"); onLogin(); }
       else setError(data.error || "Geçersiz PIN");
     } catch { setError("Sunucuya bağlanılamadı"); }
     finally { setLoading(false); }
