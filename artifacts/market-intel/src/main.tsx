@@ -125,7 +125,7 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
 
 /* ═══════════════════ MAIN APP ═══════════════════ */
 function App() {
-  const [authed, setAuthed] = useState(sessionStorage.getItem("qb_auth") === "1");
+  const [authed, setAuthed] = useState(true);
   const [tab, setTab] = useState<Tab>("overview");
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [livePrices, setLivePrices] = useState<LivePrice[]>([]);
@@ -165,7 +165,7 @@ function App() {
   const [brainPatterns, setBrainPatterns] = useState<RecordRow[]>([]);
   const [learningStats, setLearningStats] = useState<RecordRow[]>([]);
 
-  if (!authed) return <LoginScreen onLogin={() => setAuthed(true)} />;
+  // Login devre dışı
 
   const fetchAll = useCallback(async () => {
     try {
