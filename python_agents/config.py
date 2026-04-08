@@ -31,7 +31,7 @@ class Config:
     MARKET_TYPES = ["spot", "futures"]
 
     # Agent thresholds
-    PRICE_MOVEMENT_THRESHOLD = 0.02  # 2%
+    PRICE_MOVEMENT_THRESHOLD = 0.01  # 1%
     SIMILARITY_THRESHOLD = 0.4
     GHOST_SIMILARITY_THRESHOLD = 0.5
     AUDIT_LEARNING_RATE = 0.1

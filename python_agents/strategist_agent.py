@@ -51,7 +51,7 @@ class StrategistAgent:
                 await self._analyze_strategies()
                 await self._multi_timeframe_analysis()
                 await self._update_pattern_outcomes()
-                await asyncio.sleep(120)  # Her 2 dakikada bir
+                await asyncio.sleep(60)  # Her 1 dakikada bir
 
         except Exception as e:
             logger.error(f"Strategist agent error: {e}")
@@ -94,9 +94,13 @@ class StrategistAgent:
                                 continue
 
                             # Mode-aware similarity threshold
-                            brain_sim_threshold = sim_threshold if self.risk_manager else Config.SIMILARITY_THRESHOLD
+                            if self.risk_manager:
+                                _mode_p = self.risk_manager.get_mode_params()
+                                brain_sim_threshold = _mode_p['similarity_threshold']
+                            else:
+                                brain_sim_threshold = Config.SIMILARITY_THRESHOLD
                             matches = self.brain.find_matching_patterns(
-                                snapshot, min_similarity=max(brain_sim_threshold, 0.2))
+                                snapshot, min_similarity=max(brain_sim_threshold, 0.15))
 
                             if matches:
                                 prediction = self.brain.predict_direction(matches)
@@ -214,7 +218,7 @@ class StrategistAgent:
                 for symbol in watchlist:
                     try:
                         trades = await self.db.get_recent_trades(symbol, limit=250, market_type=market_type)
-                        if len(trades) < 30:
+                        if len(trades) < 10:
                             continue
 
                         prices = np.array([float(row['price']) for row in reversed(trades)], dtype=np.float64)
@@ -264,6 +268,11 @@ class StrategistAgent:
                         trend_summary = ind.get('trend_summary', {})
                         atr_ratio = ind.get('atr_ratio', 0.02)
 
+                        # Debug log for analysis
+                        mode = self.state_tracker.get_mode() if self.state_tracker else 'PRODUCTION'
+                        logger.info(f"\U0001f50d Analysis [{market_type}] {symbol}: trades={len(trades)} "
+                                     f"score={score:.4f} profit={mean_profit:.4f} sim={best_similarity:.2f} mode={mode}")
+
                         if best_similarity >= sim_threshold and score > 0 and mean_profit > min_profit:
                             signal_type = f'evolutionary_similarity_{direction}'
                             signal_payload = {
@@ -297,7 +306,7 @@ class StrategistAgent:
                             )
 
                         # Momentum-based signal: evolutionary algo sonuç buldu
-                        elif score > 0.15 and mean_profit > min_profit and best_similarity < sim_threshold:
+                        elif score > 0.05 and mean_profit > min_profit * 0.5:
                             momentum_conf = min(max(score * 0.6, 0.3), 0.85)
                             signal_type = f'momentum_{direction}'
                             signal_payload = {
@@ -331,8 +340,8 @@ class StrategistAgent:
 
                             # RSI + trend alignment → sinyal
                             rsi_val = ind.get('rsi')
-                            if (abs(price_change_pct) > 0.003 and trend_strength > 0.3 and
-                                    rsi_val is not None and 25 < rsi_val < 75):
+                            if (abs(price_change_pct) > 0.001 and trend_strength > 0.15 and
+                                    rsi_val is not None and 20 < rsi_val < 80):
                                 pa_direction = 'long' if price_change_pct > 0 and trend_dir == 'bullish' else (
                                     'short' if price_change_pct < 0 and trend_dir == 'bearish' else None
                                 )

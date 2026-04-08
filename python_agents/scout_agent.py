@@ -163,15 +163,16 @@ class ScoutAgent:
                 await asyncio.sleep(fetch_interval)
                 
                 # Fetch from both Binance and Bybit for both spot and futures
+                active_symbols = self.get_watchlist()
                 tasks = []
-                for symbol in Config.WATCHLIST:
+                for symbol in active_symbols:
                     tasks.append(self._fetch_binance_rest('spot', symbol))
                     tasks.append(self._fetch_binance_rest('futures', symbol))
                     tasks.append(self._fetch_bybit_rest('spot', symbol))
                     tasks.append(self._fetch_bybit_rest('futures', symbol))
                 
                 await asyncio.gather(*tasks, return_exceptions=True)
-                logger.info(f"REST API fallback fetch completed for {len(self.get_watchlist())} symbols")
+                logger.info(f"REST API fallback fetch completed for {len(active_symbols)} symbols ({self.trade_counter} total trades)")
                 
             except Exception as e:
                 logger.error(f"REST fallback fetcher error: {e}")
@@ -451,11 +452,63 @@ class ScoutAgent:
         except Exception as e:
             return {"healthy": False, "error": str(e)}
 
+    async def add_symbol_live(self, symbol: str):
+        """Sembolü anında takip listesine ekle ve verilerini çek"""
+        symbol = symbol.upper()
+        if symbol not in self._active_watchlist:
+            self._active_watchlist.append(symbol)
+            self.price_cache[symbol] = 0.0
+
+        # DB'ye kaydet
+        try:
+            await self.db.add_user_watchlist(symbol, 'all', 'spot')
+            await self.db.add_user_watchlist(symbol, 'all', 'futures')
+        except Exception as e:
+            logger.debug(f"Watchlist DB save: {e}")
+
+        # Anında REST API'den veri çek
+        logger.info(f"🆕 Fetching data for new symbol: {symbol}")
+        for market_type in ['spot', 'futures']:
+            await self._fetch_binance_rest(market_type, symbol)
+            await self._fetch_bybit_rest(market_type, symbol)
+
+        logger.info(f"🆕 Live tracking started: {symbol}")
+
+        # WebSocket bağlantılarını kapat → yeni sembolle yeniden bağlanır
+        await self._reconnect_websockets()
+
+    async def _reconnect_websockets(self):
+        """WebSocket bağlantılarını kapat, otomatik yeniden bağlanır"""
+        for conn_name, conn in list(self.connections.items()):
+            try:
+                if conn and not conn.closed:
+                    await conn.close()
+                    logger.info(f"🔄 Closed {conn_name} for reconnection")
+            except Exception:
+                pass
+        self.connections.clear()
+
     async def _watchlist_refresher(self):
         """Watchlist'i periyodik olarak DB'den güncelle"""
         while self.running:
             try:
-                await asyncio.sleep(120)  # 2 dakikada bir
+                await asyncio.sleep(15)  # 15 saniyede bir kontrol
+                old_watchlist = set(self._active_watchlist)
                 await self._refresh_watchlist()
+                new_watchlist = set(self._active_watchlist)
+
+                # Yeni semboller eklendiyse
+                added_symbols = new_watchlist - old_watchlist
+                if added_symbols:
+                    logger.info(f"🔄 New symbols detected: {added_symbols}")
+                    # Yeni semboller için anında REST fetch
+                    for symbol in added_symbols:
+                        self.price_cache[symbol] = 0.0
+                        for market_type in ['spot', 'futures']:
+                            await self._fetch_binance_rest(market_type, symbol)
+                            await self._fetch_bybit_rest(market_type, symbol)
+
+                    # WebSocket yeniden bağlan
+                    await self._reconnect_websockets()
             except Exception as e:
                 logger.debug(f"Watchlist refresh error: {e}")

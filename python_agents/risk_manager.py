@@ -157,7 +157,7 @@ class RiskManager:
                 'take_profit_pct': 0.01,
                 'stop_loss_pct': 0.005,
                 'similarity_threshold': 0.0,
-                'min_mean_profit': 0.002,
+                'min_mean_profit': 0.001,
             },
             'LEARNING': {
                 'take_profit_pct': 0.03,

@@ -381,10 +381,17 @@ class ChatEngine:
             sym = add_match.group(1).upper()
             if not sym.endswith("USDT"):
                 sym += "USDT"
-            result = await self.db.add_user_watchlist(sym)
-            if result:
-                return f"✅ **{sym}** izleme listesine eklendi. Scout agent yakında veri çekmeye başlayacak."
-            return f"⚠ {sym} eklenemedi (zaten var veya hata)."
+            # Scout agent üzerinden anında takip başlat
+            scout = self.agents.get('Scout')
+            if scout and hasattr(scout, 'add_symbol_live'):
+                await scout.add_symbol_live(sym)
+                return (f"✅ **{sym}** izleme listesine eklendi ve anında veri çekimi başlatıldı!\n"
+                        f"📊 Scout agent canlı olarak takip ediyor.")
+            else:
+                result = await self.db.add_user_watchlist(sym)
+                if result:
+                    return f"✅ **{sym}** izleme listesine eklendi. Scout agent yakında veri çekmeye başlayacak."
+                return f"⚠ {sym} eklenemedi (zaten var veya hata)."
 
         if remove_match:
             sym = remove_match.group(1).upper()
