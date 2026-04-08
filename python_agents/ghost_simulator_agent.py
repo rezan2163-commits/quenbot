@@ -13,9 +13,11 @@ MIN_POTENTIAL_RETURN = 0.02  # %2
 
 
 class GhostSimulatorAgent:
-    def __init__(self, db: Database, brain=None):
+    def __init__(self, db: Database, brain=None, state_tracker=None, risk_manager=None):
         self.db = db
         self.brain = brain
+        self.state_tracker = state_tracker
+        self.risk_manager = risk_manager
         self.running = False
         self.last_activity = None
         self.active_simulations: Dict[int, Dict[str, Any]] = {}
@@ -64,6 +66,14 @@ class GhostSimulatorAgent:
             pending_signals = await self.db.get_pending_signals()
             for signal in pending_signals:
                 if signal['id'] not in [s.get('signal_id') for s in self.active_simulations.values()]:
+                    # RiskManager gate check
+                    if self.risk_manager:
+                        approved, reason = self.risk_manager.check_signal(signal)
+                        if not approved:
+                            await self.db.update_signal_status(signal['id'], f'risk_rejected')
+                            logger.info(f"🛡 Risk rejected {signal['symbol']}: {reason}")
+                            continue
+
                     # Min potansiyel getiri kontrolü
                     metadata = signal.get('metadata', {})
                     if isinstance(metadata, str):
@@ -89,7 +99,6 @@ class GhostSimulatorAgent:
     async def _create_simulation(self, signal: Dict[str, Any]):
         try:
             config = Config.get_agent_config('ghost_simulator')
-            position_size = min(config['max_position_size'], 1000)
             entry_price = float(signal['price'])
             metadata = signal.get('metadata', {})
             if isinstance(metadata, str):
@@ -101,14 +110,28 @@ class GhostSimulatorAgent:
                 else 'short'
             )
 
+            # Dynamic TP/SL from RiskManager mode params
+            if self.risk_manager:
+                mode_params = self.risk_manager.get_mode_params()
+                tp_pct = mode_params['take_profit_pct']
+                sl_pct = mode_params['stop_loss_pct']
+                position_size = self.risk_manager.calculate_position_size(
+                    confidence=float(signal.get('confidence', 0.5)),
+                    atr_ratio=metadata.get('atr_ratio', 0.02),
+                )
+            else:
+                tp_pct = Config.GHOST_TAKE_PROFIT_PCT
+                sl_pct = Config.GHOST_STOP_LOSS_PCT
+                position_size = min(config['max_position_size'], 1000)
+
             if direction == 'long':
                 side = 'long'
-                stop_loss = entry_price * (1 - Config.GHOST_STOP_LOSS_PCT)
-                take_profit = entry_price * (1 + Config.GHOST_TAKE_PROFIT_PCT)
+                stop_loss = entry_price * (1 - sl_pct)
+                take_profit = entry_price * (1 + tp_pct)
             else:
                 side = 'short'
-                stop_loss = entry_price * (1 + Config.GHOST_STOP_LOSS_PCT)
-                take_profit = entry_price * (1 - Config.GHOST_TAKE_PROFIT_PCT)
+                stop_loss = entry_price * (1 + sl_pct)
+                take_profit = entry_price * (1 - tp_pct)
 
             simulation_data = {
                 'signal_id': signal['id'],
@@ -133,6 +156,11 @@ class GhostSimulatorAgent:
             sim_id = await self.db.insert_simulation(simulation_data)
             self.active_simulations[sim_id] = {**simulation_data, 'id': sim_id}
             await self.db.update_signal_status(signal['id'], 'processed')
+
+            # StateTracker'a aktif sembol ekle
+            if self.state_tracker:
+                self.state_tracker.add_active_symbol(signal['symbol'])
+
             logger.info(f"👻 Created simulation {sim_id}: {side} {signal['symbol']} @ ${entry_price:,.2f} "
                          f"(TP: ${take_profit:,.2f} SL: ${stop_loss:,.2f})")
 
@@ -221,6 +249,16 @@ class GhostSimulatorAgent:
             was_correct = pnl > 0
             if was_correct:
                 self.total_wins += 1
+
+            # StateTracker'a trade kaydet
+            if self.state_tracker:
+                await self.state_tracker.record_trade(pnl_pct, was_correct, symbol,
+                                                       sim_data.get('metadata', {}).get('signal_type', ''))
+                self.state_tracker.remove_active_symbol(symbol)
+
+            # RiskManager cooldown
+            if self.risk_manager and not was_correct:
+                self.risk_manager.record_loss()
 
             win_emoji = "✅" if was_correct else "❌"
             logger.info(f"👻 {win_emoji} Closed sim {sim_id}: {reason} | "

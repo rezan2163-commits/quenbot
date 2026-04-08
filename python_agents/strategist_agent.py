@@ -7,6 +7,7 @@ import numpy as np
 
 from config import Config
 from database import Database
+from indicators import compute_all_indicators
 from strategy import (
     normalize_prices,
     evolutionary_algorithm,
@@ -27,9 +28,11 @@ TIMEFRAME_WINDOWS = {
 
 
 class StrategistAgent:
-    def __init__(self, db: Database, brain=None):
+    def __init__(self, db: Database, brain=None, state_tracker=None, risk_manager=None):
         self.db = db
         self.brain = brain
+        self.state_tracker = state_tracker
+        self.risk_manager = risk_manager
         self.running = False
         self.last_activity = None
         self.feature_weights = Config.get_agent_config('strategist')['feature_weights']
@@ -243,6 +246,11 @@ class StrategistAgent:
                         direction = 'long' if last_price > first_price else 'short'
 
                         if best_similarity >= Config.SIMILARITY_THRESHOLD and score > 0 and mean_profit > Config.STRATEGY_MIN_MEAN_PROFIT:
+                            # Technical indicators enrichment
+                            ind = compute_all_indicators(prices)
+                            trend = ind.get('trend_summary', {})
+                            atr_ratio = ind.get('atr_ratio', 0.02)
+
                             signal_type = f'evolutionary_similarity_{direction}'
                             signal_payload = {
                                 'market_type': market_type,
@@ -261,7 +269,11 @@ class StrategistAgent:
                                     'lower_threshold': float(result['params'][1]),
                                     'history_count': len(historical_vectors),
                                     'sample_count': len(prices),
-                                    'market_type': market_type
+                                    'market_type': market_type,
+                                    'rsi': ind.get('rsi'),
+                                    'macd': ind.get('macd', {}).get('histogram') if ind.get('macd') else None,
+                                    'trend': trend.get('trend'),
+                                    'atr_ratio': atr_ratio,
                                 }
                             }
                             await self.db.insert_signal(signal_payload)

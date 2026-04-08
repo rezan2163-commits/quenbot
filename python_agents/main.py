@@ -14,6 +14,9 @@ from scout_agent import ScoutAgent
 from strategist_agent import StrategistAgent
 from ghost_simulator_agent import GhostSimulatorAgent
 from auditor_agent import AuditorAgent
+from state_tracker import StateTracker
+from risk_manager import RiskManager
+from rca_engine import RCAEngine
 
 # Setup logging
 LOG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,6 +41,9 @@ class AgentOrchestrator:
         self.strategist = None
         self.ghost_simulator = None
         self.auditor = None
+        self.state_tracker = None
+        self.risk_manager = None
+        self.rca_engine = None
         self.running = False
 
     async def initialize(self):
@@ -55,11 +61,29 @@ class AgentOrchestrator:
         await self.brain.initialize()
         logger.info(f"🧠 Brain initialized ({self.brain.get_brain_status()['total_patterns']} patterns)")
 
-        # Initialize agents with brain connection
+        # StateTracker - persistent state
+        self.state_tracker = StateTracker(self.db)
+        await self.state_tracker.load_state()
+        logger.info(f"📊 StateTracker initialized (mode={self.state_tracker.get_mode()}, "
+                     f"trades={self.state_tracker.state['total_trades']})")
+
+        # RiskManager - signal gate
+        self.risk_manager = RiskManager(self.state_tracker)
+        logger.info(f"🛡 RiskManager initialized (max_daily={self.risk_manager.MAX_DAILY_TRADES})")
+
+        # RCA Engine - failure analysis
+        self.rca_engine = RCAEngine(self.db)
+        logger.info("🔍 RCA Engine initialized")
+
+        # Initialize agents with brain + state + risk connections
         self.scout = ScoutAgent(self.db, brain=self.brain)
-        self.strategist = StrategistAgent(self.db, brain=self.brain)
-        self.ghost_simulator = GhostSimulatorAgent(self.db, brain=self.brain)
-        self.auditor = AuditorAgent(self.db, brain=self.brain)
+        self.strategist = StrategistAgent(self.db, brain=self.brain,
+                                           state_tracker=self.state_tracker,
+                                           risk_manager=self.risk_manager)
+        self.ghost_simulator = GhostSimulatorAgent(self.db, brain=self.brain,
+                                                     state_tracker=self.state_tracker,
+                                                     risk_manager=self.risk_manager)
+        self.auditor = AuditorAgent(self.db, brain=self.brain, rca_engine=self.rca_engine)
 
         await self.scout.initialize()
         await self.strategist.initialize()
@@ -72,8 +96,11 @@ class AgentOrchestrator:
         self.chat_engine.register_agent('Strategist', self.strategist)
         self.chat_engine.register_agent('Ghost', self.ghost_simulator)
         self.chat_engine.register_agent('Auditor', self.auditor)
+        self.chat_engine.state_tracker = self.state_tracker
+        self.chat_engine.risk_manager = self.risk_manager
+        self.chat_engine.rca_engine = self.rca_engine
 
-        logger.info("✓ All agents initialized with Brain connection")
+        logger.info("✓ All agents initialized with Brain + StateTracker + RiskManager")
         logger.info(f"✓ Monitoring {len(Config.WATCHLIST)} symbols: {Config.WATCHLIST}")
         logger.info("=" * 80)
 
@@ -161,6 +188,12 @@ class AgentOrchestrator:
                 # Brain pattern'larını yenile (yeni pattern'lar memory'ye yüklensin)
                 await self.brain.refresh_patterns()
 
+                # StateTracker: mode güncelle, state kaydet, snapshot al
+                if self.state_tracker:
+                    self.state_tracker.update_mode()
+                    await self.state_tracker.save_state()
+                    await self.state_tracker.snapshot_history()
+
                 # Her 2 dakikada bir loglama
                 if int(asyncio.get_event_loop().time()) % 120 < 35:
                     logger.info(f"📊 HEALTH CHECK")
@@ -176,6 +209,12 @@ class AgentOrchestrator:
                                  f"Win: {ghost_health.get('win_rate', 0):.0f}%)")
                     logger.info(f"  Auditor: {'✓' if auditor_health.get('healthy') else '✗'} "
                                  f"(#{auditor_health.get('audit_count', 0)})")
+                    if self.state_tracker:
+                        st = self.state_tracker.state
+                        logger.info(f"  📊 State: mode={self.state_tracker.get_mode()} | "
+                                     f"trades={st['total_trades']} | "
+                                     f"PnL={st['cumulative_pnl']:.2f}% | "
+                                     f"DD={st['current_drawdown']:.2f}%")
 
             except Exception as e:
                 logger.error(f"Health monitoring error: {e}")

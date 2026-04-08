@@ -11,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class AuditorAgent:
-    def __init__(self, db: Database, brain=None):
+    def __init__(self, db: Database, brain=None, rca_engine=None):
         self.db = db
         self.brain = brain
+        self.rca_engine = rca_engine
         self.running = False
         self.last_activity = None
         self.strategy_helper = StrategyHelper()
@@ -116,9 +117,31 @@ class AuditorAgent:
             logger.error(f"Error analyzing failed signals: {e}")
 
     async def _investigate_false_positives(self, failed_simulations: List[Dict[str, Any]]):
-        """Investigate why signals are failing."""
+        """Investigate why signals are failing using RCA engine."""
         try:
             logger.info(f"Investigating {len(failed_simulations)} failed signals for false positives...")
+
+            # RCA batch analysis
+            if self.rca_engine:
+                rca_report = await self.rca_engine.batch_analyze(failed_simulations)
+                if rca_report['total_analyzed'] > 0:
+                    logger.info(f"🔍 RCA Report: {rca_report['total_analyzed']} failures analyzed")
+                    for ftype, stats in rca_report.get('categories', {}).items():
+                        logger.info(f"  → {ftype}: {stats['count']} cases, avg loss: {stats.get('avg_loss', 0):.2f}%")
+                    for rec in rca_report.get('top_recommendations', [])[:3]:
+                        logger.info(f"  💡 {rec}")
+
+                    # Save individual RCA results
+                    for sim in failed_simulations[:20]:  # Limit to avoid overload
+                        result = await self.rca_engine.analyze_failure(sim)
+                        await self.db.insert_rca_result({
+                            'simulation_id': sim.get('id'),
+                            'failure_type': result['failure_type'],
+                            'confidence': result['confidence'],
+                            'explanation': result['explanation'],
+                            'recommendations': result['recommendations'],
+                            'context': result.get('context', {}),
+                        })
 
             failures_by_type = {}
             for sim in failed_simulations:

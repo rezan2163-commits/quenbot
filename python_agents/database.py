@@ -243,6 +243,47 @@ class Database:
                 )
             """)
 
+            # Bot state table (StateTracker persistence)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    id SERIAL PRIMARY KEY,
+                    state_key VARCHAR(100) NOT NULL UNIQUE,
+                    state_value JSONB NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # State history table (time series)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS state_history (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    mode VARCHAR(20) NOT NULL DEFAULT 'BOOTSTRAP',
+                    cumulative_pnl DECIMAL(20, 8) DEFAULT 0,
+                    daily_pnl DECIMAL(20, 8) DEFAULT 0,
+                    daily_trade_count INTEGER DEFAULT 0,
+                    current_drawdown DECIMAL(10, 4) DEFAULT 0,
+                    win_rate DECIMAL(5, 4) DEFAULT 0,
+                    active_positions INTEGER DEFAULT 0,
+                    total_trades INTEGER DEFAULT 0,
+                    metadata JSONB
+                )
+            """)
+
+            # RCA results table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS rca_results (
+                    id SERIAL PRIMARY KEY,
+                    simulation_id INTEGER REFERENCES simulations(id),
+                    failure_type VARCHAR(50) NOT NULL,
+                    confidence DECIMAL(5, 4) DEFAULT 0,
+                    explanation TEXT,
+                    recommendations JSONB,
+                    context JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Agent heartbeat table
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS agent_heartbeat (
@@ -745,3 +786,89 @@ class Database:
                 FROM agent_heartbeat ORDER BY agent_name
             """)
             return [dict(row) for row in rows]
+
+    # ─── Bot State Operations (StateTracker) ───
+
+    async def get_bot_state(self, state_key: str = 'main') -> Optional[Dict[str, Any]]:
+        """Bot state'ini getir"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT state_value FROM bot_state WHERE state_key = $1
+            """, state_key)
+            if row:
+                val = row['state_value']
+                return json.loads(val) if isinstance(val, str) else val
+            return None
+
+    async def save_bot_state(self, state_key: str, state_value: Dict[str, Any]):
+        """Bot state'ini kaydet/güncelle"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO bot_state (state_key, state_value, updated_at)
+                VALUES ($1, $2, CURRENT_TIMESTAMP)
+                ON CONFLICT (state_key)
+                DO UPDATE SET state_value = $2, updated_at = CURRENT_TIMESTAMP
+            """, state_key, json.dumps(state_value))
+
+    async def insert_state_history(self, data: Dict[str, Any]) -> int:
+        """State snapshot'ı history'ye kaydet"""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval("""
+                INSERT INTO state_history
+                (timestamp, mode, cumulative_pnl, daily_pnl, daily_trade_count,
+                 current_drawdown, win_rate, active_positions, total_trades, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                RETURNING id
+            """, data.get('timestamp', datetime.utcnow()),
+                data.get('mode', 'BOOTSTRAP'),
+                data.get('cumulative_pnl', 0),
+                data.get('daily_pnl', 0),
+                data.get('daily_trade_count', 0),
+                data.get('current_drawdown', 0),
+                data.get('win_rate', 0),
+                data.get('active_positions', 0),
+                data.get('total_trades', 0),
+                json.dumps(data.get('metadata', {})))
+
+    async def get_state_history(self, hours: int = 24, limit: int = 100) -> List[Dict[str, Any]]:
+        """State history getir"""
+        async with self.pool.acquire() as conn:
+            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            rows = await conn.fetch("""
+                SELECT * FROM state_history
+                WHERE timestamp >= $1
+                ORDER BY timestamp DESC LIMIT $2
+            """, cutoff, limit)
+            return [dict(row) for row in rows]
+
+    # ─── RCA Results Operations ───
+
+    async def insert_rca_result(self, data: Dict[str, Any]) -> int:
+        """RCA analiz sonucunu kaydet"""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval("""
+                INSERT INTO rca_results
+                (simulation_id, failure_type, confidence, explanation, recommendations, context)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id
+            """, data.get('simulation_id'),
+                data['failure_type'],
+                data.get('confidence', 0),
+                data.get('explanation'),
+                json.dumps(data.get('recommendations', [])),
+                json.dumps(data.get('context', {})))
+
+    async def get_rca_stats(self, limit: int = 50) -> Dict[str, Any]:
+        """RCA istatistiklerini getir"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT failure_type, COUNT(*) as count
+                FROM rca_results
+                GROUP BY failure_type
+                ORDER BY count DESC
+            """)
+            total = await conn.fetchval("SELECT COUNT(*) FROM rca_results")
+            return {
+                'total': total or 0,
+                'distribution': {row['failure_type']: row['count'] for row in rows},
+            }

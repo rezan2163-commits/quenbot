@@ -22,6 +22,9 @@ class ChatEngine:
         self.db = db
         self.brain = brain
         self.agents = agents or {}
+        self.state_tracker = None
+        self.risk_manager = None
+        self.rca_engine = None
         self._context_cache: Dict[str, Any] = {}
         self._cache_time: Optional[datetime] = None
         self._cache_ttl = 10  # saniye
@@ -124,6 +127,9 @@ class ChatEngine:
             "market": r"piyasa|market|trend|yüksel|düş|boğa|ayı|bull|bear",
             "data": r"veri|data|trade.*sayı|kaç.*trade|istatistik|stat",
             "config": r"ayar|config|threshold|eşik|parametre|setting",
+            "risk": r"risk|risik|drawdown|kayıp\s*limit|günlük\s*limit|cooldown|pozisyon\s*boyut|kelly",
+            "state": r"state|durum|mod|mode|bootstrap|learning|warmup|production|faz",
+            "rca": r"rca|root.*cause|neden.*başarısız|neden.*kaybetti|hata.*analiz|failure.*analysis",
         }
         for intent, pattern in patterns.items():
             if re.search(pattern, msg):
@@ -165,6 +171,9 @@ class ChatEngine:
             "market": self._handle_market,
             "data": self._handle_data,
             "config": self._handle_config,
+            "risk": self._handle_risk,
+            "state": self._handle_state,
+            "rca": self._handle_rca,
         }
         handler = handlers.get(intent)
         if handler:
@@ -549,6 +558,73 @@ class ChatEngine:
             f"**Watchlist**: {', '.join(Config.WATCHLIST)}",
         ]
         return "\n".join(lines)
+
+    async def _handle_risk(self, msg, msg_lower, ctx) -> str:
+        """Risk yönetimi durumu"""
+        if not self.risk_manager:
+            return "🛡 Risk Manager henüz aktif değil."
+        summary = self.risk_manager.get_risk_summary()
+        lines = [
+            "🛡 **Risk Yönetimi Durumu**\n",
+            f"**Mod**: {summary['mode']}",
+            f"**Günlük İşlem**: {summary['daily_trades']}",
+            f"**Günlük PnL**: {summary['daily_pnl']:.2f}%",
+            f"**Art Arda Kayıp**: {summary['consecutive_losses']}",
+            f"**Drawdown**: {summary['drawdown']}",
+            f"**Açık Pozisyon**: {summary['open_positions']}",
+            f"**Cooldown**: {'⏳ Aktif' if summary['cooldown_active'] else '✅ Yok'}",
+            f"**Min Güven Eşiği**: {summary['min_confidence']:.2f}",
+        ]
+        mp = summary.get('mode_params', {})
+        if mp:
+            lines.append(f"\n**Mode Parametreleri:**")
+            lines.append(f"  TP: %{mp.get('take_profit_pct', 0)*100:.1f} | SL: %{mp.get('stop_loss_pct', 0)*100:.1f}")
+            lines.append(f"  Similarity: {mp.get('similarity_threshold', 0)} | Min Profit: {mp.get('min_mean_profit', 0)}")
+        return "\n".join(lines)
+
+    async def _handle_state(self, msg, msg_lower, ctx) -> str:
+        """Bot state/mode durumu"""
+        if not self.state_tracker:
+            return "📊 StateTracker henüz aktif değil."
+        summary = self.state_tracker.get_state_summary()
+        st = summary
+        lines = [
+            "📊 **Bot State Durumu**\n",
+            f"**Mod**: {st.get('mode', 'BOOTSTRAP')}",
+            f"**Toplam Trade**: {st.get('total_trades', 0)}",
+            f"**Kümülatif PnL**: {st.get('cumulative_pnl', 0):.2f}%",
+            f"**Günlük PnL**: {st.get('daily_pnl', 0):.2f}%",
+            f"**Win Rate**: %{st.get('win_rate', 0):.1f}",
+            f"**Drawdown**: {st.get('current_drawdown', 0):.2f}%",
+            f"**En İyi Streak**: {st.get('best_streak', 0)} ✅",
+            f"**En Kötü Streak**: {st.get('worst_streak', 0)} ❌",
+            f"**Aktif Semboller**: {st.get('active_symbols', [])}",
+        ]
+        return "\n".join(lines)
+
+    async def _handle_rca(self, msg, msg_lower, ctx) -> str:
+        """RCA (Root Cause Analysis) sonuçları"""
+        try:
+            rca_stats = await self.db.get_rca_stats()
+            if rca_stats['total'] == 0:
+                return "🔍 Henüz RCA analizi yapılmamış. Auditor agent başarısız trade'leri analiz ettiğinde sonuçlar burada görünecek."
+
+            lines = [
+                f"🔍 **RCA Analiz Sonuçları** ({rca_stats['total']} analiz)\n",
+            ]
+            for ftype, count in rca_stats.get('distribution', {}).items():
+                pct = count / rca_stats['total'] * 100
+                lines.append(f"• **{ftype}**: {count} (%{pct:.0f})")
+
+            if self.rca_engine:
+                stats = self.rca_engine.get_stats()
+                top = stats.get('top_failure')
+                if top:
+                    lines.append(f"\n⚠ En sık hata: **{top}**")
+
+            return "\n".join(lines)
+        except Exception as e:
+            return f"🔍 RCA verisi alınamadı: {e}"
 
     async def _general_response(self, msg: str, ctx: dict) -> str:
         """Intent bulunamazsa - akıllı genel yanıt"""
