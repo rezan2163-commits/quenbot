@@ -465,7 +465,7 @@ app.get("/api/brain/learning-log", async (req, res) => {
 });
 
 // ─── Admin Auth ───
-const ADMIN_PIN = process.env.ADMIN_PIN || "1453";
+const ADMIN_PIN = process.env.ADMIN_PIN || "BABA";
 
 app.post("/api/admin/login", (req, res) => {
   const { pin } = req.body;
