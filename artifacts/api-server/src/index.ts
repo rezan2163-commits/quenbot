@@ -87,15 +87,31 @@ app.get("/api/bot/summary", async (req, res) => {
 
 app.get("/api/agents/status", async (req, res) => {
   try {
+    const heartbeats = await sql`
+      SELECT agent_name, status, last_heartbeat, metadata,
+             EXTRACT(EPOCH FROM (NOW() - last_heartbeat)) AS age_seconds
+      FROM agent_heartbeat ORDER BY agent_name
+    `;
+    const agents: Record<string, any> = {};
+    for (const hb of heartbeats) {
+      const isHealthy = hb.age_seconds < 120;
+      agents[hb.agent_name] = {
+        status: isHealthy ? hb.status : "stale",
+        last_heartbeat: hb.last_heartbeat,
+        age_seconds: Math.round(Number(hb.age_seconds)),
+        metadata: hb.metadata,
+      };
+    }
+    // Fallback if no heartbeats yet
+    if (Object.keys(agents).length === 0) {
+      for (const name of ['scout', 'strategist', 'ghost_simulator', 'auditor', 'brain', 'chat_engine']) {
+        agents[name] = { status: "unknown", last_heartbeat: null, age_seconds: null, metadata: null };
+      }
+    }
     const [configSignals] = await sql`SELECT COUNT(*)::int AS count FROM signals`;
     const [configMovements] = await sql`SELECT COUNT(*)::int AS count FROM price_movements`;
     res.json({
-      agents: {
-        scout: { status: "running", last_activity: null },
-        strategist: { status: "running", last_activity: null },
-        ghost_simulator: { status: "running", last_activity: null },
-        auditor: { status: "running", last_activity: null }
-      },
+      agents,
       summary: {
         signals: configSignals.count,
         movements: configMovements.count
@@ -481,35 +497,37 @@ app.post("/api/admin/login", (req, res) => {
 app.get("/api/live/data-stream", async (req, res) => {
   try {
     const limit = Number(req.query.limit || 30);
-    // Son N trade'i anlık çek
     const latestTrades = await sql`
       SELECT id, exchange, market_type, symbol, price::double precision AS price,
              quantity::double precision AS quantity, side, timestamp, trade_id
       FROM trades ORDER BY timestamp DESC LIMIT ${limit}
     `;
-    // Her exchange/market_type için son trade zamanı
+    // Exchange freshness with age_seconds
     const freshness = await sql`
       SELECT exchange, market_type,
-             MAX(timestamp) AS last_trade_time,
-             COUNT(*)::int AS trade_count_1m
-      FROM trades
-      WHERE timestamp >= NOW() - INTERVAL '1 minute'
-      GROUP BY exchange, market_type
-      ORDER BY last_trade_time DESC
-    `;
-    // Son 5 dakikada exchange/symbol bazli trade sayilari
-    const breakdown = await sql`
-      SELECT exchange, symbol, market_type,
-             COUNT(*)::int AS count,
-             MAX(price::double precision) AS max_price,
-             MIN(price::double precision) AS min_price,
-             MAX(timestamp) AS last_time
+             MAX(timestamp) AS latest_time,
+             COUNT(*)::int AS trades_5min,
+             EXTRACT(EPOCH FROM (NOW() - MAX(timestamp)))::double precision AS age_seconds
       FROM trades
       WHERE timestamp >= NOW() - INTERVAL '5 minutes'
-      GROUP BY exchange, symbol, market_type
-      ORDER BY count DESC
+      GROUP BY exchange, market_type
+      ORDER BY latest_time DESC
     `;
-    res.json({ latest_trades: latestTrades, freshness, breakdown });
+    // 5 minute breakdown per minute
+    const breakdown = await sql`
+      SELECT date_trunc('minute', timestamp) AS period,
+             COUNT(*)::int AS trade_count,
+             SUM((price * quantity)::double precision)::double precision AS total_volume
+      FROM trades
+      WHERE timestamp >= NOW() - INTERVAL '5 minutes'
+      GROUP BY period
+      ORDER BY period DESC
+    `;
+    res.json({
+      latest_trades: latestTrades,
+      exchange_freshness: freshness,
+      five_min_breakdown: breakdown
+    });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -584,14 +602,15 @@ app.get("/api/admin/table-stats", async (req, res) => {
   try {
     const tables = ['trades', 'price_movements', 'signals', 'simulations', 'pattern_records',
                     'brain_learning_log', 'chat_messages', 'audit_records', 'failure_analysis',
-                    'user_watchlist', 'watchlist', 'blacklist_patterns', 'agent_config', 'audit_reports'];
+                    'user_watchlist', 'watchlist', 'blacklist_patterns', 'agent_config', 'audit_reports',
+                    'agent_heartbeat'];
     const stats = [];
     for (const table of tables) {
       try {
         const [row] = await sql.unsafe(`SELECT COUNT(*)::int AS count FROM ${table}`);
-        stats.push({ table, count: row.count });
+        stats.push({ table_name: table, row_count: row.count });
       } catch {
-        stats.push({ table, count: -1 });
+        stats.push({ table_name: table, row_count: -1 });
       }
     }
     res.json(stats);

@@ -124,6 +124,104 @@ export async function createTables() {
     )
   `;
 
+  await sql`
+    CREATE TABLE IF NOT EXISTS agent_heartbeat (
+      id SERIAL PRIMARY KEY,
+      agent_name VARCHAR(50) NOT NULL UNIQUE,
+      status VARCHAR(20) NOT NULL DEFAULT 'running',
+      last_heartbeat TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      metadata JSONB,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS pattern_records (
+      id SERIAL PRIMARY KEY,
+      symbol VARCHAR(20) NOT NULL,
+      signal_type VARCHAR(50),
+      entry_price NUMERIC(20, 8),
+      outcome_15m NUMERIC(10, 6),
+      outcome_1h NUMERIC(10, 6),
+      outcome_4h NUMERIC(10, 6),
+      outcome_1d NUMERIC(10, 6),
+      features JSONB,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS brain_learning_log (
+      id SERIAL PRIMARY KEY,
+      signal_type VARCHAR(50),
+      was_correct BOOLEAN,
+      pnl_pct NUMERIC(10, 4),
+      context JSONB,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id SERIAL PRIMARY KEY,
+      role VARCHAR(20) NOT NULL,
+      message TEXT NOT NULL,
+      agent_name VARCHAR(50),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS audit_records (
+      id SERIAL PRIMARY KEY,
+      timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      total_simulations INTEGER,
+      successful_simulations INTEGER,
+      failed_simulations INTEGER,
+      success_rate NUMERIC(10, 4),
+      avg_win_pct NUMERIC(10, 4),
+      avg_loss_pct NUMERIC(10, 4),
+      metadata JSONB,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS failure_analysis (
+      id SERIAL PRIMARY KEY,
+      timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      signal_type VARCHAR(50),
+      failure_count INTEGER,
+      avg_loss_pct NUMERIC(10, 4),
+      recommendation TEXT,
+      metadata JSONB,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS user_watchlist (
+      id SERIAL PRIMARY KEY,
+      symbol VARCHAR(20) NOT NULL,
+      exchange VARCHAR(50) DEFAULT 'all',
+      market_type VARCHAR(20) DEFAULT 'spot',
+      active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(symbol, exchange, market_type)
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS agent_config (
+      id SERIAL PRIMARY KEY,
+      agent_name VARCHAR(50) NOT NULL,
+      config_key VARCHAR(100) NOT NULL,
+      config_value JSONB,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(agent_name, config_key)
+    )
+  `;
+
   await sql`CREATE INDEX IF NOT EXISTS idx_trades_symbol_timestamp ON trades(symbol, timestamp)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_price_movements_symbol_time ON price_movements(symbol, start_time)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_signals_status_timestamp ON signals(status, timestamp)`;

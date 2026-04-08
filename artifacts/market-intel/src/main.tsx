@@ -90,42 +90,8 @@ function CandleChart({ candles, height = 200 }: { candles: Candle[]; height?: nu
   );
 }
 
-/* ═══════════════════ LOGIN SCREEN ═══════════════════ */
-function LoginScreen({ onLogin }: { onLogin: () => void }) {
-  const [pin, setPin] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const handleLogin = async () => {
-    if (!pin.trim()) return;
-    setLoading(true);
-    setError("");
-    try {
-      const r = await fetch("/api/admin/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin: pin.trim() }) });
-      const data = await r.json();
-      if (data.success) { sessionStorage.setItem("qb_auth", "1"); onLogin(); }
-      else setError(data.error || "Geçersiz PIN");
-    } catch { setError("Sunucuya bağlanılamadı"); }
-    finally { setLoading(false); }
-  };
-
-  return (
-    <div className="login-screen">
-      <div className="login-box">
-        <div className="login-logo">Q</div>
-        <div className="login-title">QuenBot</div>
-        <div className="login-sub">Yönetim Paneli Girişi</div>
-        <input className="login-input" type="password" maxLength={10} placeholder="••••" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && handleLogin()} autoFocus />
-        <button className="login-btn" onClick={handleLogin} disabled={loading || !pin.trim()}>{loading ? "Giriş yapılıyor..." : "Giriş Yap"}</button>
-        {error && <div className="login-error">{error}</div>}
-      </div>
-    </div>
-  );
-}
-
 /* ═══════════════════ MAIN APP ═══════════════════ */
 function App() {
-  const [authed, setAuthed] = useState(true);
   const [tab, setTab] = useState<Tab>("overview");
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [livePrices, setLivePrices] = useState<LivePrice[]>([]);
@@ -163,9 +129,8 @@ function App() {
   const [failureAnalysis, setFailureAnalysis] = useState<RecordRow[]>([]);
   const [pnlTimeline, setPnlTimeline] = useState<RecordRow[]>([]);
   const [brainPatterns, setBrainPatterns] = useState<RecordRow[]>([]);
-  const [learningStats, setLearningStats] = useState<RecordRow[]>([]);
-
-  // Login devre dışı
+  const [learningStats, setLearningStats] = useState<RecordRow | null>(null);
+  const [agentStatuses, setAgentStatuses] = useState<Record<string, any>>({});
 
   const fetchAll = useCallback(async () => {
     try {
@@ -174,17 +139,18 @@ function App() {
         "/api/analytics/top-movers", "/api/analytics/order-flow",
         "/api/analytics/trade-timeline", "/api/analytics/volume-by-exchange",
         "/api/analytics/system-stats", "/api/signals", "/api/simulations",
-        "/api/scout/trades?limit=20", "/api/scout/movements?limit=15",
+        "/api/scout/trades?limit=30", "/api/scout/movements?limit=20",
         `/api/analytics/price-history/${selectedSymbol}`,
         "/api/chat/messages?limit=50", "/api/watchlist", "/api/brain/status",
         "/api/live/data-stream", "/api/admin/table-stats",
         "/api/admin/config", "/api/admin/audit-records?limit=20",
         "/api/admin/failure-analysis?limit=20",
         "/api/analytics/pnl-timeline",
-        "/api/brain/patterns?limit=30", "/api/brain/learning-stats"
+        "/api/brain/patterns?limit=30", "/api/brain/learning-stats",
+        "/api/agents/status"
       ];
       const results = await Promise.all(ep.map(async url => { try { const r = await fetch(url); return r.ok ? r.json() : null; } catch { return null; } }));
-      const [s, p, b, tm, of2, tl, vd, ss, sig, sim, tr, mv, ch, chatM, wl, bs, ls, ts, ac, ar, fa, pt, bp, lst] = results;
+      const [s, p, b, tm, of2, tl, vd, ss, sig, sim, tr, mv, ch, chatM, wl, bs, ls, ts, ac, ar, fa, pt, bp, lst, agSt] = results;
       if (s) setSummary(s);
       if (p) { setPrevPrices(Object.fromEntries(livePrices.map(lp => [lp.symbol, lp.price]))); setLivePrices(p); }
       if (b) setBotSummary(b);
@@ -209,6 +175,7 @@ function App() {
       if (pt) setPnlTimeline(pt);
       if (bp) setBrainPatterns(bp);
       if (lst) setLearningStats(lst);
+      if (agSt?.agents) setAgentStatuses(agSt.agents);
       setError(null); setLastUpdate(new Date()); setRefreshCount(c => c + 1);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setLoading(false); }
@@ -243,8 +210,6 @@ function App() {
       fetchAll();
     } catch (e) { console.error(e); }
   };
-
-  const logout = () => { sessionStorage.removeItem("qb_auth"); setAuthed(false); };
 
   const totalVolume1h = useMemo(() => volumeData.reduce((s, v) => s + (v.total_volume || 0), 0), [volumeData]);
   const tradeVolumes = useMemo(() => timeline.map(t => t.volume || 0), [timeline]);
@@ -291,7 +256,7 @@ function App() {
         <div className="sidebar-footer">
           <div className="live-indicator"><span className="live-dot" /><span>Canlı Veri Akışı</span></div>
           <div className="text-muted text-xs">Son: {fmtTime(lastUpdate.toISOString())} • #{refreshCount}</div>
-          <button className="sidebar-logout" onClick={logout}>🚪 Çıkış Yap</button>
+
         </div>
       </aside>
 
@@ -518,17 +483,19 @@ function App() {
           </div>
 
           {/* Günlük Öğrenme Doğruluğu */}
-          {learningStats.length > 0 && (
+          {learningStats?.daily_accuracy && learningStats.daily_accuracy.length > 0 && (
             <div className="card">
-              <div className="card-header"><h3>Günlük Öğrenme Trendi</h3><span className="badge badge-cyan">Son 30 Gün</span></div>
-              <div className="table-wrap"><table className="tbl"><thead><tr><th>Tarih</th><th>Toplam</th><th>Doğru</th><th>Doğruluk</th><th>Ort PnL</th></tr></thead><tbody>
-                {learningStats.map((d, i) => (
-                  <tr key={i}>
-                    <td>{d.day}</td><td>{d.total}</td><td>{d.correct}</td>
-                    <td className={d.accuracy >= 50 ? "text-green" : "text-red"}>{d.accuracy?.toFixed(1)}%</td>
-                    <td className={d.avg_pnl >= 0 ? "text-green" : "text-red"}>{d.avg_pnl?.toFixed(2)}%</td>
-                  </tr>
-                ))}
+              <div className="card-header"><h3>Günlük Öğrenme Trendi</h3><span className="badge badge-cyan">Son 14 Gün</span></div>
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Tarih</th><th>Toplam</th><th>Doğru</th><th>Doğruluk</th></tr></thead><tbody>
+                {learningStats.daily_accuracy.map((d: any, i: number) => {
+                  const acc = d.total > 0 ? (d.correct / d.total * 100) : 0;
+                  return (
+                    <tr key={i}>
+                      <td>{d.day ? new Date(d.day).toLocaleDateString("tr-TR") : "—"}</td><td>{d.total}</td><td>{d.correct}</td>
+                      <td className={acc >= 50 ? "text-green" : "text-red"}>{acc.toFixed(1)}%</td>
+                    </tr>
+                  );
+                })}
               </tbody></table></div>
             </div>
           )}
@@ -644,14 +611,16 @@ function App() {
           <div className="card">
             <div className="card-header"><h3>Denetim Kayıtları</h3><span className="badge badge-amber">{auditRecords.length}</span></div>
             {auditRecords.length > 0 ? (
-              <div className="table-wrap"><table className="tbl"><thead><tr><th>Agent</th><th>Aksiyon</th><th>Sembol</th><th>Detay</th><th>Zaman</th></tr></thead><tbody>
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Zaman</th><th>Toplam Sim.</th><th>Başarılı</th><th>Başarısız</th><th>Başarı %</th><th>Ort. Kazanç</th><th>Ort. Kayıp</th></tr></thead><tbody>
                 {auditRecords.map((r, i) => (
                   <tr key={i}>
-                    <td><strong>{r.agent_name}</strong></td>
-                    <td><span className="badge badge-sm badge-blue">{r.action_type}</span></td>
-                    <td>{r.symbol || "—"}</td>
-                    <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>{r.details || "—"}</td>
-                    <td className="text-muted">{r.created_at ? fmtTime(r.created_at) : "—"}</td>
+                    <td>{r.timestamp ? fmtTime(r.timestamp) : "—"}</td>
+                    <td>{r.total_simulations ?? "—"}</td>
+                    <td className="text-green">{r.successful_simulations ?? "—"}</td>
+                    <td className="text-red">{r.failed_simulations ?? "—"}</td>
+                    <td className={Number(r.success_rate || 0) >= 0.5 ? "text-green" : "text-red"}>{r.success_rate != null ? `${(Number(r.success_rate) * 100).toFixed(1)}%` : "—"}</td>
+                    <td className="text-green">{r.avg_win_pct != null ? `${Number(r.avg_win_pct).toFixed(2)}%` : "—"}</td>
+                    <td className="text-red">{r.avg_loss_pct != null ? `${Number(r.avg_loss_pct).toFixed(2)}%` : "—"}</td>
                   </tr>
                 ))}
               </tbody></table></div>
@@ -660,20 +629,20 @@ function App() {
 
           {/* Failure Analysis */}
           <div className="card">
-            <div className="card-header"><h3>Hata & Başarısızlık Analizi</h3><span className="badge badge-red">{failureAnalysis.length}</span></div>
+            <div className="card-header"><h3>Başarısızlık Analizi</h3><span className="badge badge-red">{failureAnalysis.length}</span></div>
             {failureAnalysis.length > 0 ? (
-              <div className="table-wrap"><table className="tbl"><thead><tr><th>Agent</th><th>Sembol</th><th>Hata Tipi</th><th>Açıklama</th><th>Zaman</th></tr></thead><tbody>
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Sinyal Tipi</th><th>Başarısızlık Sayısı</th><th>Ort. Kayıp %</th><th>Öneri</th><th>Zaman</th></tr></thead><tbody>
                 {failureAnalysis.map((f, i) => (
                   <tr key={i}>
-                    <td><strong>{f.agent_name}</strong></td>
-                    <td>{f.symbol || "—"}</td>
-                    <td><span className="badge badge-sm badge-red">{f.failure_type}</span></td>
-                    <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>{f.description || "—"}</td>
-                    <td className="text-muted">{f.created_at ? fmtTime(f.created_at) : "—"}</td>
+                    <td><strong>{f.signal_type ?? "—"}</strong></td>
+                    <td>{f.failure_count ?? "—"}</td>
+                    <td className="text-red">{f.avg_loss_pct != null ? `${Number(f.avg_loss_pct).toFixed(2)}%` : "—"}</td>
+                    <td className="text-xs" style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>{f.recommendation || "—"}</td>
+                    <td className="text-muted">{f.timestamp ? fmtTime(f.timestamp) : "—"}</td>
                   </tr>
                 ))}
               </tbody></table></div>
-            ) : <div className="empty-state">Henüz hata kaydı yok - bu iyi bir işaret!</div>}
+            ) : <div className="empty-state">Henüz başarısızlık kaydı yok - bu iyi bir işaret!</div>}
           </div>
         </>)}
 
@@ -687,8 +656,32 @@ function App() {
             <KPI label="Çalışma Süresi" value={systemStats ? ago(systemStats.uptime_minutes) : "—"} icon="⏱" accent="green" />
           </div>
           <div className="grid-2">
-            <div className="card"><div className="card-header"><h3>Agent Durumları</h3></div><div className="agent-grid">{["Scout Agent", "Strategist Agent", "Ghost Simulator", "Auditor Agent", "Brain Module", "Chat Engine"].map((name, i) => (<div key={i} className="agent-card"><div className="agent-status-dot" /><div><div className="agent-name">{name}</div><div className="text-muted text-xs">Çalışıyor</div></div></div>))}</div></div>
-            <div className="card"><div className="card-header"><h3>Bağlantılar</h3></div><div className="conn-list"><div className="conn-item"><span className="conn-dot conn-ok" />Binance Spot WebSocket</div><div className="conn-item"><span className="conn-dot conn-warn" />Binance Futures (REST fallback)</div><div className="conn-item"><span className="conn-dot conn-ok" />Bybit Spot WebSocket</div><div className="conn-item"><span className="conn-dot conn-ok" />Bybit Futures WebSocket</div><div className="conn-item"><span className="conn-dot conn-ok" />PostgreSQL</div><div className="conn-item"><span className="conn-dot conn-ok" />Brain AI Module</div><div className="conn-item"><span className="conn-dot conn-ok" />Chat Engine v2</div></div></div>
+            <div className="card"><div className="card-header"><h3>Agent Durumları</h3><span className="badge badge-green">{Object.values(agentStatuses).filter(a => a.status === 'running').length} aktif</span></div><div className="agent-grid">
+              {Object.keys(agentStatuses).length > 0 ? (
+                Object.entries(agentStatuses).map(([name, agent]) => {
+                  const isHealthy = agent.status === "running";
+                  const isStale = agent.status === "stale";
+                  const dotClass = isHealthy ? "dot-ok" : isStale ? "dot-warn" : "dot-unknown";
+                  return (
+                    <div key={name} className="agent-card">
+                      <div className={cls("agent-status-dot", dotClass)} />
+                      <div>
+                        <div className="agent-name">{name}</div>
+                        <div className="text-muted text-xs">
+                          {isHealthy ? "Çalışıyor" : isStale ? "Yanıtlamıyor" : agent.status}
+                          {agent.age_seconds != null && ` · ${agent.age_seconds < 60 ? `${Math.round(agent.age_seconds)}sn` : `${Math.floor(agent.age_seconds / 60)}dk`} önce`}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                ["Scout Agent", "Strategist Agent", "Ghost Simulator", "Auditor Agent", "Brain Module", "Chat Engine"].map((name, i) => (
+                  <div key={i} className="agent-card"><div className="agent-status-dot dot-unknown" /><div><div className="agent-name">{name}</div><div className="text-muted text-xs">Durum bilinmiyor</div></div></div>
+                ))
+              )}
+            </div></div>
+            <div className="card"><div className="card-header"><h3>Bağlantılar</h3></div><div className="conn-list"><div className="conn-item"><span className="conn-dot conn-ok" />Binance Spot WebSocket</div><div className="conn-item"><span className="conn-dot conn-ok" />Binance Futures WebSocket</div><div className="conn-item"><span className="conn-dot conn-ok" />Bybit Spot WebSocket</div><div className="conn-item"><span className="conn-dot conn-ok" />Bybit Futures WebSocket</div><div className="conn-item"><span className="conn-dot conn-ok" />PostgreSQL</div><div className="conn-item"><span className="conn-dot conn-ok" />Brain AI Module</div><div className="conn-item"><span className="conn-dot conn-ok" />Chat Engine v2</div></div></div>
           </div>
 
           {/* Watchlist Yönetimi */}

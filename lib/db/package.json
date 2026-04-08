@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "push": "drizzle-kit push",
+    "push": "drizzle-kit push:pg",
     "studio": "drizzle-kit studio",
     "typecheck": "tsc --noEmit"
   },

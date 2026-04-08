@@ -319,6 +319,47 @@ class BrainModule:
             'learning_weights': self.learning_weights,
         }
 
+    async def refresh_patterns(self):
+        """Yeni pattern'ları DB'den memory'ye yükle"""
+        try:
+            current_count = len(self.pattern_memory)
+            patterns = await self.db.get_pattern_records(limit=500)
+            if len(patterns) > current_count:
+                new_records = []
+                for p in patterns[:(len(patterns) - current_count)]:
+                    snap_data = p.get('snapshot_data', {})
+                    if not snap_data:
+                        continue
+                    snap = TradeSnapshot(
+                        symbol=snap_data.get('symbol', ''),
+                        exchange=snap_data.get('exchange', ''),
+                        market_type=snap_data.get('market_type', 'spot'),
+                        start_time=datetime.fromisoformat(snap_data['start_time']) if snap_data.get('start_time') else datetime.utcnow(),
+                        end_time=datetime.fromisoformat(snap_data['end_time']) if snap_data.get('end_time') else datetime.utcnow(),
+                        buy_count=snap_data.get('buy_count', 0),
+                        sell_count=snap_data.get('sell_count', 0),
+                        buy_volume=snap_data.get('buy_volume', 0),
+                        sell_volume=snap_data.get('sell_volume', 0),
+                        avg_price=snap_data.get('avg_price', 0),
+                        price_start=snap_data.get('price_start', 0),
+                        price_end=snap_data.get('price_end', 0),
+                        high=snap_data.get('high', 0),
+                        low=snap_data.get('low', 0),
+                    )
+                    record = PatternRecord(
+                        snapshot=snap,
+                        outcome_15m=p.get('outcome_15m'),
+                        outcome_1h=p.get('outcome_1h'),
+                        outcome_4h=p.get('outcome_4h'),
+                        outcome_1d=p.get('outcome_1d'),
+                    )
+                    new_records.append(record)
+                if new_records:
+                    self.pattern_memory.extend(new_records)
+                    logger.info(f"🧠 Brain: Loaded {len(new_records)} new patterns (total: {len(self.pattern_memory)})")
+        except Exception as e:
+            logger.debug(f"Brain refresh error: {e}")
+
 
 class ChatHandler:
     """Bot ile sohbet sistemi"""

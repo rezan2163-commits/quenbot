@@ -11,8 +11,8 @@ class Config:
     # Exchanges - 2026 Updated URLs
     # Binance WebSocket
     BINANCE_SPOT_WS_URL = "wss://stream.binance.com:9443/ws"
-    # Binance Futures API'si eski endpoint kullanıyor, REST fallback yapılacak
-    BINANCE_FUTURES_WS_URL = None  # Futures için REST fallback kullanılacak
+    # Binance Futures WebSocket (fapi stream)
+    BINANCE_FUTURES_WS_URL = "wss://fstream.binance.com/ws"
     # Bybit WebSocket (V5 API)
     BYBIT_SPOT_WS_URL = "wss://stream.bybit.com/v5/public/spot"
     BYBIT_FUTURES_WS_URL = "wss://stream.bybit.com/v5/public/linear"
@@ -32,8 +32,8 @@ class Config:
 
     # Agent thresholds
     PRICE_MOVEMENT_THRESHOLD = 0.02  # 2%
-    SIMILARITY_THRESHOLD = 0.7
-    GHOST_SIMILARITY_THRESHOLD = 0.7
+    SIMILARITY_THRESHOLD = 0.4
+    GHOST_SIMILARITY_THRESHOLD = 0.5
     AUDIT_LEARNING_RATE = 0.1
 
     # Time windows
@@ -43,7 +43,7 @@ class Config:
     # Evolutionary strategy parameters
     STRATEGY_POPULATION_SIZE = 40
     STRATEGY_GENERATIONS = 30
-    STRATEGY_MIN_MEAN_PROFIT = 0.01
+    STRATEGY_MIN_MEAN_PROFIT = 0.005
 
     # Paper trading thresholds
     GHOST_TAKE_PROFIT_PCT = 0.05

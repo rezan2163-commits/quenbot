@@ -16,11 +16,12 @@ from ghost_simulator_agent import GhostSimulatorAgent
 from auditor_agent import AuditorAgent
 
 # Setup logging
+LOG_DIR = os.path.dirname(os.path.abspath(__file__))
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
-        logging.FileHandler('/workspaces/quenbot/python_agents/agents.log'),
+        logging.FileHandler(os.path.join(LOG_DIR, 'agents.log')),
         logging.StreamHandler()
     ]
 )
@@ -132,10 +133,10 @@ class AgentOrchestrator:
                 logger.debug(f"Chat processor: {e}")
 
     async def _health_monitor(self):
-        """Monitor health of all agents"""
+        """Monitor health of all agents and send heartbeats"""
         while self.running:
             try:
-                await asyncio.sleep(120)
+                await asyncio.sleep(30)
                 
                 scout_health = await self.scout.health_check()
                 strategist_health = await self.strategist.health_check()
@@ -143,19 +144,38 @@ class AgentOrchestrator:
                 auditor_health = await self.auditor.health_check()
                 brain_status = self.brain.get_brain_status()
 
-                logger.info(f"📊 HEALTH CHECK")
-                logger.info(f"  🧠 Brain: {brain_status['total_patterns']} patterns | "
-                             f"Accuracy: {brain_status['accuracy']:.1%}")
-                logger.info(f"  Scout: {'✓' if scout_health.get('healthy') else '✗'} "
-                             f"({scout_health.get('active_connections', 0)} conn | "
-                             f"{scout_health.get('trade_counter', 0)} trades)")
-                logger.info(f"  Strategist: {'✓' if strategist_health.get('healthy') else '✗'} "
-                             f"({strategist_health.get('signals_generated', 0)} signals)")
-                logger.info(f"  Ghost: {'✓' if ghost_health.get('healthy') else '✗'} "
-                             f"({ghost_health.get('active_simulations', 0)} active | "
-                             f"Win: {ghost_health.get('win_rate', 0):.0f}%)")
-                logger.info(f"  Auditor: {'✓' if auditor_health.get('healthy') else '✗'} "
-                             f"(#{auditor_health.get('audit_count', 0)})")
+                # Heartbeat'leri DB'ye yaz
+                await self.db.update_heartbeat('scout', 
+                    'running' if scout_health.get('healthy') else 'error', scout_health)
+                await self.db.update_heartbeat('strategist',
+                    'running' if strategist_health.get('healthy') else 'error', strategist_health)
+                await self.db.update_heartbeat('ghost_simulator',
+                    'running' if ghost_health.get('healthy') else 'error', ghost_health)
+                await self.db.update_heartbeat('auditor',
+                    'running' if auditor_health.get('healthy') else 'error', auditor_health)
+                await self.db.update_heartbeat('brain', 'running', brain_status)
+                await self.db.update_heartbeat('chat_engine', 'running', {
+                    'registered_agents': list(self.chat_engine.agents.keys())
+                })
+
+                # Brain pattern'larını yenile (yeni pattern'lar memory'ye yüklensin)
+                await self.brain.refresh_patterns()
+
+                # Her 2 dakikada bir loglama
+                if int(asyncio.get_event_loop().time()) % 120 < 35:
+                    logger.info(f"📊 HEALTH CHECK")
+                    logger.info(f"  🧠 Brain: {brain_status['total_patterns']} patterns | "
+                                 f"Accuracy: {brain_status['accuracy']:.1%}")
+                    logger.info(f"  Scout: {'✓' if scout_health.get('healthy') else '✗'} "
+                                 f"({scout_health.get('active_connections', 0)} conn | "
+                                 f"{scout_health.get('trade_counter', 0)} trades)")
+                    logger.info(f"  Strategist: {'✓' if strategist_health.get('healthy') else '✗'} "
+                                 f"({strategist_health.get('signals_generated', 0)} signals)")
+                    logger.info(f"  Ghost: {'✓' if ghost_health.get('healthy') else '✗'} "
+                                 f"({ghost_health.get('active_simulations', 0)} active | "
+                                 f"Win: {ghost_health.get('win_rate', 0):.0f}%)")
+                    logger.info(f"  Auditor: {'✓' if auditor_health.get('healthy') else '✗'} "
+                                 f"(#{auditor_health.get('audit_count', 0)})")
 
             except Exception as e:
                 logger.error(f"Health monitoring error: {e}")

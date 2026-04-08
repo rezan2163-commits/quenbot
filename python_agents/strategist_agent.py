@@ -270,6 +270,33 @@ class StrategistAgent:
                                 f"Generated signal [{market_type}] {symbol} dir={direction} sim={best_similarity:.2f} score={score:.4f}"
                             )
 
+                        # Momentum-based signal: evolutionary algo güçlü sonuç buldu ama yeterli geçmiş veri yok
+                        elif score > 0.5 and mean_profit > Config.STRATEGY_MIN_MEAN_PROFIT * 2 and best_similarity < Config.SIMILARITY_THRESHOLD:
+                            momentum_conf = min(score * 0.7, 0.85)
+                            signal_type = f'momentum_{direction}'
+                            signal_payload = {
+                                'market_type': market_type,
+                                'symbol': symbol,
+                                'signal_type': signal_type,
+                                'confidence': float(momentum_conf),
+                                'price': last_price,
+                                'timestamp': datetime.utcnow(),
+                                'metadata': {
+                                    'position_bias': direction,
+                                    'strategy_score': float(score),
+                                    'mean_profit': float(mean_profit),
+                                    'risk': float(risk),
+                                    'sample_count': len(prices),
+                                    'market_type': market_type,
+                                    'bootstrap': True
+                                }
+                            }
+                            await self.db.insert_signal(signal_payload)
+                            self.signals_generated += 1
+                            logger.info(
+                                f"📈 Momentum signal [{market_type}] {symbol} dir={direction} score={score:.4f} profit={mean_profit:.4f}"
+                            )
+
                     except Exception as e:
                         logger.debug(f"Error processing {symbol} ({market_type}): {e}")
                         continue
@@ -280,20 +307,14 @@ class StrategistAgent:
             logger.error(f"Error in strategy analysis: {e}")
 
     async def health_check(self) -> Dict[str, Any]:
-        return {
-            "healthy": True,
-            "last_activity": self.last_activity.isoformat() if self.last_activity else None,
-            "analysis_count": self.analysis_count,
-            "signals_generated": self.signals_generated,
-            "brain_connected": self.brain is not None,
-        }
-
-    async def health_check(self) -> Dict[str, Any]:
         try:
             recent_movements = await self.db.get_recent_movements(Config.WATCHLIST[0], hours=1, market_type='spot')
             return {
                 "healthy": True,
                 "last_activity": self.last_activity.isoformat() if self.last_activity else None,
+                "analysis_count": self.analysis_count,
+                "signals_generated": self.signals_generated,
+                "brain_connected": self.brain is not None,
                 "recent_movements_analyzed": len(recent_movements),
                 "similarity_threshold": Config.SIMILARITY_THRESHOLD
             }

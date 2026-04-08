@@ -243,6 +243,18 @@ class Database:
                 )
             """)
 
+            # Agent heartbeat table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS agent_heartbeat (
+                    id SERIAL PRIMARY KEY,
+                    agent_name VARCHAR(50) NOT NULL UNIQUE,
+                    status VARCHAR(20) NOT NULL DEFAULT 'running',
+                    last_heartbeat TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    metadata JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Create indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_timestamp ON trades(symbol, timestamp)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_price_movements_symbol_time ON price_movements(symbol, start_time)")
@@ -710,3 +722,26 @@ class Database:
                 'learning': learning,
                 'recent_patterns': [dict(r) for r in recent_patterns],
             }
+
+    # ─── Agent Heartbeat Operations ───
+
+    async def update_heartbeat(self, agent_name: str, status: str = 'running',
+                                 metadata: Dict = None):
+        """Agent heartbeat güncelle"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO agent_heartbeat (agent_name, status, last_heartbeat, metadata)
+                VALUES ($1, $2, CURRENT_TIMESTAMP, $3)
+                ON CONFLICT (agent_name)
+                DO UPDATE SET status = $2, last_heartbeat = CURRENT_TIMESTAMP,
+                              metadata = COALESCE($3, agent_heartbeat.metadata)
+            """, agent_name, status, json.dumps(metadata or {}))
+
+    async def get_agent_heartbeats(self) -> List[Dict[str, Any]]:
+        """Tüm agent heartbeat'lerini getir"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT agent_name, status, last_heartbeat, metadata
+                FROM agent_heartbeat ORDER BY agent_name
+            """)
+            return [dict(row) for row in rows]

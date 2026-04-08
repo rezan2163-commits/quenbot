@@ -93,12 +93,13 @@ class ScoutAgent:
 
     async def _monitor_binance_market(self, market_type: str):
         """Monitor the Binance trade stream for a specific market type using 2026 API format."""
-        # For futures, use REST fallback instead of unreliable websocket
         if market_type == 'futures':
-            logger.info(f"⚠ Binance futures using REST fallback (WebSocket endpoint unstable)")
-            return
-            
-        ws_base = Config.BINANCE_SPOT_WS_URL
+            ws_base = Config.BINANCE_FUTURES_WS_URL
+            if not ws_base:
+                logger.info(f"⚠ Binance futures using REST fallback (WebSocket endpoint not configured)")
+                return
+        else:
+            ws_base = Config.BINANCE_SPOT_WS_URL
         
         while self.running:
             try:
