@@ -93,16 +93,20 @@ class StrategistAgent:
                             if not snapshot:
                                 continue
 
+                            # Mode-aware similarity threshold
+                            brain_sim_threshold = sim_threshold if self.risk_manager else Config.SIMILARITY_THRESHOLD
                             matches = self.brain.find_matching_patterns(
-                                snapshot, min_similarity=Config.SIMILARITY_THRESHOLD)
+                                snapshot, min_similarity=max(brain_sim_threshold, 0.2))
 
                             if matches:
                                 prediction = self.brain.predict_direction(matches)
                                 confidence = prediction['confidence']
                                 direction = prediction['direction']
 
-                                # Brain'e sor: sinyal üretmeli miyiz?
-                                if (confidence >= 0.6 and
+                                # Mode-aware confidence threshold
+                                min_conf = 0.3 if (self.state_tracker and 
+                                    self.state_tracker.get_mode() in ('BOOTSTRAP', 'LEARNING')) else 0.6
+                                if (confidence >= min_conf and
                                         self.brain.should_generate_signal(symbol, direction, confidence)):
 
                                     # En iyi timeframe'i seç
@@ -196,11 +200,21 @@ class StrategistAgent:
     async def _analyze_strategies(self):
         try:
             watchlist = await self._get_watchlist()
+
+            # Mode-aware thresholds
+            if self.risk_manager:
+                mode_params = self.risk_manager.get_mode_params()
+                sim_threshold = mode_params['similarity_threshold']
+                min_profit = mode_params['min_mean_profit']
+            else:
+                sim_threshold = Config.SIMILARITY_THRESHOLD
+                min_profit = Config.STRATEGY_MIN_MEAN_PROFIT
+
             for market_type in Config.MARKET_TYPES:
                 for symbol in watchlist:
                     try:
                         trades = await self.db.get_recent_trades(symbol, limit=250, market_type=market_type)
-                        if len(trades) < 60:
+                        if len(trades) < 30:
                             continue
 
                         prices = np.array([float(row['price']) for row in reversed(trades)], dtype=np.float64)
@@ -245,12 +259,12 @@ class StrategistAgent:
                         first_price = float(prices[0])
                         direction = 'long' if last_price > first_price else 'short'
 
-                        if best_similarity >= Config.SIMILARITY_THRESHOLD and score > 0 and mean_profit > Config.STRATEGY_MIN_MEAN_PROFIT:
-                            # Technical indicators enrichment
-                            ind = compute_all_indicators(prices)
-                            trend = ind.get('trend_summary', {})
-                            atr_ratio = ind.get('atr_ratio', 0.02)
+                        # Technical indicators (her durumda hesapla)
+                        ind = compute_all_indicators(prices)
+                        trend_summary = ind.get('trend_summary', {})
+                        atr_ratio = ind.get('atr_ratio', 0.02)
 
+                        if best_similarity >= sim_threshold and score > 0 and mean_profit > min_profit:
                             signal_type = f'evolutionary_similarity_{direction}'
                             signal_payload = {
                                 'market_type': market_type,
@@ -272,7 +286,7 @@ class StrategistAgent:
                                     'market_type': market_type,
                                     'rsi': ind.get('rsi'),
                                     'macd': ind.get('macd', {}).get('histogram') if ind.get('macd') else None,
-                                    'trend': trend.get('trend'),
+                                    'trend': trend_summary.get('trend'),
                                     'atr_ratio': atr_ratio,
                                 }
                             }
@@ -282,9 +296,9 @@ class StrategistAgent:
                                 f"Generated signal [{market_type}] {symbol} dir={direction} sim={best_similarity:.2f} score={score:.4f}"
                             )
 
-                        # Momentum-based signal: evolutionary algo güçlü sonuç buldu ama yeterli geçmiş veri yok
-                        elif score > 0.5 and mean_profit > Config.STRATEGY_MIN_MEAN_PROFIT * 2 and best_similarity < Config.SIMILARITY_THRESHOLD:
-                            momentum_conf = min(score * 0.7, 0.85)
+                        # Momentum-based signal: evolutionary algo sonuç buldu
+                        elif score > 0.15 and mean_profit > min_profit and best_similarity < sim_threshold:
+                            momentum_conf = min(max(score * 0.6, 0.3), 0.85)
                             signal_type = f'momentum_{direction}'
                             signal_payload = {
                                 'market_type': market_type,
@@ -308,6 +322,47 @@ class StrategistAgent:
                             logger.info(
                                 f"📈 Momentum signal [{market_type}] {symbol} dir={direction} score={score:.4f} profit={mean_profit:.4f}"
                             )
+
+                        # BOOTSTRAP/LEARNING: Basit fiyat hareketi sinyali
+                        elif self.state_tracker and self.state_tracker.get_mode() in ('BOOTSTRAP', 'LEARNING'):
+                            price_change_pct = (last_price - first_price) / first_price
+                            trend_dir = trend_summary.get('trend', 'neutral')
+                            trend_strength = trend_summary.get('strength', 0)
+
+                            # RSI + trend alignment → sinyal
+                            rsi_val = ind.get('rsi')
+                            if (abs(price_change_pct) > 0.003 and trend_strength > 0.3 and
+                                    rsi_val is not None and 25 < rsi_val < 75):
+                                pa_direction = 'long' if price_change_pct > 0 and trend_dir == 'bullish' else (
+                                    'short' if price_change_pct < 0 and trend_dir == 'bearish' else None
+                                )
+                                if pa_direction:
+                                    pa_conf = min(abs(price_change_pct) * 20 + trend_strength * 0.3, 0.7)
+                                    signal_payload = {
+                                        'market_type': market_type,
+                                        'symbol': symbol,
+                                        'signal_type': f'price_action_{pa_direction}',
+                                        'confidence': float(pa_conf),
+                                        'price': last_price,
+                                        'timestamp': datetime.utcnow(),
+                                        'metadata': {
+                                            'position_bias': pa_direction,
+                                            'price_change_pct': float(price_change_pct),
+                                            'rsi': float(rsi_val),
+                                            'trend': trend_dir,
+                                            'trend_strength': float(trend_strength),
+                                            'atr_ratio': atr_ratio,
+                                            'sample_count': len(prices),
+                                            'market_type': market_type,
+                                            'bootstrap': True,
+                                        }
+                                    }
+                                    await self.db.insert_signal(signal_payload)
+                                    self.signals_generated += 1
+                                    logger.info(
+                                        f"🔥 Price action [{market_type}] {symbol} {pa_direction} "
+                                        f"chg={price_change_pct*100:.2f}% rsi={rsi_val:.0f} trend={trend_dir}"
+                                    )
 
                     except Exception as e:
                         logger.debug(f"Error processing {symbol} ({market_type}): {e}")
