@@ -305,6 +305,11 @@ class Database:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_time ON chat_messages(created_at)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_watchlist_active ON user_watchlist(active)")
 
+            # ── Migrations: widen VARCHAR columns that were too narrow ──
+            await conn.execute("""
+                ALTER TABLE signals ALTER COLUMN signal_type TYPE VARCHAR(50)
+            """)
+
     # Trade operations
     async def insert_trade(self, trade_data: Dict[str, Any]) -> int:
         """Insert a new trade"""
