@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Dict, List, Any
 
 from config import Config
@@ -347,6 +348,13 @@ class AuditorAgent:
         try:
             recent_audits = await self.db.get_recent_audits(limit=1)
             latest_audit = recent_audits[0] if recent_audits else None
+            # Sanitize datetime/Decimal fields for JSON serialization
+            if latest_audit:
+                for k, v in list(latest_audit.items()):
+                    if hasattr(v, 'isoformat'):
+                        latest_audit[k] = v.isoformat()
+                    elif isinstance(v, Decimal):
+                        latest_audit[k] = float(v)
 
             return {
                 "healthy": True,

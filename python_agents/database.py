@@ -1,7 +1,8 @@
 import asyncpg
 import json
 import logging
-from datetime import datetime, timedelta
+import numpy as np
+from datetime import datetime, timedelta, date
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
 from config import Config
@@ -10,11 +11,21 @@ logger = logging.getLogger(__name__)
 
 
 def _json_serial(obj):
-    if isinstance(obj, datetime):
+    if isinstance(obj, (datetime, date)):
         return obj.isoformat()
+    if isinstance(obj, timedelta):
+        return obj.total_seconds()
     if isinstance(obj, Decimal):
         return float(obj)
-    raise TypeError(f"Type {type(obj)} not serializable")
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, set):
+        return list(obj)
+    return str(obj)  # fallback: convert to string instead of crashing
 
 
 def _dumps(obj):
