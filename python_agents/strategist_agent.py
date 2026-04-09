@@ -278,7 +278,11 @@ class StrategistAgent:
 
                         # Technical indicators (her durumda hesapla)
                         ind = compute_all_indicators(prices)
+                        if not isinstance(ind, dict):
+                            ind = {}
                         trend_summary = ind.get('trend_summary', {})
+                        if not isinstance(trend_summary, dict):
+                            trend_summary = {}
                         atr_ratio = ind.get('atr_ratio', 0.02)
 
                         # Debug log for analysis
@@ -395,8 +399,7 @@ class StrategistAgent:
                                     )
 
                     except Exception as e:
-                        import traceback
-                        logger.error(f"Error processing {symbol} ({market_type}): {e}\n{traceback.format_exc()}")
+                        logger.exception(f"Error processing {symbol} ({market_type}): {e}")
                         continue
 
             self.last_activity = datetime.utcnow()

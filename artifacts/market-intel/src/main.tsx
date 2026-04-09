@@ -21,13 +21,13 @@ type TableStats = { table_name: string; row_count: number }[];
 type Tab = "overview" | "markets" | "orderflow" | "bot" | "livedata" | "brain" | "chat" | "admin" | "system";
 
 /* ───────── Helpers ───────── */
-const fmt = (v: number, d = 2) => new Intl.NumberFormat("en-US", { maximumFractionDigits: d }).format(v);
-const fmtUsd = (v: number) => `$${fmt(v)}`;
-const fmtPct = (v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+const fmt = (v: any, d = 2) => { const n = Number(v); return new Intl.NumberFormat("en-US", { maximumFractionDigits: d }).format(isNaN(n) ? 0 : n); };
+const fmtUsd = (v: any) => `$${fmt(v)}`;
+const fmtPct = (v: any) => { const n = Number(v); return `${isNaN(n) ? 0 : n >= 0 ? "+" : ""}${(isNaN(n) ? 0 : n).toFixed(2)}%`; };
 const fmtTime = (s: string) => { try { return new Date(s).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" }); } catch { return "—"; } };
 const fmtTimeShort = (s: string) => { try { return new Date(s).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }); } catch { return "—"; } };
 const cls = (...c: (string | false | undefined | null)[]) => c.filter(Boolean).join(" ");
-const ago = (minutes: number) => { if (minutes < 60) return `${minutes}m`; if (minutes < 1440) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`; return `${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h`; };
+const ago = (minutes: any) => { const m = safeNum(minutes); if (m < 60) return `${m}m`; if (m < 1440) return `${Math.floor(m / 60)}h ${m % 60}m`; return `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`; };
 const safeNum = (v: any, d = 0): number => { const n = Number(v); return isNaN(n) ? d : n; };
 const fmtDateTime = (s: string) => { try { const d = new Date(s); return `${d.toLocaleDateString("tr-TR", { day: "2-digit", month: "short" })} ${d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}`; } catch { return "—"; } };
 const safeMeta = (m: any): Record<string, any> => { if (!m) return {}; if (typeof m === 'string') { try { const p = JSON.parse(m); return (p && typeof p === 'object') ? p : {}; } catch { return {}; } } return (typeof m === 'object') ? m : {}; };
@@ -48,23 +48,24 @@ function MiniBarChart({ data, height = 48, color = "var(--accent)" }: { data: nu
 }
 
 /* ───────── Progress Ring ───────── */
-function ProgressRing({ value, size = 80, stroke = 6, color = "var(--accent)" }: { value: number; size?: number; stroke?: number; color?: string }) {
+function ProgressRing({ value, size = 80, stroke = 6, color = "var(--accent)" }: { value: any; size?: number; stroke?: number; color?: string }) {
+  const val = safeNum(value);
   const r = (size - stroke) / 2;
   const circ = 2 * Math.PI * r;
-  const offset = circ - (Math.min(value, 100) / 100) * circ;
+  const offset = circ - (Math.min(val, 100) / 100) * circ;
   return (
     <svg width={size} height={size} style={{ display: "block" }}>
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(148,163,184,0.1)" strokeWidth={stroke} />
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round" transform={`rotate(-90 ${size / 2} ${size / 2})`} />
-      <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle" fill="currentColor" fontSize="14" fontWeight="700">{value.toFixed(0)}%</text>
+      <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle" fill="currentColor" fontSize="14" fontWeight="700">{val.toFixed(0)}%</text>
     </svg>
   );
 }
 
 /* ───────── Flow Bar ───────── */
 function FlowBar({ buy, sell }: { buy: number; sell: number }) {
-  const total = buy + sell || 1;
-  const pct = (buy / total) * 100;
+  const total = safeNum(buy) + safeNum(sell) || 1;
+  const pct = (safeNum(buy) / total) * 100;
   return (
     <div className="flow-bar-wrap">
       <div className="flow-bar"><div className="flow-bar-buy" style={{ width: `${pct}%` }} /></div>
@@ -369,7 +370,7 @@ function App() {
             {liveStream && liveStream.exchange_freshness?.length > 0 ? (
               <div className="stream-grid">
                 {liveStream.exchange_freshness.map((ef, i) => {
-                  const ageSec = ef.age_seconds ?? 999;
+                  const ageSec = safeNum(ef.age_seconds, 999);
                   const freshClass = ageSec < 10 ? "stream-card-fresh" : ageSec < 60 ? "stream-card-stale" : "stream-card-dead";
                   const dotColor = ageSec < 10 ? "var(--green)" : ageSec < 60 ? "var(--amber)" : "var(--red)";
                   return (
@@ -830,18 +831,18 @@ function App() {
 
           <div className="kpi-strip">
             <KPI label="Öğrenilen Pattern" value={brainStatus ? fmt(brainStatus.pattern_count, 0) : "0"} icon="🧬" accent="purple" />
-            <KPI label="Tahmin Doğruluğu" value={brainStatus ? `${brainStatus.learning.accuracy.toFixed(1)}%` : "0%"} icon="🎯" accent={brainStatus && brainStatus.learning.accuracy >= 50 ? "green" : "amber"} />
+            <KPI label="Tahmin Doğruluğu" value={brainStatus ? `${safeNum(brainStatus.learning.accuracy).toFixed(1)}%` : "0%"} icon="🎯" accent={brainStatus && safeNum(brainStatus.learning.accuracy) >= 50 ? "green" : "amber"} />
             <KPI label="Toplam Tahmin" value={brainStatus ? fmt(brainStatus.learning.total, 0) : "0"} icon="📊" />
             <KPI label="Doğru Tahmin" value={brainStatus ? fmt(brainStatus.learning.correct, 0) : "0"} icon="✅" accent="green" />
-            <KPI label="Ort. PnL" value={brainStatus ? `${brainStatus.learning.avg_pnl.toFixed(2)}%` : "0%"} icon="💰" accent={brainStatus && brainStatus.learning.avg_pnl > 0 ? "green" : "red"} />
+            <KPI label="Ort. PnL" value={brainStatus ? `${safeNum(brainStatus.learning.avg_pnl).toFixed(2)}%` : "0%"} icon="💰" accent={brainStatus && safeNum(brainStatus.learning.avg_pnl) > 0 ? "green" : "red"} />
           </div>
 
           <div className="grid-2">
             <div className="card card-center">
               <h3>Öğrenme Doğruluğu</h3>
-              {brainStatus && brainStatus.learning.total > 0 ? (
+              {brainStatus && safeNum(brainStatus.learning.total) > 0 ? (
                 <>
-                  <ProgressRing value={brainStatus.learning.accuracy} size={140} stroke={12} color={brainStatus.learning.accuracy >= 50 ? "var(--green)" : "var(--amber)"} />
+                  <ProgressRing value={safeNum(brainStatus.learning.accuracy)} size={140} stroke={12} color={safeNum(brainStatus.learning.accuracy) >= 50 ? "var(--green)" : "var(--amber)"} />
                   <div className="text-muted" style={{ marginTop: 16 }}>{brainStatus.learning.correct} doğru / {brainStatus.learning.total} toplam</div>
                 </>
               ) : (
@@ -858,8 +859,8 @@ function App() {
                 <div className="table-wrap"><table className="tbl"><thead><tr><th>Sinyal Tipi</th><th>Toplam</th><th>Doğru</th><th>Başarı</th><th>Ort PnL</th></tr></thead><tbody>
                   {brainStatus.signal_type_stats.map((s, i) => (
                     <tr key={i}><td>{s.signal_type}</td><td>{s.total}</td><td>{s.correct}</td>
-                    <td className={s.total > 0 && s.correct / s.total >= 0.5 ? "text-green" : "text-red"}>{s.total > 0 ? `${(s.correct / s.total * 100).toFixed(0)}%` : "—"}</td>
-                    <td className={s.avg_pnl >= 0 ? "text-green" : "text-red"}>{s.avg_pnl?.toFixed(2)}%</td></tr>
+                    <td className={safeNum(s.total) > 0 && safeNum(s.correct) / safeNum(s.total) >= 0.5 ? "text-green" : "text-red"}>{safeNum(s.total) > 0 ? `${(safeNum(s.correct) / safeNum(s.total) * 100).toFixed(0)}%` : "—"}</td>
+                    <td className={safeNum(s.avg_pnl) >= 0 ? "text-green" : "text-red"}>{safeNum(s.avg_pnl).toFixed(2)}%</td></tr>
                   ))}
                 </tbody></table></div>
               ) : <div className="empty-state">
@@ -875,7 +876,7 @@ function App() {
               <div className="card-header"><h3>Günlük Öğrenme Trendi</h3><span className="badge badge-cyan">Son 14 Gün</span></div>
               <div className="table-wrap"><table className="tbl"><thead><tr><th>Tarih</th><th>Toplam</th><th>Doğru</th><th>Doğruluk</th></tr></thead><tbody>
                 {learningStats.daily_accuracy.map((d: any, i: number) => {
-                  const acc = d.total > 0 ? (d.correct / d.total * 100) : 0;
+                  const acc = safeNum(d.total) > 0 ? (safeNum(d.correct) / safeNum(d.total) * 100) : 0;
                   return (
                     <tr key={i}>
                       <td>{d.day ? new Date(d.day).toLocaleDateString("tr-TR") : "—"}</td><td>{d.total}</td><td>{d.correct}</td>
@@ -895,10 +896,10 @@ function App() {
                 {brainPatterns.map((p, i) => (
                   <tr key={i}>
                     <td><strong>{p.symbol}</strong></td>
-                    <td className={p.outcome_15m > 0 ? "text-green" : p.outcome_15m < 0 ? "text-red" : "text-muted"}>{p.outcome_15m != null ? `${(p.outcome_15m * 100).toFixed(2)}%` : "⏳"}</td>
-                    <td className={p.outcome_1h > 0 ? "text-green" : p.outcome_1h < 0 ? "text-red" : "text-muted"}>{p.outcome_1h != null ? `${(p.outcome_1h * 100).toFixed(2)}%` : "⏳"}</td>
-                    <td className={p.outcome_4h > 0 ? "text-green" : p.outcome_4h < 0 ? "text-red" : "text-muted"}>{p.outcome_4h != null ? `${(p.outcome_4h * 100).toFixed(2)}%` : "⏳"}</td>
-                    <td className={p.outcome_1d > 0 ? "text-green" : p.outcome_1d < 0 ? "text-red" : "text-muted"}>{p.outcome_1d != null ? `${(p.outcome_1d * 100).toFixed(2)}%` : "⏳"}</td>
+                    <td className={safeNum(p.outcome_15m) > 0 ? "text-green" : safeNum(p.outcome_15m) < 0 ? "text-red" : "text-muted"}>{p.outcome_15m != null ? `${(safeNum(p.outcome_15m) * 100).toFixed(2)}%` : "⏳"}</td>
+                    <td className={safeNum(p.outcome_1h) > 0 ? "text-green" : safeNum(p.outcome_1h) < 0 ? "text-red" : "text-muted"}>{p.outcome_1h != null ? `${(safeNum(p.outcome_1h) * 100).toFixed(2)}%` : "⏳"}</td>
+                    <td className={safeNum(p.outcome_4h) > 0 ? "text-green" : safeNum(p.outcome_4h) < 0 ? "text-red" : "text-muted"}>{p.outcome_4h != null ? `${(safeNum(p.outcome_4h) * 100).toFixed(2)}%` : "⏳"}</td>
+                    <td className={safeNum(p.outcome_1d) > 0 ? "text-green" : safeNum(p.outcome_1d) < 0 ? "text-red" : "text-muted"}>{p.outcome_1d != null ? `${(safeNum(p.outcome_1d) * 100).toFixed(2)}%` : "⏳"}</td>
                     <td className="text-muted">{fmtTime(p.created_at)}</td>
                   </tr>
                 ))}
@@ -1056,7 +1057,7 @@ function App() {
                         <div className="agent-name">{name}</div>
                         <div className="text-muted text-xs">
                           {isHealthy ? "Çalışıyor" : isStale ? "Yanıtlamıyor" : agent.status}
-                          {agent.age_seconds != null && ` · ${agent.age_seconds < 60 ? `${Math.round(agent.age_seconds)}sn` : `${Math.floor(agent.age_seconds / 60)}dk`} önce`}
+                          {agent.age_seconds != null && (() => { const a = safeNum(agent.age_seconds); return ` · ${a < 60 ? `${Math.round(a)}sn` : `${Math.floor(a / 60)}dk`} önce`; })()}
                         </div>
                       </div>
                     </div>
