@@ -26,7 +26,7 @@ def rsi(prices: np.ndarray, period: int = 14) -> Optional[float]:
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
+    return float(100.0 - (100.0 / (1.0 + rs)))
 
 
 def macd(prices: np.ndarray, fast: int = 12, slow: int = 26,

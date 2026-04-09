@@ -275,11 +275,13 @@ class StrategistAgent:
 
                         if best_similarity >= sim_threshold and score > 0 and mean_profit > min_profit:
                             signal_type = f'evolutionary_similarity_{direction}'
+                            # Confidence: en az 0.3, similarity varsa onu kullan, yoksa score-based
+                            evo_conf = max(float(best_similarity), min(float(score) * 0.1, 0.85), 0.3)
                             signal_payload = {
                                 'market_type': market_type,
                                 'symbol': symbol,
                                 'signal_type': signal_type,
-                                'confidence': float(min(max(best_similarity, 0), 1)),
+                                'confidence': float(min(evo_conf, 1.0)),
                                 'price': last_price,
                                 'timestamp': datetime.utcnow(),
                                 'metadata': {
@@ -293,10 +295,10 @@ class StrategistAgent:
                                     'history_count': len(historical_vectors),
                                     'sample_count': len(prices),
                                     'market_type': market_type,
-                                    'rsi': ind.get('rsi'),
-                                    'macd': ind.get('macd', {}).get('histogram') if ind.get('macd') else None,
+                                    'rsi': float(ind['rsi']) if ind.get('rsi') is not None else None,
+                                    'macd': float(ind['macd']['histogram']) if ind.get('macd') else None,
                                     'trend': trend_summary.get('trend'),
-                                    'atr_ratio': atr_ratio,
+                                    'atr_ratio': float(atr_ratio) if atr_ratio is not None else 0.02,
                                 }
                             }
                             await self.db.insert_signal(signal_payload)
@@ -374,7 +376,7 @@ class StrategistAgent:
                                     )
 
                     except Exception as e:
-                        logger.debug(f"Error processing {symbol} ({market_type}): {e}")
+                        logger.error(f"Error processing {symbol} ({market_type}): {e}")
                         continue
 
             self.last_activity = datetime.utcnow()
