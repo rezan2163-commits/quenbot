@@ -131,6 +131,11 @@ function App() {
   const [brainPatterns, setBrainPatterns] = useState<RecordRow[]>([]);
   const [learningStats, setLearningStats] = useState<RecordRow | null>(null);
   const [agentStatuses, setAgentStatuses] = useState<Record<string, any>>({});
+  const [rcaResults, setRcaResults] = useState<RecordRow[]>([]);
+  const [rcaStats, setRcaStats] = useState<RecordRow[]>([]);
+  const [corrections, setCorrections] = useState<RecordRow[]>([]);
+  const [signatures, setSignatures] = useState<RecordRow[]>([]);
+  const [signalSummary, setSignalSummary] = useState<RecordRow[]>([]);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -147,10 +152,13 @@ function App() {
         "/api/admin/failure-analysis?limit=20",
         "/api/analytics/pnl-timeline",
         "/api/brain/patterns?limit=30", "/api/brain/learning-stats",
-        "/api/agents/status"
+        "/api/agents/status",
+        "/api/rca/results", "/api/rca/stats",
+        "/api/corrections", "/api/signatures?limit=20",
+        "/api/signals/summary"
       ];
       const results = await Promise.all(ep.map(async url => { try { const r = await fetch(url); return r.ok ? r.json() : null; } catch { return null; } }));
-      const [s, p, b, tm, of2, tl, vd, ss, sig, sim, tr, mv, ch, chatM, wl, bs, ls, ts, ac, ar, fa, pt, bp, lst, agSt] = results;
+      const [s, p, b, tm, of2, tl, vd, ss, sig, sim, tr, mv, ch, chatM, wl, bs, ls, ts, ac, ar, fa, pt, bp, lst, agSt, rcaR, rcaS, corr, sigs, sigSum] = results;
       if (s) setSummary(s);
       if (p) { setPrevPrices(Object.fromEntries(livePrices.map(lp => [lp.symbol, lp.price]))); setLivePrices(p); }
       if (b) setBotSummary(b);
@@ -176,6 +184,11 @@ function App() {
       if (bp) setBrainPatterns(bp);
       if (lst) setLearningStats(lst);
       if (agSt?.agents) setAgentStatuses(agSt.agents);
+      if (rcaR) setRcaResults(Array.isArray(rcaR) ? rcaR : []);
+      if (rcaS) setRcaStats(Array.isArray(rcaS) ? rcaS : []);
+      if (corr) setCorrections(Array.isArray(corr) ? corr : []);
+      if (sigs) setSignatures(Array.isArray(sigs) ? sigs : []);
+      if (sigSum) setSignalSummary(Array.isArray(sigSum) ? sigSum : []);
       setError(null); setLastUpdate(new Date()); setRefreshCount(c => c + 1);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setLoading(false); }
@@ -449,6 +462,97 @@ function App() {
           </div>
           <div className="card"><div className="card-header"><h3>Simülasyonlar</h3><span className="badge">{simulations.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Yön</th><th>Giriş</th><th>Çıkış</th><th>PnL</th><th>PnL %</th><th>Durum</th></tr></thead><tbody>{simulations.slice(0, 15).map((s, i) => (<tr key={i}><td><strong>{s.symbol}</strong></td><td><span className={cls("side-badge", s.side === "long" ? "side-long" : "side-short")}>{s.side}</span></td><td>{fmtUsd(Number(s.entry_price))}</td><td>{s.exit_price ? fmtUsd(Number(s.exit_price)) : "—"}</td><td className={Number(s.pnl || 0) >= 0 ? "text-green" : "text-red"}>{s.pnl ? fmtUsd(Number(s.pnl)) : "—"}</td><td>{s.pnl_pct ? `${Number(s.pnl_pct).toFixed(2)}%` : "—"}</td><td><span className={cls("status-badge", `status-${s.status}`)}>{s.status}</span></td></tr>))}</tbody></table>{simulations.length === 0 && <div className="empty-state">Ghost simulator henüz aktif değil</div>}</div></div>
           <div className="card"><div className="card-header"><h3>Tespit Edilen Hareketler</h3><span className="badge badge-amber">{movements.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Borsa</th><th>Tip</th><th>Değişim</th><th>Yön</th><th>Hacim</th><th>Başlangıç</th><th>Bitiş</th></tr></thead><tbody>{movements.slice(0, 12).map((m, i) => (<tr key={i}><td><strong>{m.symbol}</strong></td><td>{m.exchange}</td><td><span className="badge badge-sm">{m.market_type}</span></td><td className={Number(m.change_pct) >= 0 ? "text-green" : "text-red"}>{fmtPct(Number(m.change_pct) * 100)}</td><td>{m.direction}</td><td>{fmt(Number(m.volume), 2)}</td><td>{fmtTimeShort(m.start_time)}</td><td>{fmtTimeShort(m.end_time)}</td></tr>))}</tbody></table>{movements.length === 0 && <div className="empty-state">Henüz %2'den büyük hareket tespit edilmedi</div>}</div></div>
+
+          {/* Signal Summary by Type */}
+          {signalSummary.length > 0 && (
+            <div className="card">
+              <div className="card-header"><h3>Sinyal Tipi Dağılımı</h3><span className="badge badge-purple">{signalSummary.reduce((s, r) => s + Number(r.count || 0), 0)} toplam</span></div>
+              <div className="db-stats-grid">
+                {signalSummary.map((s, i) => (
+                  <div key={i} className="db-stat-card">
+                    <div className="db-stat-name">{s.signal_type}</div>
+                    <div className="db-stat-value">{fmt(Number(s.count || 0), 0)}</div>
+                    <div className="text-muted text-xs">ort. güven: {s.avg_confidence != null ? `${(Number(s.avg_confidence) * 100).toFixed(0)}%` : "—"}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Historical Signatures */}
+          {signatures.length > 0 && (
+            <div className="card">
+              <div className="card-header"><h3>Tarihsel İmzalar (Cosine Benzerlik)</h3><span className="badge badge-cyan">{signatures.length}</span></div>
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Piyasa</th><th>Zaman Dilimi</th><th>Yön</th><th>Değişim %</th><th>Kayıt</th></tr></thead><tbody>
+                {signatures.map((s, i) => (
+                  <tr key={i}>
+                    <td><strong>{s.symbol}</strong></td>
+                    <td><span className="badge badge-sm">{s.market_type}</span></td>
+                    <td>{s.timeframe}</td>
+                    <td><span className={cls("side-badge", s.direction === "up" ? "side-long" : "side-short")}>{s.direction === "up" ? "YUKARI" : "AŞAĞI"}</span></td>
+                    <td className={Number(s.change_pct) >= 0 ? "text-green" : "text-red"}>{fmtPct(Number(s.change_pct || 0) * 100)}</td>
+                    <td className="text-muted">{s.created_at ? fmtTime(s.created_at) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody></table></div>
+            </div>
+          )}
+
+          {/* RCA Results */}
+          {rcaResults.length > 0 && (
+            <div className="card">
+              <div className="card-header"><h3>Kök Neden Analizi (RCA)</h3><span className="badge badge-red">{rcaResults.length}</span></div>
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Başarısızlık Tipi</th><th>Güven</th><th>Tahmin Vol.</th><th>Gerçek Vol.</th><th>Öneri</th><th>Zaman</th></tr></thead><tbody>
+                {rcaResults.slice(0, 15).map((r, i) => (
+                  <tr key={i}>
+                    <td><strong>{r.symbol || "—"}</strong></td>
+                    <td><span className="badge badge-sm badge-red">{r.failure_type || "—"}</span></td>
+                    <td>{r.confidence != null ? `${(Number(r.confidence) * 100).toFixed(0)}%` : "—"}</td>
+                    <td className="text-mono">{r.predicted_volatility != null ? Number(r.predicted_volatility).toFixed(4) : "—"}</td>
+                    <td className="text-mono">{r.actual_volatility != null ? Number(r.actual_volatility).toFixed(4) : "—"}</td>
+                    <td className="text-xs" style={{ maxWidth: 250, overflow: "hidden", textOverflow: "ellipsis" }}>{r.recommendation || "—"}</td>
+                    <td className="text-muted">{r.created_at ? fmtTime(r.created_at) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody></table></div>
+            </div>
+          )}
+
+          {/* RCA Stats */}
+          {rcaStats.length > 0 && (
+            <div className="card">
+              <div className="card-header"><h3>RCA Başarısızlık Dağılımı</h3><span className="badge badge-amber">İstatistik</span></div>
+              <div className="db-stats-grid">
+                {rcaStats.map((s, i) => (
+                  <div key={i} className="db-stat-card">
+                    <div className="db-stat-name">{s.failure_type}</div>
+                    <div className="db-stat-value">{fmt(Number(s.count || 0), 0)}</div>
+                    <div className="text-muted text-xs">ort. güven: {s.avg_confidence != null ? `${(Number(s.avg_confidence) * 100).toFixed(0)}%` : "—"}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Correction Notes */}
+          {corrections.length > 0 && (
+            <div className="card">
+              <div className="card-header"><h3>Oto-Düzeltme Notları</h3><span className="badge badge-green">{corrections.filter(c => c.applied).length} uygulandı</span></div>
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Sinyal Tipi</th><th>Başarısızlık</th><th>Ayar</th><th>Değer</th><th>Durum</th><th>Sebep</th><th>Zaman</th></tr></thead><tbody>
+                {corrections.slice(0, 20).map((c, i) => (
+                  <tr key={i}>
+                    <td>{c.signal_type || "—"}</td>
+                    <td><span className="badge badge-sm badge-red">{c.failure_type || "—"}</span></td>
+                    <td className="text-mono">{c.adjustment_key || "—"}</td>
+                    <td className="text-mono">{c.adjustment_value || "—"}</td>
+                    <td>{c.applied ? <span className="badge badge-sm badge-green">Uygulandı</span> : <span className="badge badge-sm badge-amber">Bekliyor</span>}</td>
+                    <td className="text-xs" style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis" }}>{c.reason || "—"}</td>
+                    <td className="text-muted">{c.created_at ? fmtTime(c.created_at) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody></table></div>
+            </div>
+          )}
         </>)}
 
         {/* ═══ BRAIN ═══ */}

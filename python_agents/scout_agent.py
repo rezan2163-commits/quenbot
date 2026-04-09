@@ -1,16 +1,31 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 
+import numpy as np
 import websockets
 import aiohttp
 
 from config import Config
 from database import Database
+from indicators import compute_all_indicators
+from similarity_engine import cosine_sim
 
 logger = logging.getLogger(__name__)
+
+# Multi-timeframe windows for movement detection (minutes)
+MOVEMENT_TIMEFRAMES = {
+    '5m': 5,
+    '15m': 15,
+    '1h': 60,
+    '4h': 240,
+    '1d': 1440,
+}
+
+# Minimum change to capture a historical signature
+SIGNATURE_THRESHOLD = 0.02  # 2%
 
 class ScoutAgent:
     def __init__(self, db: Database, brain=None):
@@ -363,66 +378,154 @@ class ScoutAgent:
             logger.error(f"Error processing Bybit message: {e}")
 
     async def _price_movement_detector(self):
-        """Detect significant price movements across all watchlist symbols."""
+        """Detect significant price movements across multiple timeframes (5m–1d)."""
         while self.running:
             try:
                 await asyncio.sleep(60)
                 for market_type in Config.MARKET_TYPES:
                     for symbol in self.get_watchlist():
-                        await self._check_price_movement(symbol, market_type)
+                        for tf_key, tf_minutes in MOVEMENT_TIMEFRAMES.items():
+                            await self._check_price_movement_tf(symbol, market_type, tf_key, tf_minutes)
             except Exception as e:
                 logger.error(f"Price movement detector error: {e}")
                 await asyncio.sleep(30)
 
-    async def _check_price_movement(self, symbol: str, market_type: str):
-        """Check for significant price movement for a symbol and market type."""
+    async def _check_price_movement_tf(self, symbol: str, market_type: str,
+                                        tf_key: str, tf_minutes: int):
+        """Check for significant price movement in a specific timeframe window."""
         try:
-            recent_trades = await self.db.get_recent_trades(symbol, limit=100, market_type=market_type)
-            if len(recent_trades) < 10:
+            cutoff = datetime.utcnow() - timedelta(minutes=tf_minutes)
+            trades = await self.db.get_trades_in_range(
+                symbol, cutoff, datetime.utcnow(), market_type=market_type)
+            if len(trades) < 10:
                 return
 
-            start_price = recent_trades[-1]['price']
-            end_price = recent_trades[0]['price']
-            change_pct = abs(end_price - start_price) / max(start_price, 1e-8)
+            prices = [float(t['price']) for t in trades]
+            start_price = prices[0]
+            end_price = prices[-1]
+            high_price = max(prices)
+            low_price = min(prices)
 
-            buy_volume = sum(t['quantity'] for t in recent_trades if t['side'] == 'buy')
-            sell_volume = sum(t['quantity'] for t in recent_trades if t['side'] == 'sell')
-            direction = 'long' if buy_volume >= sell_volume else 'short'
-            aggressiveness = float(buy_volume / (sell_volume + 1)) if direction == 'long' else float(sell_volume / (buy_volume + 1))
+            change_pct = (end_price - start_price) / max(start_price, 1e-8)
+            abs_change = abs(change_pct)
 
-            if change_pct >= Config.PRICE_MOVEMENT_THRESHOLD:
-                price_profile = [trade['price'] for trade in reversed(recent_trades)]
-                norm_price_profile = self._build_movement_vector(price_profile)
+            if abs_change < Config.PRICE_MOVEMENT_THRESHOLD:
+                return
 
-                movement_data = {
-                    'exchange': recent_trades[0]['exchange'],
-                    'market_type': market_type,
-                    'symbol': symbol,
-                    'start_price': start_price,
-                    'end_price': end_price,
-                    'change_pct': change_pct,
-                    'volume': sum(trade['quantity'] for trade in recent_trades),
-                    'buy_volume': buy_volume,
-                    'sell_volume': sell_volume,
+            buy_volume = sum(float(t['quantity']) for t in trades if t['side'] == 'buy')
+            sell_volume = sum(float(t['quantity']) for t in trades if t['side'] == 'sell')
+            direction = 'long' if change_pct > 0 else 'short'
+            total_volume = buy_volume + sell_volume
+            aggressiveness = float(buy_volume / max(sell_volume, 1e-8)) if direction == 'long' \
+                else float(sell_volume / max(buy_volume, 1e-8))
+
+            norm_profile = self._build_movement_vector(prices)
+
+            movement_data = {
+                'exchange': trades[0].get('exchange', 'mixed'),
+                'market_type': market_type,
+                'symbol': symbol,
+                'start_price': start_price,
+                'end_price': end_price,
+                'change_pct': abs_change,
+                'volume': total_volume,
+                'buy_volume': buy_volume,
+                'sell_volume': sell_volume,
+                'direction': direction,
+                'aggressiveness': aggressiveness,
+                'start_time': trades[0]['timestamp'],
+                'end_time': trades[-1]['timestamp'],
+                't10_data': {
+                    'trade_count': len(trades),
+                    'average_price': sum(prices) / len(prices),
+                    'total_volume': total_volume,
+                    'buy_volume': float(buy_volume),
+                    'sell_volume': float(sell_volume),
                     'direction': direction,
-                    'aggressiveness': aggressiveness,
-                    'start_time': recent_trades[-1]['timestamp'],
-                    'end_time': recent_trades[0]['timestamp'],
-                    't10_data': {
-                        'trade_count': len(recent_trades),
-                        'average_price': sum(t['price'] for t in recent_trades) / len(recent_trades),
-                        'total_volume': buy_volume + sell_volume,
-                        'buy_volume': buy_volume,
-                        'sell_volume': sell_volume,
-                        'direction': direction,
-                        'price_profile': norm_price_profile,
-                    }
+                    'price_profile': norm_profile,
+                    'high': high_price,
+                    'low': low_price,
+                    'timeframe': tf_key,
                 }
-                await self.db.insert_price_movement(movement_data)
-                logger.info(f"📊 Movement detected [{market_type}] {symbol}: {change_pct:.2%}, direction={direction}, agg={aggressiveness:.2f}")
+            }
+            mv_id = await self.db.insert_price_movement(movement_data)
+            logger.info(f"📊 Movement [{tf_key}] [{market_type}] {symbol}: "
+                         f"{change_pct:+.2%}, dir={direction}, agg={aggressiveness:.2f}")
+
+            # ≥2% move → capture historical signature (pre-move pattern)
+            if abs_change >= SIGNATURE_THRESHOLD:
+                await self._capture_historical_signature(
+                    symbol, market_type, tf_key, tf_minutes,
+                    direction, change_pct, trades, mv_id)
 
         except Exception as e:
-            logger.error(f"Error checking price movement for {symbol} ({market_type}): {e}")
+            logger.error(f"Error checking price movement {symbol} {tf_key} ({market_type}): {e}")
+
+    async def _capture_historical_signature(self, symbol: str, market_type: str,
+                                              tf_key: str, tf_minutes: int,
+                                              direction: str, change_pct: float,
+                                              move_trades: List[Dict], movement_id: int):
+        """Capture the pre-move pattern as a Historical Signature for future similarity matching."""
+        try:
+            # Get trades from BEFORE the move started (same duration window)
+            move_start = move_trades[0]['timestamp']
+            if isinstance(move_start, str):
+                move_start = datetime.fromisoformat(move_start)
+            pre_start = move_start - timedelta(minutes=tf_minutes)
+
+            pre_trades = await self.db.get_trades_in_range(
+                symbol, pre_start, move_start, market_type=market_type)
+            if len(pre_trades) < 10:
+                return
+
+            pre_prices = np.array([float(t['price']) for t in pre_trades], dtype=np.float64)
+            pre_vector = self._build_movement_vector(pre_prices.tolist())
+
+            # Calculate pre-move indicators
+            pre_indicators = {}
+            try:
+                ind = compute_all_indicators(pre_prices)
+                pre_indicators = {
+                    'rsi': float(ind['rsi']) if ind.get('rsi') is not None else None,
+                    'macd_histogram': float(ind['macd']['histogram']) if ind.get('macd') else None,
+                    'bollinger_pct_b': float(ind['bollinger']['pct_b']) if ind.get('bollinger') else None,
+                    'atr_ratio': float(ind['atr_ratio']) if ind.get('atr_ratio') is not None else None,
+                    'trend': ind.get('trend_summary', {}).get('trend', 'neutral'),
+                    'trend_strength': float(ind.get('trend_summary', {}).get('strength', 0)),
+                }
+            except Exception:
+                pass
+
+            # Volume profile of pre-move period
+            pre_buy_vol = sum(float(t['quantity']) for t in pre_trades if t['side'] == 'buy')
+            pre_sell_vol = sum(float(t['quantity']) for t in pre_trades if t['side'] == 'sell')
+            volume_profile = {
+                'total': float(pre_buy_vol + pre_sell_vol),
+                'buy_ratio': float(pre_buy_vol / max(pre_buy_vol + pre_sell_vol, 1e-8)),
+                'trade_count': len(pre_trades),
+            }
+
+            sig_data = {
+                'symbol': symbol,
+                'market_type': market_type,
+                'timeframe': tf_key,
+                'direction': direction,
+                'change_pct': float(change_pct),
+                'pre_move_vector': pre_vector,
+                'pre_move_indicators': pre_indicators,
+                'volume_profile': volume_profile,
+                'movement_id': movement_id,
+            }
+            sig_id = await self.db.insert_historical_signature(sig_data)
+            logger.info(f"🔖 Historical signature captured [{tf_key}] {symbol} "
+                         f"{direction} {change_pct:+.2%} (sig_id={sig_id})")
+
+        except Exception as e:
+            logger.error(f"Error capturing signature {symbol} {tf_key}: {e}")
+
+    async def _check_price_movement(self, symbol: str, market_type: str):
+        """Legacy single-window check — now delegates to multi-TF."""
+        await self._check_price_movement_tf(symbol, market_type, '15m', 15)
 
     def _build_movement_vector(self, prices: List[float]) -> List[float]:
         """Build a normalized movement vector for similarity comparison."""

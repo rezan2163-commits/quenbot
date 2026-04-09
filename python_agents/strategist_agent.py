@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 
 import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity as sk_cosine
 
 from config import Config
 from database import Database
@@ -48,7 +49,9 @@ class StrategistAgent:
 
         try:
             while self.running:
+                await self._apply_correction_notes()
                 await self._analyze_strategies()
+                await self._signature_matching()
                 await self._multi_timeframe_analysis()
                 await self._update_pattern_outcomes()
                 await asyncio.sleep(60)  # Her 1 dakikada bir
@@ -383,6 +386,135 @@ class StrategistAgent:
 
         except Exception as e:
             logger.error(f"Error in strategy analysis: {e}")
+
+    async def _signature_matching(self):
+        """Compare current market state against stored historical signatures.
+        If cosine_similarity > 50%, generate a TradeSignal."""
+        try:
+            watchlist = await self._get_watchlist()
+            for market_type in Config.MARKET_TYPES:
+                for symbol in watchlist:
+                    try:
+                        # Get recent trades to build current vector
+                        trades = await self.db.get_recent_trades(symbol, limit=100, market_type=market_type)
+                        if len(trades) < 20:
+                            continue
+
+                        prices = np.array([float(t['price']) for t in reversed(trades)], dtype=np.float64)
+                        current_vector = np.array(
+                            [(p - prices[0]) / max(prices[0], 1e-8) for p in prices],
+                            dtype=np.float64
+                        )
+                        if current_vector.size < 4:
+                            continue
+
+                        # Fetch historical signatures for this symbol
+                        signatures = await self.db.get_historical_signatures(symbol=symbol, limit=100)
+                        if not signatures:
+                            continue
+
+                        for sig in signatures:
+                            sig_vector = sig.get('pre_move_vector', [])
+                            if not sig_vector or len(sig_vector) < 4:
+                                continue
+
+                            sig_arr = np.array(sig_vector, dtype=np.float64)
+
+                            # Align lengths
+                            min_len = min(len(current_vector), len(sig_arr))
+                            cv = current_vector[:min_len].reshape(1, -1)
+                            sv = sig_arr[:min_len].reshape(1, -1)
+
+                            similarity = float(sk_cosine(cv, sv)[0][0])
+                            if similarity < 0.50:
+                                continue
+
+                            sig_direction = sig.get('direction', 'long')
+                            sig_change = float(sig.get('change_pct', 0))
+                            sig_tf = sig.get('timeframe', '15m')
+
+                            confidence = float(min(similarity * 0.9, 0.95))
+                            signal_type = f'signature_{sig_direction}'
+                            last_price = float(prices[-1])
+
+                            signal_payload = {
+                                'market_type': market_type,
+                                'symbol': symbol,
+                                'signal_type': signal_type,
+                                'confidence': confidence,
+                                'price': last_price,
+                                'timestamp': datetime.utcnow(),
+                                'metadata': {
+                                    'position_bias': sig_direction,
+                                    'cosine_similarity': float(similarity),
+                                    'reference_change_pct': float(sig_change),
+                                    'reference_timeframe': sig_tf,
+                                    'signature_id': sig.get('id'),
+                                    'pre_move_indicators': sig.get('pre_move_indicators', {}),
+                                    'market_type': market_type,
+                                }
+                            }
+                            await self.db.insert_signal(signal_payload)
+                            self.signals_generated += 1
+                            logger.info(
+                                f"🔖 Signature match [{market_type}] {symbol} {sig_direction} "
+                                f"sim={similarity:.2f} ref_chg={sig_change:+.2%} tf={sig_tf}"
+                            )
+                            break  # 1 match per symbol per cycle
+
+                    except Exception as e:
+                        logger.error(f"Signature matching error {symbol} ({market_type}): {e}")
+                        continue
+
+        except Exception as e:
+            logger.error(f"Signature matching global error: {e}")
+
+    async def _apply_correction_notes(self):
+        """Read pending correction notes from RCA and adjust thresholds."""
+        try:
+            corrections = await self.db.get_pending_corrections()
+            if not corrections:
+                return
+
+            for note in corrections:
+                adj_key = note['adjustment_key']
+                adj_val = float(note['adjustment_value'])
+                signal_type = note['signal_type']
+                reason = note.get('reason', '')
+
+                if adj_key == 'similarity_threshold':
+                    old_val = Config.SIMILARITY_THRESHOLD
+                    Config.SIMILARITY_THRESHOLD = max(0.1, min(0.95, old_val + adj_val))
+                    logger.info(f"🔧 Correction: SIMILARITY_THRESHOLD {old_val:.3f} → {Config.SIMILARITY_THRESHOLD:.3f} ({reason})")
+
+                elif adj_key == 'price_movement_threshold':
+                    old_val = Config.PRICE_MOVEMENT_THRESHOLD
+                    Config.PRICE_MOVEMENT_THRESHOLD = max(0.005, min(0.10, old_val + adj_val))
+                    logger.info(f"🔧 Correction: PRICE_MOVEMENT_THRESHOLD {old_val:.3f} → {Config.PRICE_MOVEMENT_THRESHOLD:.3f} ({reason})")
+
+                elif adj_key == 'take_profit_pct':
+                    old_val = Config.GHOST_TAKE_PROFIT_PCT
+                    Config.GHOST_TAKE_PROFIT_PCT = max(0.01, min(0.20, old_val + adj_val))
+                    logger.info(f"🔧 Correction: TAKE_PROFIT {old_val:.3f} → {Config.GHOST_TAKE_PROFIT_PCT:.3f} ({reason})")
+
+                elif adj_key == 'stop_loss_pct':
+                    old_val = Config.GHOST_STOP_LOSS_PCT
+                    Config.GHOST_STOP_LOSS_PCT = max(0.005, min(0.10, old_val + adj_val))
+                    logger.info(f"🔧 Correction: STOP_LOSS {old_val:.3f} → {Config.GHOST_STOP_LOSS_PCT:.3f} ({reason})")
+
+                elif adj_key == 'min_confidence':
+                    # Store per signal_type adjustment in brain
+                    if self.brain:
+                        self.brain.adjust_confidence_threshold(signal_type, adj_val)
+                        logger.info(f"🔧 Correction: min_confidence for {signal_type}: +{adj_val:.3f}")
+
+                await self.db.mark_correction_applied(note['id'])
+
+            if corrections:
+                logger.info(f"🔧 Applied {len(corrections)} correction notes from RCA")
+
+        except Exception as e:
+            logger.error(f"Error applying corrections: {e}")
 
     async def health_check(self) -> Dict[str, Any]:
         try:

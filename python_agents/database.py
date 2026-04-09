@@ -296,6 +296,38 @@ class Database:
                 )
             """)
 
+            # Correction notes table (RCA → Strategist feedback loop)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS correction_notes (
+                    id SERIAL PRIMARY KEY,
+                    signal_type VARCHAR(50) NOT NULL,
+                    failure_type VARCHAR(50) NOT NULL,
+                    adjustment_key VARCHAR(50) NOT NULL,
+                    adjustment_value DECIMAL(10, 6) NOT NULL,
+                    reason TEXT,
+                    applied BOOLEAN DEFAULT FALSE,
+                    simulation_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Historical signatures table (pre-move patterns for similarity matching)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS historical_signatures (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(20) NOT NULL,
+                    market_type VARCHAR(20) NOT NULL DEFAULT 'spot',
+                    timeframe VARCHAR(10) NOT NULL,
+                    direction VARCHAR(10) NOT NULL,
+                    change_pct DECIMAL(10, 6) NOT NULL,
+                    pre_move_vector JSONB NOT NULL,
+                    pre_move_indicators JSONB,
+                    volume_profile JSONB,
+                    movement_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Create indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_timestamp ON trades(symbol, timestamp)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_price_movements_symbol_time ON price_movements(symbol, start_time)")
@@ -304,6 +336,8 @@ class Database:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_pattern_records_symbol ON pattern_records(symbol, created_at)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_time ON chat_messages(created_at)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_watchlist_active ON user_watchlist(active)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_correction_notes_type ON correction_notes(signal_type, applied)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_historical_signatures_symbol ON historical_signatures(symbol, timeframe)")
 
             # ── Migrations: widen VARCHAR columns that were too narrow ──
             await conn.execute("""
@@ -877,3 +911,117 @@ class Database:
                 'total': total or 0,
                 'distribution': {row['failure_type']: row['count'] for row in rows},
             }
+
+    # ─── Correction Notes Operations (RCA → Strategist) ───
+
+    async def insert_correction_note(self, data: Dict[str, Any]) -> int:
+        """RCA'dan gelen düzeltme notunu kaydet"""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval("""
+                INSERT INTO correction_notes
+                (signal_type, failure_type, adjustment_key, adjustment_value,
+                 reason, simulation_id)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id
+            """, data['signal_type'], data['failure_type'],
+                data['adjustment_key'], data['adjustment_value'],
+                data.get('reason'), data.get('simulation_id'))
+
+    async def get_pending_corrections(self) -> List[Dict[str, Any]]:
+        """Henüz uygulanmamış düzeltme notlarını getir"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM correction_notes
+                WHERE applied = FALSE
+                ORDER BY created_at DESC
+                LIMIT 50
+            """)
+            return [dict(row) for row in rows]
+
+    async def mark_correction_applied(self, correction_id: int):
+        """Düzeltmeyi uygulandı olarak işaretle"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE correction_notes SET applied = TRUE WHERE id = $1
+            """, correction_id)
+
+    async def get_correction_history(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Tüm düzeltme geçmişini getir"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM correction_notes
+                ORDER BY created_at DESC LIMIT $1
+            """, limit)
+            return [dict(row) for row in rows]
+
+    # ─── Historical Signatures Operations ───
+
+    async def insert_historical_signature(self, data: Dict[str, Any]) -> int:
+        """Büyük fiyat hareketi öncesi pattern'ı kaydet"""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval("""
+                INSERT INTO historical_signatures
+                (symbol, market_type, timeframe, direction, change_pct,
+                 pre_move_vector, pre_move_indicators, volume_profile, movement_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                RETURNING id
+            """, data['symbol'], data.get('market_type', 'spot'),
+                data['timeframe'], data['direction'], data['change_pct'],
+                json.dumps(data['pre_move_vector']),
+                json.dumps(data.get('pre_move_indicators', {})),
+                json.dumps(data.get('volume_profile', {})),
+                data.get('movement_id'))
+
+    async def get_historical_signatures(self, symbol: str = None,
+                                          timeframe: str = None,
+                                          limit: int = 200) -> List[Dict[str, Any]]:
+        """Historical signature'ları getir"""
+        async with self.pool.acquire() as conn:
+            if symbol and timeframe:
+                rows = await conn.fetch("""
+                    SELECT * FROM historical_signatures
+                    WHERE symbol = $1 AND timeframe = $2
+                    ORDER BY created_at DESC LIMIT $3
+                """, symbol, timeframe, limit)
+            elif symbol:
+                rows = await conn.fetch("""
+                    SELECT * FROM historical_signatures
+                    WHERE symbol = $1
+                    ORDER BY created_at DESC LIMIT $2
+                """, symbol, limit)
+            else:
+                rows = await conn.fetch("""
+                    SELECT * FROM historical_signatures
+                    ORDER BY created_at DESC LIMIT $1
+                """, limit)
+            result = []
+            for row in rows:
+                d = dict(row)
+                if isinstance(d.get('pre_move_vector'), str):
+                    d['pre_move_vector'] = json.loads(d['pre_move_vector'])
+                if isinstance(d.get('pre_move_indicators'), str):
+                    d['pre_move_indicators'] = json.loads(d['pre_move_indicators'])
+                if isinstance(d.get('volume_profile'), str):
+                    d['volume_profile'] = json.loads(d['volume_profile'])
+                result.append(d)
+            return result
+
+    async def get_trades_in_range(self, symbol: str, start_time: datetime,
+                                   end_time: datetime,
+                                   market_type: str = None) -> List[Dict[str, Any]]:
+        """Belirli zaman aralığındaki trade'leri getir"""
+        async with self.pool.acquire() as conn:
+            if market_type:
+                rows = await conn.fetch("""
+                    SELECT * FROM trades
+                    WHERE symbol = $1 AND market_type = $2
+                      AND timestamp >= $3 AND timestamp <= $4
+                    ORDER BY timestamp ASC
+                """, symbol, market_type, start_time, end_time)
+            else:
+                rows = await conn.fetch("""
+                    SELECT * FROM trades
+                    WHERE symbol = $1 AND timestamp >= $2 AND timestamp <= $3
+                    ORDER BY timestamp ASC
+                """, symbol, start_time, end_time)
+            return [dict(row) for row in rows]

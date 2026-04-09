@@ -32,10 +32,11 @@ class AuditorAgent:
             while self.running:
                 await self._analyze_failed_signals()
                 await self._sync_brain_learning()
+                await self._auto_rca_recent_failures()
                 self.last_activity = datetime.utcnow()
                 self.audit_count += 1
-                # Her 4 saatte bir (başlangıçta daha sık çalışır)
-                interval = min(Config.get_agent_config('auditor')['review_interval_hours'] * 3600, 14400)
+                # Her 2 saatte bir (bootstrap'ta daha sık)
+                interval = min(Config.get_agent_config('auditor')['review_interval_hours'] * 3600, 7200)
                 await asyncio.sleep(interval)
 
         except Exception as e:
@@ -131,8 +132,8 @@ class AuditorAgent:
                     for rec in rca_report.get('top_recommendations', [])[:3]:
                         logger.info(f"  💡 {rec}")
 
-                    # Save individual RCA results
-                    for sim in failed_simulations[:20]:  # Limit to avoid overload
+                    # Save individual RCA results + write correction notes
+                    for sim in failed_simulations[:20]:
                         result = await self.rca_engine.analyze_failure(sim)
                         await self.db.insert_rca_result({
                             'simulation_id': sim.get('id'),
@@ -142,6 +143,9 @@ class AuditorAgent:
                             'recommendations': result['recommendations'],
                             'context': result.get('context', {}),
                         })
+
+                        # Write correction note for strategist
+                        await self._write_correction_note(sim, result)
 
             failures_by_type = {}
             for sim in failed_simulations:
@@ -176,6 +180,172 @@ class AuditorAgent:
 
         except Exception as e:
             logger.error(f"Error investigating false positives: {e}")
+
+    async def _write_correction_note(self, simulation: Dict[str, Any],
+                                       rca_result: Dict[str, Any]):
+        """Write a correction note based on RCA analysis for Strategist to apply."""
+        try:
+            failure_type = rca_result['failure_type']
+            confidence = rca_result.get('confidence', 0)
+            meta = simulation.get('metadata', {})
+            if isinstance(meta, str):
+                import json
+                meta = json.loads(meta)
+            signal_type = meta.get('signal_type', 'unknown')
+
+            # Only write corrections with decent confidence
+            if confidence < 0.4:
+                return
+
+            corrections = []
+
+            if failure_type == 'FALSE_BREAKOUT':
+                corrections.append({
+                    'adjustment_key': 'similarity_threshold',
+                    'adjustment_value': 0.05,
+                    'reason': f'FALSE_BREAKOUT: increase similarity threshold to be more selective',
+                })
+            elif failure_type == 'STOP_HUNT':
+                corrections.append({
+                    'adjustment_key': 'stop_loss_pct',
+                    'adjustment_value': 0.005,
+                    'reason': f'STOP_HUNT: widen stop loss to avoid wick traps',
+                })
+            elif failure_type == 'OVEREXTENDED':
+                corrections.append({
+                    'adjustment_key': 'take_profit_pct',
+                    'adjustment_value': -0.005,
+                    'reason': f'OVEREXTENDED: tighten take profit for earlier exit',
+                })
+            elif failure_type == 'LOW_VOLUME_NOISE':
+                corrections.append({
+                    'adjustment_key': 'price_movement_threshold',
+                    'adjustment_value': 0.005,
+                    'reason': f'LOW_VOLUME_NOISE: raise movement threshold to filter noise',
+                })
+            elif failure_type in ('BAD_TIMING', 'TREND_REVERSAL'):
+                corrections.append({
+                    'adjustment_key': 'min_confidence',
+                    'adjustment_value': 0.05,
+                    'reason': f'{failure_type}: raise min confidence for {signal_type}',
+                })
+
+            for corr in corrections:
+                await self.db.insert_correction_note({
+                    'signal_type': signal_type,
+                    'failure_type': failure_type,
+                    'adjustment_key': corr['adjustment_key'],
+                    'adjustment_value': corr['adjustment_value'],
+                    'reason': corr['reason'],
+                    'simulation_id': simulation.get('id'),
+                })
+                logger.info(f"📝 Correction note: {corr['adjustment_key']} "
+                             f"{corr['adjustment_value']:+.3f} for {signal_type} "
+                             f"({failure_type})")
+
+        except Exception as e:
+            logger.error(f"Error writing correction note: {e}")
+
+    async def perform_root_cause_analysis(self, failed_trade_id: int) -> Dict[str, Any]:
+        """
+        Full RCA for a specific failed simulation.
+        1. Look up the failed trade
+        2. Compare predicted vs actual volatility
+        3. Write Correction Note for Strategist
+        """
+        try:
+            # Fetch the simulation
+            sims = await self.db.get_closed_simulations(limit=500)
+            simulation = None
+            for s in sims:
+                if s.get('id') == failed_trade_id:
+                    simulation = s
+                    break
+
+            if not simulation:
+                return {'error': f'Simulation {failed_trade_id} not found'}
+
+            pnl = float(simulation.get('pnl', 0))
+            if pnl >= 0:
+                return {'error': f'Simulation {failed_trade_id} is not a failure (PnL={pnl:.2f})'}
+
+            # Run RCA analysis
+            result = await self.rca_engine.analyze_failure(simulation)
+
+            # Get the signal's predicted volatility from metadata
+            meta = simulation.get('metadata', {})
+            if isinstance(meta, str):
+                import json
+                meta = json.loads(meta)
+
+            predicted_atr = meta.get('atr_ratio', 0)
+
+            # Actual volatility: get trades during simulation
+            entry_time = simulation.get('entry_time')
+            exit_time = simulation.get('exit_time')
+            symbol = simulation.get('symbol', '')
+            actual_atr = 0.0
+
+            if entry_time and exit_time:
+                sim_trades = await self.db.get_trades_in_range(
+                    symbol, entry_time, exit_time)
+                if len(sim_trades) >= 10:
+                    sim_prices = [float(t['price']) for t in sim_trades]
+                    price_range = max(sim_prices) - min(sim_prices)
+                    avg_price = sum(sim_prices) / len(sim_prices)
+                    actual_atr = price_range / max(avg_price, 1e-8)
+
+            result['volatility_comparison'] = {
+                'predicted_atr_ratio': predicted_atr,
+                'actual_atr_ratio': actual_atr,
+                'deviation': abs(actual_atr - predicted_atr),
+                'under_estimated': actual_atr > predicted_atr,
+            }
+
+            # Save RCA result
+            await self.db.insert_rca_result({
+                'simulation_id': failed_trade_id,
+                'failure_type': result['failure_type'],
+                'confidence': result['confidence'],
+                'explanation': result['explanation'],
+                'recommendations': result['recommendations'],
+                'context': {
+                    **result.get('context', {}),
+                    'volatility_comparison': result['volatility_comparison'],
+                },
+            })
+
+            # Write correction note
+            await self._write_correction_note(simulation, result)
+
+            logger.info(f"🔍 Full RCA for sim #{failed_trade_id}: {result['failure_type']} "
+                         f"(conf={result['confidence']:.2f}) "
+                         f"predicted_vol={predicted_atr:.4f} actual_vol={actual_atr:.4f}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in perform_root_cause_analysis: {e}")
+            return {'error': str(e)}
+
+    async def _auto_rca_recent_failures(self):
+        """Automatically run RCA on recent failed simulations that haven't been analyzed."""
+        if not self.rca_engine:
+            return
+        try:
+            closed = await self.db.get_closed_simulations(limit=50)
+            failed = [s for s in closed if float(s.get('pnl', 0)) < 0]
+
+            # Check which ones already have RCA results
+            for sim in failed[:10]:
+                sim_id = sim.get('id')
+                if sim_id is None:
+                    continue
+                # Run full RCA (it will write correction notes automatically)
+                await self.perform_root_cause_analysis(sim_id)
+
+        except Exception as e:
+            logger.error(f"Auto RCA error: {e}")
 
     async def health_check(self) -> Dict[str, Any]:
         try:

@@ -770,6 +770,131 @@ app.get("/api/brain/learning-stats", async (req, res) => {
   }
 });
 
+// ─── RCA Results ───
+app.get("/api/rca/results", async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT r.*, s.symbol, s.side, s.entry_price::double precision AS entry_price,
+             s.exit_price::double precision AS exit_price,
+             s.pnl::double precision AS sim_pnl,
+             s.pnl_pct::double precision AS sim_pnl_pct
+      FROM rca_results r
+      LEFT JOIN simulations s ON r.simulation_id = s.id
+      ORDER BY r.created_at DESC LIMIT 50
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/rca/stats", async (req, res) => {
+  try {
+    const distribution = await sql`
+      SELECT failure_type, COUNT(*)::int AS count,
+             COALESCE(AVG(confidence), 0)::double precision AS avg_confidence
+      FROM rca_results GROUP BY failure_type ORDER BY count DESC
+    `;
+    const [total] = await sql`SELECT COUNT(*)::int AS count FROM rca_results`;
+    res.json({ total: total.count, distribution });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Correction Notes ───
+app.get("/api/corrections", async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT * FROM correction_notes ORDER BY created_at DESC LIMIT 100
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/corrections/pending", async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT * FROM correction_notes WHERE applied = FALSE ORDER BY created_at DESC
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Historical Signatures ───
+app.get("/api/signatures", async (req, res) => {
+  try {
+    const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
+    const limit = Math.min(200, Number(req.query.limit || 50));
+    let rows;
+    if (symbol) {
+      rows = await sql`
+        SELECT id, symbol, market_type, timeframe, direction,
+               change_pct::double precision AS change_pct,
+               pre_move_indicators, volume_profile, created_at
+        FROM historical_signatures
+        WHERE symbol = ${symbol}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT id, symbol, market_type, timeframe, direction,
+               change_pct::double precision AS change_pct,
+               pre_move_indicators, volume_profile, created_at
+        FROM historical_signatures
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── State History ───
+app.get("/api/state/history", async (req, res) => {
+  try {
+    const hours = Math.min(168, Number(req.query.hours || 24));
+    const cutoff = new Date(Date.now() - hours * 3600 * 1000);
+    const rows = await sql`
+      SELECT timestamp, mode, cumulative_pnl::double precision AS cumulative_pnl,
+             daily_pnl::double precision AS daily_pnl,
+             daily_trade_count, current_drawdown::double precision AS current_drawdown,
+             win_rate::double precision AS win_rate,
+             active_positions, total_trades, metadata
+      FROM state_history
+      WHERE timestamp >= ${cutoff}
+      ORDER BY timestamp ASC
+      LIMIT 500
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Signals Summary by Type ───
+app.get("/api/signals/summary", async (req, res) => {
+  try {
+    const byType = await sql`
+      SELECT signal_type, COUNT(*)::int AS total,
+             COUNT(CASE WHEN status = 'pending' THEN 1 END)::int AS pending,
+             COUNT(CASE WHEN status = 'processed' THEN 1 END)::int AS processed,
+             COUNT(CASE WHEN status LIKE 'risk_%' THEN 1 END)::int AS risk_rejected,
+             COALESCE(AVG(confidence), 0)::double precision AS avg_confidence
+      FROM signals GROUP BY signal_type ORDER BY total DESC
+    `;
+    const [total] = await sql`SELECT COUNT(*)::int AS count FROM signals`;
+    res.json({ total: total.count, by_type: byType });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 app.listen(port, async () => {
   await connectDatabase();
   await createTables();
