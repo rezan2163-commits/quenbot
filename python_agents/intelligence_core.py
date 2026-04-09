@@ -258,9 +258,9 @@ class PatternLibrary:
             candidates = [(p, v) for p, v in self.patterns
                           if p.snapshot.symbol == symbol]
             if len(candidates) < 5:
-                candidates = list(self.patterns)
+                candidates = self.patterns  # referans, kopya değil
         else:
-            candidates = list(self.patterns)
+            candidates = self.patterns  # referans, kopya değil
 
         if not candidates:
             return []

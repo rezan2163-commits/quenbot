@@ -418,20 +418,20 @@ class Database:
                 _dumps(movement_data['t10_data']))
 
     async def get_recent_movements(self, symbol: str, hours: int = 24, market_type: str = None) -> List[Dict[str, Any]]:
-        """Get recent price movements"""
+        """Get recent price movements (max 200)"""
         async with self.pool.acquire() as conn:
             cutoff_time = datetime.utcnow() - timedelta(hours=hours)
             if market_type:
                 rows = await conn.fetch("""
                     SELECT * FROM price_movements
                     WHERE symbol = $1 AND market_type = $2 AND start_time >= $3
-                    ORDER BY start_time DESC
+                    ORDER BY start_time DESC LIMIT 200
                 """, symbol, market_type, cutoff_time)
             else:
                 rows = await conn.fetch("""
                     SELECT * FROM price_movements
                     WHERE symbol = $1 AND start_time >= $2
-                    ORDER BY start_time DESC
+                    ORDER BY start_time DESC LIMIT 200
                 """, symbol, cutoff_time)
             return [dict(row) for row in rows]
 
@@ -456,12 +456,12 @@ class Database:
             return result == "UPDATE 1"
 
     async def get_pending_signals(self) -> List[Dict[str, Any]]:
-        """Get pending signals"""
+        """Get pending signals (max 200)"""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT * FROM signals
                 WHERE status = 'pending'
-                ORDER BY timestamp DESC
+                ORDER BY timestamp DESC LIMIT 200
             """)
             return [dict(row) for row in rows]
 
@@ -503,12 +503,12 @@ class Database:
             return result == "UPDATE 1"
 
     async def get_open_simulations(self) -> List[Dict[str, Any]]:
-        """Get open simulations"""
+        """Get open simulations (max 100)"""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT * FROM simulations
                 WHERE status = 'open'
-                ORDER BY entry_time DESC
+                ORDER BY entry_time DESC LIMIT 100
             """)
             return [dict(row) for row in rows]
 
@@ -554,7 +554,7 @@ class Database:
             else:
                 rows = await conn.fetch("""
                     SELECT * FROM blacklist_patterns
-                    ORDER BY created_at DESC
+                    ORDER BY created_at DESC LIMIT 200
                 """)
             return [dict(row) for row in rows]
 
@@ -786,20 +786,20 @@ class Database:
 
     async def get_trades_for_snapshot(self, symbol: str, minutes: int = 15,
                                        market_type: str = None) -> List[Dict[str, Any]]:
-        """Son N dakikadaki trade'leri getir (Brain snapshot için). Max 500 kayıt."""
+        """Son N dakikadaki trade'leri getir (Brain snapshot için). Max 200 kayıt."""
         async with self.pool.acquire() as conn:
             cutoff = datetime.utcnow() - timedelta(minutes=minutes)
             if market_type:
                 rows = await conn.fetch("""
                     SELECT * FROM trades
                     WHERE symbol = $1 AND market_type = $2 AND timestamp >= $3
-                    ORDER BY timestamp DESC LIMIT 500
+                    ORDER BY timestamp DESC LIMIT 200
                 """, symbol, market_type, cutoff)
             else:
                 rows = await conn.fetch("""
                     SELECT * FROM trades
                     WHERE symbol = $1 AND timestamp >= $2
-                    ORDER BY timestamp DESC LIMIT 500
+                    ORDER BY timestamp DESC LIMIT 200
                 """, symbol, cutoff)
             result = [dict(row) for row in rows]
             result.reverse()  # ASC order

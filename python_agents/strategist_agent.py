@@ -1,4 +1,5 @@
 import asyncio
+import ctypes
 import gc
 import json
 import logging
@@ -19,6 +20,15 @@ from strategy import (
     compare_similarity
 )
 from intelligence_core import FeatureEngine, MarketRegimeDetector
+
+# glibc malloc_trim — bellegi OS'a geri ver
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    def _malloc_trim():
+        _libc.malloc_trim(0)
+except Exception:
+    def _malloc_trim():
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -228,13 +238,20 @@ class StrategistAgent:
 
                                 except Exception as e:
                                     logger.debug(f"Intel analysis error {symbol}: {e}")
+                            # Bellek temizliği: iterasyon sonrası
+                            del trades, snapshot
+                            try:
+                                del prices_arr, volumes_arr, ind, intel_result
+                            except NameError:
+                                pass
 
                         except Exception as e:
                             logger.debug(f"Multi-TF error {symbol} {tf_key}: {e}")
                             continue
 
             self.analysis_count += 1
-            gc.collect()  # Bellek temizliği
+            gc.collect()
+            _malloc_trim()  # glibc bellegi OS'a geri ver
 
         except Exception as e:
             logger.error(f"Multi-timeframe analysis error: {e}")
@@ -297,7 +314,7 @@ class StrategistAgent:
             for market_type in Config.MARKET_TYPES:
                 for symbol in watchlist:
                     try:
-                        trades = await self.db.get_recent_trades(symbol, limit=250, market_type=market_type)
+                        trades = await self.db.get_recent_trades(symbol, limit=100, market_type=market_type)
                         if len(trades) < 10:
                             continue
 
@@ -313,7 +330,7 @@ class StrategistAgent:
                         if movement_vector is None or movement_vector.size == 0:
                             continue
 
-                        historical_movements = await self.db.get_recent_movements(symbol, hours=72, market_type=market_type)
+                        historical_movements = await self.db.get_recent_movements(symbol, hours=24, market_type=market_type)
                         historical_vectors = []
                         for movement in historical_movements:
                             t10_data = movement.get('t10_data') or {}
@@ -474,8 +491,12 @@ class StrategistAgent:
                         logger.exception(f"Error processing {symbol} ({market_type}): {e}")
                         continue
 
+                # Bellek temizliği: her market_type sonrası
+                gc.collect()
+
             self.last_activity = datetime.utcnow()
-            gc.collect()  # Bellek temizliği
+            gc.collect()
+            _malloc_trim()
 
         except Exception as e:
             logger.error(f"Error in strategy analysis: {e}")
@@ -563,6 +584,9 @@ class StrategistAgent:
 
         except Exception as e:
             logger.error(f"Signature matching global error: {e}")
+        finally:
+            gc.collect()
+            _malloc_trim()
 
     async def _apply_correction_notes(self):
         """Read pending correction notes from RCA and adjust thresholds."""
