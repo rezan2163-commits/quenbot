@@ -47,20 +47,16 @@ class StrategistAgent:
         self.running = True
         logger.info("Starting Strategist Agent...")
 
-        try:
-            while self.running:
+        while self.running:
+            try:
                 await self._apply_correction_notes()
                 await self._analyze_strategies()
                 await self._signature_matching()
                 await self._multi_timeframe_analysis()
                 await self._update_pattern_outcomes()
-                await asyncio.sleep(60)  # Her 1 dakikada bir
-
-        except Exception as e:
-            logger.error(f"Strategist agent error: {e}")
-            raise
-        finally:
-            await self.stop()
+            except Exception as e:
+                logger.error(f"Strategist cycle error: {e}")
+            await asyncio.sleep(60)  # Her 1 dakikada bir
 
     async def stop(self):
         self.running = False
@@ -126,6 +122,8 @@ class StrategistAgent:
 
                                     if best_tf and abs(prediction['timeframes'].get(best_tf, {}).get('avg_change_pct', 0)) >= 0.02:
                                         last_price = float(trades[-1]['price'])
+                                        best_tf_change = abs(prediction['timeframes'][best_tf].get('avg_change_pct', 0.02))
+                                        target_pct = max(best_tf_change, 0.02)
                                         signal_type = f'brain_{direction}_{best_tf}'
                                         signal_payload = {
                                             'market_type': market_type,
@@ -136,6 +134,7 @@ class StrategistAgent:
                                             'timestamp': datetime.utcnow(),
                                             'metadata': {
                                                 'position_bias': direction,
+                                                'target_pct': float(target_pct),
                                                 'timeframe': best_tf,
                                                 'match_count': prediction['match_count'],
                                                 'avg_similarity': prediction['avg_similarity'],
@@ -280,6 +279,7 @@ class StrategistAgent:
                             signal_type = f'evolutionary_similarity_{direction}'
                             # Confidence: en az 0.3, similarity varsa onu kullan, yoksa score-based
                             evo_conf = max(float(best_similarity), min(float(score) * 0.1, 0.85), 0.3)
+                            target_pct = max(float(mean_profit), 0.02)  # ≥2% target
                             signal_payload = {
                                 'market_type': market_type,
                                 'symbol': symbol,
@@ -289,6 +289,7 @@ class StrategistAgent:
                                 'timestamp': datetime.utcnow(),
                                 'metadata': {
                                     'position_bias': direction,
+                                    'target_pct': float(target_pct),
                                     'similarity_score': float(best_similarity),
                                     'strategy_score': float(score),
                                     'mean_profit': float(mean_profit),
@@ -314,6 +315,7 @@ class StrategistAgent:
                         elif score > 0.05 and mean_profit > min_profit * 0.5:
                             momentum_conf = min(max(score * 0.6, 0.3), 0.85)
                             signal_type = f'momentum_{direction}'
+                            target_pct = max(float(mean_profit), 0.02)  # ≥2% target
                             signal_payload = {
                                 'market_type': market_type,
                                 'symbol': symbol,
@@ -323,6 +325,7 @@ class StrategistAgent:
                                 'timestamp': datetime.utcnow(),
                                 'metadata': {
                                     'position_bias': direction,
+                                    'target_pct': float(target_pct),
                                     'strategy_score': float(score),
                                     'mean_profit': float(mean_profit),
                                     'risk': float(risk),
@@ -352,6 +355,7 @@ class StrategistAgent:
                                 )
                                 if pa_direction:
                                     pa_conf = min(abs(price_change_pct) * 20 + trend_strength * 0.3, 0.7)
+                                    target_pct = max(abs(price_change_pct) * 2, 0.02)  # ≥2% target
                                     signal_payload = {
                                         'market_type': market_type,
                                         'symbol': symbol,
@@ -361,6 +365,7 @@ class StrategistAgent:
                                         'timestamp': datetime.utcnow(),
                                         'metadata': {
                                             'position_bias': pa_direction,
+                                            'target_pct': float(target_pct),
                                             'price_change_pct': float(price_change_pct),
                                             'rsi': float(rsi_val),
                                             'trend': trend_dir,
@@ -436,6 +441,7 @@ class StrategistAgent:
                             confidence = float(min(similarity * 0.9, 0.95))
                             signal_type = f'signature_{sig_direction}'
                             last_price = float(prices[-1])
+                            target_pct = max(abs(sig_change), 0.02)  # ≥2% target
 
                             signal_payload = {
                                 'market_type': market_type,
@@ -446,6 +452,7 @@ class StrategistAgent:
                                 'timestamp': datetime.utcnow(),
                                 'metadata': {
                                     'position_bias': sig_direction,
+                                    'target_pct': float(target_pct),
                                     'cosine_similarity': float(similarity),
                                     'reference_change_pct': float(sig_change),
                                     'reference_timeframe': sig_tf,

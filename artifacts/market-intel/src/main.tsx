@@ -458,7 +458,42 @@ function App() {
           </div>
           <div className="grid-2">
             <div className="card card-center"><h3>Win Rate</h3><ProgressRing value={botSummary?.win_rate ?? 0} size={120} stroke={10} color={botSummary && botSummary.win_rate >= 50 ? "var(--green)" : "var(--red)"} /><div className="text-muted" style={{ marginTop: 12 }}>{botSummary?.wins ?? 0}W / {botSummary?.losses ?? 0}L</div></div>
-            <div className="card"><div className="card-header"><h3>Son Sinyaller</h3><span className="badge">{signals.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Tip</th><th>Güven</th><th>Fiyat</th><th>Durum</th><th>Zaman</th></tr></thead><tbody>{signals.slice(0, 10).map((s, i) => (<tr key={i}><td><strong>{s.symbol}</strong></td><td>{s.signal_type}</td><td>{(Number(s.confidence) * 100).toFixed(0)}%</td><td>{fmtUsd(Number(s.price))}</td><td><span className={cls("status-badge", `status-${s.status}`)}>{s.status}</span></td><td>{fmtTime(s.timestamp)}</td></tr>))}</tbody></table>{signals.length === 0 && <div className="empty-state">Henüz sinyal üretilmedi</div>}</div></div>
+            <div className="card">
+              <div className="card-header"><h3>Aktif Sinyaller</h3><span className="badge badge-live">{signals.filter(s => s.status === 'pending').length} bekleyen</span></div>
+              <div className="kpi-strip" style={{ padding: "8px 0" }}>
+                <KPI label="Toplam" value={String(signals.length)} icon="📡" />
+                <KPI label="Bekleyen" value={String(signals.filter(s => s.status === 'pending').length)} icon="⏳" accent="amber" />
+                <KPI label="İşlenen" value={String(signals.filter(s => s.status === 'processed').length)} icon="✅" accent="green" />
+                <KPI label="Reddedilen" value={String(signals.filter(s => s.status?.startsWith('risk_') || s.status?.startsWith('filtered')).length)} icon="🛡" accent="red" />
+              </div>
+            </div>
+          </div>
+
+          {/* Professional Signal Table */}
+          <div className="card">
+            <div className="card-header"><h3>Son Sinyaller (Veritabanı)</h3><span className="badge badge-blue">{signals.length} kayıtlı</span></div>
+            <div className="table-wrap"><table className="tbl">
+              <thead><tr><th>Sembol</th><th>Yön</th><th>Sinyal Tipi</th><th>Güven</th><th>Giriş Fiyatı</th><th>Hedef %</th><th>Durum</th><th>Zaman</th></tr></thead>
+              <tbody>{signals.slice(0, 20).map((s, i) => {
+                const meta = typeof s.metadata === 'string' ? (() => { try { return JSON.parse(s.metadata); } catch { return {}; } })() : (s.metadata || {});
+                const direction = meta.position_bias || (s.signal_type?.includes('long') ? 'long' : s.signal_type?.includes('short') ? 'short' : '—');
+                const targetPct = meta.target_pct ? `${(meta.target_pct * 100).toFixed(1)}%` : '≥2%';
+                const signalLabel = s.signal_type?.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()) || '—';
+                const statusLabel = s.status === 'pending' ? 'Bekliyor' : s.status === 'processed' ? 'İşlendi' : s.status === 'filtered_low_return' ? 'Düşük Getiri' : s.status?.startsWith('risk_') ? 'Reddedildi' : s.status;
+                const statusColor = s.status === 'pending' ? 'badge-amber' : s.status === 'processed' ? 'badge-green' : 'badge-red';
+                return (
+                  <tr key={i}>
+                    <td><strong>{s.symbol}</strong><br /><span className="text-muted text-xs">{s.market_type}</span></td>
+                    <td><span className={cls("side-badge", direction === "long" ? "side-long" : direction === "short" ? "side-short" : "")}>{direction === 'long' ? 'LONG' : direction === 'short' ? 'SHORT' : '—'}</span></td>
+                    <td className="text-xs">{signalLabel}</td>
+                    <td><strong>{(Number(s.confidence) * 100).toFixed(0)}%</strong></td>
+                    <td className="text-mono">{fmtUsd(Number(s.price))}</td>
+                    <td className="text-green"><strong>{targetPct}</strong></td>
+                    <td><span className={cls("badge badge-sm", statusColor)}>{statusLabel}</span></td>
+                    <td className="text-muted">{fmtTime(s.timestamp)}</td>
+                  </tr>);
+              })}</tbody>
+            </table>{signals.length === 0 && <div className="empty-state">Henüz sinyal üretilmedi — Sistem veri topluyor ve pattern arıyor. İlk sinyaller kısa süre içinde gelecek.</div>}</div>
           </div>
           <div className="card"><div className="card-header"><h3>Simülasyonlar</h3><span className="badge">{simulations.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Yön</th><th>Giriş</th><th>Çıkış</th><th>PnL</th><th>PnL %</th><th>Durum</th></tr></thead><tbody>{simulations.slice(0, 15).map((s, i) => (<tr key={i}><td><strong>{s.symbol}</strong></td><td><span className={cls("side-badge", s.side === "long" ? "side-long" : "side-short")}>{s.side}</span></td><td>{fmtUsd(Number(s.entry_price))}</td><td>{s.exit_price ? fmtUsd(Number(s.exit_price)) : "—"}</td><td className={Number(s.pnl || 0) >= 0 ? "text-green" : "text-red"}>{s.pnl ? fmtUsd(Number(s.pnl)) : "—"}</td><td>{s.pnl_pct ? `${Number(s.pnl_pct).toFixed(2)}%` : "—"}</td><td><span className={cls("status-badge", `status-${s.status}`)}>{s.status}</span></td></tr>))}</tbody></table>{simulations.length === 0 && <div className="empty-state">Ghost simulator henüz aktif değil</div>}</div></div>
           <div className="card"><div className="card-header"><h3>Tespit Edilen Hareketler</h3><span className="badge badge-amber">{movements.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Borsa</th><th>Tip</th><th>Değişim</th><th>Yön</th><th>Hacim</th><th>Başlangıç</th><th>Bitiş</th></tr></thead><tbody>{movements.slice(0, 12).map((m, i) => (<tr key={i}><td><strong>{m.symbol}</strong></td><td>{m.exchange}</td><td><span className="badge badge-sm">{m.market_type}</span></td><td className={Number(m.change_pct) >= 0 ? "text-green" : "text-red"}>{fmtPct(Number(m.change_pct) * 100)}</td><td>{m.direction}</td><td>{fmt(Number(m.volume), 2)}</td><td>{fmtTimeShort(m.start_time)}</td><td>{fmtTimeShort(m.end_time)}</td></tr>))}</tbody></table>{movements.length === 0 && <div className="empty-state">Henüz %2'den büyük hareket tespit edilmedi</div>}</div></div>
@@ -569,8 +604,18 @@ function App() {
           <div className="grid-2">
             <div className="card card-center">
               <h3>Öğrenme Doğruluğu</h3>
-              <ProgressRing value={brainStatus?.learning.accuracy ?? 0} size={140} stroke={12} color={brainStatus && brainStatus.learning.accuracy >= 50 ? "var(--green)" : "var(--amber)"} />
-              <div className="text-muted" style={{ marginTop: 16 }}>{brainStatus ? `${brainStatus.learning.correct} doğru / ${brainStatus.learning.total} toplam` : "Veri bekleniyor..."}</div>
+              {brainStatus && brainStatus.learning.total > 0 ? (
+                <>
+                  <ProgressRing value={brainStatus.learning.accuracy} size={140} stroke={12} color={brainStatus.learning.accuracy >= 50 ? "var(--green)" : "var(--amber)"} />
+                  <div className="text-muted" style={{ marginTop: 16 }}>{brainStatus.learning.correct} doğru / {brainStatus.learning.total} toplam</div>
+                </>
+              ) : (
+                <div className="empty-state" style={{ padding: "30px 16px" }}>
+                  <div style={{ fontSize: 48, marginBottom: 12 }}>🧠</div>
+                  <p><strong>Öğrenme Başlamadı</strong></p>
+                  <p className="text-xs text-muted" style={{ marginTop: 8 }}>Brain modülü sinyal → simülasyon → kapanış döngüsünden sonra öğrenmeye başlar. Pattern sayısı: <strong>{brainStatus?.pattern_count ?? 0}</strong></p>
+                </div>
+              )}
             </div>
             <div className="card">
               <div className="card-header"><h3>Sinyal Tipi Başarıları</h3></div>
@@ -582,7 +627,10 @@ function App() {
                     <td className={s.avg_pnl >= 0 ? "text-green" : "text-red"}>{s.avg_pnl?.toFixed(2)}%</td></tr>
                   ))}
                 </tbody></table></div>
-              ) : <div className="empty-state">Henüz sinyal tipi istatistiği yok</div>}
+              ) : <div className="empty-state">
+                <p>📊 Sinyal istatistikleri henüz oluşmadı.</p>
+                <p className="text-xs text-muted" style={{ marginTop: 8 }}>Veriler, Ghost Simulator simülasyonları kapandıktan sonra toplanır. Sistem ilk sinyalleri üretip simüle ettikçe burada sonuçlar görünecek.</p>
+              </div>}
             </div>
           </div>
 

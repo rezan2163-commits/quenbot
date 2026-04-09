@@ -45,6 +45,8 @@ class AgentOrchestrator:
         self.risk_manager = None
         self.rca_engine = None
         self.running = False
+        self._agent_restart_counts: dict = {}
+        self._max_restarts = 50  # max restart per agent before giving up
 
     async def initialize(self):
         """Initialize all components"""
@@ -105,27 +107,54 @@ class AgentOrchestrator:
         logger.info("=" * 80)
 
     async def start(self):
-        """Start all agents"""
+        """Start all agents with crash resilience — one agent failing does NOT kill the system"""
         self.running = True
-        logger.info("🚀 Starting agent system...")
+        logger.info("🚀 Starting agent system with crash resilience...")
+
+        tasks = [
+            self._resilient_task("Scout", self.scout.start),
+            self._resilient_task("Strategist", self.strategist.start),
+            self._resilient_task("GhostSimulator", self.ghost_simulator.start),
+            self._resilient_task("Auditor", self.auditor.start),
+            self._resilient_task("HealthMonitor", self._health_monitor),
+            self._resilient_task("ChatProcessor", self._chat_processor),
+        ]
 
         try:
-            tasks = [
-                self.scout.start(),
-                self.strategist.start(),
-                self.ghost_simulator.start(),
-                self.auditor.start(),
-                self._health_monitor(),
-                self._chat_processor(),
-            ]
             await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             logger.info("Received shutdown signal")
-        except Exception as e:
-            logger.error(f"Fatal error: {e}")
-            raise
         finally:
             await self.stop()
+
+    async def _resilient_task(self, name: str, coro_func):
+        """Wrap an agent task with auto-restart on failure.
+        If the agent crashes, wait with exponential backoff and restart it.
+        The orchestrator stays alive regardless."""
+        self._agent_restart_counts[name] = 0
+        while self.running:
+            try:
+                logger.info(f"▶ Starting {name}...")
+                await coro_func()
+            except asyncio.CancelledError:
+                logger.info(f"⏹ {name} cancelled")
+                break
+            except Exception as e:
+                self._agent_restart_counts[name] += 1
+                count = self._agent_restart_counts[name]
+                if count > self._max_restarts:
+                    logger.critical(f"💀 {name} exceeded {self._max_restarts} restarts, giving up: {e}")
+                    break
+                backoff = min(5 * (2 ** min(count - 1, 5)), 300)  # 5s → 10s → 20s → ... max 300s
+                logger.error(f"💥 {name} crashed (attempt #{count}): {e} — restarting in {backoff}s")
+                await asyncio.sleep(backoff)
+            else:
+                # Clean exit (agent returned normally)
+                if self.running:
+                    logger.warning(f"⚠ {name} exited unexpectedly, restarting in 5s...")
+                    await asyncio.sleep(5)
+                else:
+                    break
 
     async def stop(self):
         """Stop all agents gracefully"""

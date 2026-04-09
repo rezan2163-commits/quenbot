@@ -28,22 +28,18 @@ class AuditorAgent:
         self.running = True
         logger.info("Starting Auditor Agent...")
 
-        try:
-            while self.running:
+        while self.running:
+            try:
                 await self._analyze_failed_signals()
                 await self._sync_brain_learning()
                 await self._auto_rca_recent_failures()
                 self.last_activity = datetime.utcnow()
                 self.audit_count += 1
-                # Her 2 saatte bir (bootstrap'ta daha sık)
-                interval = min(Config.get_agent_config('auditor')['review_interval_hours'] * 3600, 7200)
-                await asyncio.sleep(interval)
-
-        except Exception as e:
-            logger.error(f"Auditor agent error: {e}")
-            raise
-        finally:
-            await self.stop()
+            except Exception as e:
+                logger.error(f"Auditor cycle error: {e}")
+            # Her 2 saatte bir (bootstrap'ta daha sık)
+            interval = min(Config.get_agent_config('auditor')['review_interval_hours'] * 3600, 7200)
+            await asyncio.sleep(interval)
 
     async def stop(self):
         self.running = False

@@ -80,13 +80,11 @@ class ScoutAgent:
             self._watchlist_refresher(),
         ]
 
-        try:
-            await asyncio.gather(*tasks)
-        except Exception as e:
-            logger.error(f"Scout agent error: {e}")
-            raise
-        finally:
-            await self.stop()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Scout sub-task {i} failed: {result}")
+        # Let the orchestrator's resilient wrapper handle restart
 
     async def stop(self):
         """Stop the scout agent."""
@@ -124,6 +122,7 @@ class ScoutAgent:
 
                 async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as websocket:
                     self.connections[f'binance_{market_type}'] = websocket
+                    self._ws_retry_count = 0  # Reset on successful connect
                     logger.info(f"✓ Connected to Binance {market_type.upper()} WebSocket")
 
                     async for message in websocket:
@@ -132,6 +131,13 @@ class ScoutAgent:
                         await self._process_binance_message(message, market_type)
                         self.last_activity = datetime.utcnow()
 
+            except (websockets.exceptions.ConnectionClosed,
+                    websockets.exceptions.InvalidStatusCode,
+                    ConnectionRefusedError, OSError) as e:
+                self._ws_retry_count = getattr(self, '_ws_retry_count', 0) + 1
+                backoff = min(Config.get_agent_config('scout')['reconnect_delay'] * (2 ** min(self._ws_retry_count - 1, 5)), 120)
+                logger.warning(f"✗ Binance {market_type} WS disconnected (#{self._ws_retry_count}): {e} — reconnecting in {backoff}s")
+                await asyncio.sleep(backoff)
             except Exception as e:
                 logger.error(f"✗ Binance {market_type} WebSocket error: {e}")
                 await asyncio.sleep(Config.get_agent_config('scout')['reconnect_delay'])
@@ -148,6 +154,7 @@ class ScoutAgent:
             try:
                 async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as websocket:
                     self.connections[f'bybit_{market_type}'] = websocket
+                    self._ws_retry_count = 0  # Reset on successful connect
                     logger.info(f"✓ Connected to Bybit {market_type.upper()} WebSocket: {ws_url}")
 
                     # Bybit V5 API: subscribe to publicTrade channel for each symbol
@@ -164,6 +171,13 @@ class ScoutAgent:
                         await self._process_bybit_message(message, market_type)
                         self.last_activity = datetime.utcnow()
 
+            except (websockets.exceptions.ConnectionClosed,
+                    websockets.exceptions.InvalidStatusCode,
+                    ConnectionRefusedError, OSError) as e:
+                self._ws_retry_count = getattr(self, '_ws_retry_count', 0) + 1
+                backoff = min(Config.get_agent_config('scout')['reconnect_delay'] * (2 ** min(self._ws_retry_count - 1, 5)), 120)
+                logger.warning(f"✗ Bybit {market_type} WS disconnected (#{self._ws_retry_count}): {e} — reconnecting in {backoff}s")
+                await asyncio.sleep(backoff)
             except Exception as e:
                 logger.error(f"✗ Bybit {market_type} WebSocket error: {e}")
                 await asyncio.sleep(Config.get_agent_config('scout')['reconnect_delay'])

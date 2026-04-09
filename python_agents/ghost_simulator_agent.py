@@ -41,18 +41,14 @@ class GhostSimulatorAgent:
         self.running = True
         logger.info("Starting Ghost Simulator Agent...")
 
-        try:
-            while self.running:
+        while self.running:
+            try:
                 await self._process_pending_signals()
                 await self._monitor_active_simulations()
                 self.last_activity = datetime.utcnow()
-                await asyncio.sleep(30)  # 30 saniyede bir kontrol
-
-        except Exception as e:
-            logger.error(f"Ghost simulator agent error: {e}")
-            raise
-        finally:
-            await self.stop()
+            except Exception as e:
+                logger.error(f"Ghost simulator cycle error: {e}")
+            await asyncio.sleep(30)  # 30 saniyede bir kontrol
 
     async def stop(self):
         self.running = False
@@ -90,6 +86,16 @@ class GhostSimulatorAgent:
                         if max_change < MIN_POTENTIAL_RETURN:
                             await self.db.update_signal_status(signal['id'], 'filtered_low_return')
                             logger.debug(f"Filtered signal {signal['id']}: potential return {max_change:.4f} < {MIN_POTENTIAL_RETURN}")
+                            continue
+                    else:
+                        # ALL other signal types: enforce ≥2% via confidence + mean_profit check
+                        mean_profit = abs(float(metadata.get('mean_profit', 0)))
+                        ref_change = abs(float(metadata.get('reference_change_pct', 0)))
+                        price_change = abs(float(metadata.get('price_change_pct', 0)))
+                        potential = max(mean_profit, ref_change, price_change)
+                        if potential > 0 and potential < MIN_POTENTIAL_RETURN:
+                            await self.db.update_signal_status(signal['id'], 'filtered_low_return')
+                            logger.debug(f"Filtered signal {signal['id']}: potential {potential:.4f} < {MIN_POTENTIAL_RETURN}")
                             continue
 
                     await self._create_simulation(signal)
@@ -222,9 +228,11 @@ class GhostSimulatorAgent:
             if not sim_data:
                 return
 
+            symbol = sim_data['symbol']
+
             if exit_price is None:
                 current_prices = await self._get_current_prices()
-                exit_price = current_prices.get(sim_data['symbol'], float(sim_data['entry_price']))
+                exit_price = current_prices.get(symbol, float(sim_data['entry_price']))
 
             entry_price = float(sim_data['entry_price'])
             quantity = float(sim_data['quantity'])
