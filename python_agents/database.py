@@ -15,7 +15,7 @@ def _json_serial(obj):
 
 
 def _dumps(obj):
-    return _dumps(obj, default=_json_serial)
+    return json.dumps(obj, default=_json_serial)
 
 
 class Database:

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import Dict, List, Any
@@ -25,6 +26,18 @@ class GhostSimulatorAgent:
         self.total_wins = 0
         self.total_pnl = 0.0
 
+    @staticmethod
+    def _parse_metadata(data: dict) -> dict:
+        """Ensure metadata field is parsed from JSON string if needed."""
+        md = data.get('metadata', {})
+        if isinstance(md, str):
+            try:
+                md = json.loads(md)
+            except (json.JSONDecodeError, TypeError):
+                md = {}
+        data['metadata'] = md if isinstance(md, dict) else {}
+        return data
+
     async def initialize(self):
         logger.info("Initializing Ghost Simulator Agent...")
         open_sims = await self.db.get_open_simulations()
@@ -32,6 +45,7 @@ class GhostSimulatorAgent:
         # Deduplicate: keep only the newest simulation per symbol, close duplicates
         symbol_sims: Dict[str, List[Dict]] = {}
         for sim in open_sims:
+            self._parse_metadata(sim)
             sym = sim.get('symbol', '')
             symbol_sims.setdefault(sym, []).append(sim)
 
@@ -96,43 +110,46 @@ class GhostSimulatorAgent:
                 if signal['symbol'] in active_syms:
                     await self.db.update_signal_status(signal['id'], 'filtered_duplicate')
                     continue
-                    # RiskManager gate check
-                    if self.risk_manager:
-                        approved, reason = self.risk_manager.check_signal(signal)
-                        if not approved:
-                            await self.db.update_signal_status(signal['id'], f'risk_rejected')
-                            logger.info(f"🛡 Risk rejected {signal['symbol']}: {reason}")
-                            continue
 
-                    # Min potansiyel getiri kontrolü
-                    metadata = signal.get('metadata', {})
-                    if isinstance(metadata, str):
-                        import json
+                # RiskManager gate check
+                if self.risk_manager:
+                    approved, reason = self.risk_manager.check_signal(signal)
+                    if not approved:
+                        await self.db.update_signal_status(signal['id'], f'risk_rejected')
+                        logger.info(f"🛡 Risk rejected {signal['symbol']}: {reason}")
+                        continue
+
+                # Min potansiyel getiri kontrolü
+                metadata = signal.get('metadata', {})
+                if isinstance(metadata, str):
+                    try:
                         metadata = json.loads(metadata)
+                    except (json.JSONDecodeError, TypeError):
+                        metadata = {}
 
-                    # Brain sinyali ise, timeframe tahminlerini kontrol et
-                    if 'brain_analysis' in metadata:
-                        tf_preds = metadata.get('timeframe_predictions', {})
-                        max_change = max(
-                            (abs(v.get('avg_change_pct', 0)) for v in tf_preds.values()),
-                            default=0
-                        )
-                        if max_change < MIN_POTENTIAL_RETURN:
-                            await self.db.update_signal_status(signal['id'], 'filtered_low_return')
-                            logger.debug(f"Filtered signal {signal['id']}: potential return {max_change:.4f} < {MIN_POTENTIAL_RETURN}")
-                            continue
-                    else:
-                        # ALL other signal types: enforce ≥2% via confidence + mean_profit check
-                        mean_profit = abs(float(metadata.get('mean_profit', 0)))
-                        ref_change = abs(float(metadata.get('reference_change_pct', 0)))
-                        price_change = abs(float(metadata.get('price_change_pct', 0)))
-                        potential = max(mean_profit, ref_change, price_change)
-                        if potential > 0 and potential < MIN_POTENTIAL_RETURN:
-                            await self.db.update_signal_status(signal['id'], 'filtered_low_return')
-                            logger.debug(f"Filtered signal {signal['id']}: potential {potential:.4f} < {MIN_POTENTIAL_RETURN}")
-                            continue
+                # Brain sinyali ise, timeframe tahminlerini kontrol et
+                if 'brain_analysis' in metadata:
+                    tf_preds = metadata.get('timeframe_predictions', {})
+                    max_change = max(
+                        (abs(v.get('avg_change_pct', 0)) for v in tf_preds.values()),
+                        default=0
+                    )
+                    if max_change < MIN_POTENTIAL_RETURN:
+                        await self.db.update_signal_status(signal['id'], 'filtered_low_return')
+                        logger.debug(f"Filtered signal {signal['id']}: potential return {max_change:.4f} < {MIN_POTENTIAL_RETURN}")
+                        continue
+                else:
+                    # ALL other signal types: enforce ≥2% via confidence + mean_profit check
+                    mean_profit = abs(float(metadata.get('mean_profit', 0)))
+                    ref_change = abs(float(metadata.get('reference_change_pct', 0)))
+                    price_change = abs(float(metadata.get('price_change_pct', 0)))
+                    potential = max(mean_profit, ref_change, price_change)
+                    if potential > 0 and potential < MIN_POTENTIAL_RETURN:
+                        await self.db.update_signal_status(signal['id'], 'filtered_low_return')
+                        logger.debug(f"Filtered signal {signal['id']}: potential {potential:.4f} < {MIN_POTENTIAL_RETURN}")
+                        continue
 
-                    await self._create_simulation(signal)
+                await self._create_simulation(signal)
         except Exception as e:
             logger.error(f"Error processing pending signals: {e}")
 
@@ -142,8 +159,10 @@ class GhostSimulatorAgent:
             entry_price = float(signal['price'])
             metadata = signal.get('metadata', {})
             if isinstance(metadata, str):
-                import json
-                metadata = json.loads(metadata)
+                try:
+                    metadata = json.loads(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
 
             direction = metadata.get('position_bias') or (
                 'long' if signal['signal_type'].endswith('_long') or '_long_' in signal['signal_type']
@@ -287,6 +306,7 @@ class GhostSimulatorAgent:
             sim_data = self.active_simulations.get(sim_id)
             if not sim_data:
                 return
+            self._parse_metadata(sim_data)
 
             symbol = sim_data['symbol']
 
