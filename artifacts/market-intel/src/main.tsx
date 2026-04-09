@@ -28,6 +28,12 @@ const fmtTime = (s: string) => { try { return new Date(s).toLocaleTimeString("en
 const fmtTimeShort = (s: string) => { try { return new Date(s).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }); } catch { return "—"; } };
 const cls = (...c: (string | false | undefined | null)[]) => c.filter(Boolean).join(" ");
 const ago = (minutes: number) => { if (minutes < 60) return `${minutes}m`; if (minutes < 1440) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`; return `${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h`; };
+const safeNum = (v: any, d = 0): number => { const n = Number(v); return isNaN(n) ? d : n; };
+const fmtDateTime = (s: string) => { try { const d = new Date(s); return `${d.toLocaleDateString("tr-TR", { day: "2-digit", month: "short" })} ${d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}`; } catch { return "—"; } };
+const safeMeta = (m: any): Record<string, any> => { if (!m) return {}; if (typeof m === 'string') { try { const p = JSON.parse(m); return (p && typeof p === 'object') ? p : {}; } catch { return {}; } } return (typeof m === 'object') ? m : {}; };
+const getDir = (s: RecordRow): 'long' | 'short' | null => { const meta = safeMeta(s.metadata); if (meta.position_bias === 'long' || meta.position_bias === 'short') return meta.position_bias; const t = s.signal_type || ''; if (t.endsWith('_long') || t.includes('long')) return 'long'; if (t.endsWith('_short') || t.includes('short')) return 'short'; return null; };
+const sigLabel = (t: string): string => { if (!t) return '—'; const m: Record<string, string> = { evolutionary_similarity: 'Evrimsel Benzerlik', momentum: 'Momentum', brain_pattern: 'Brain Pattern', price_action: 'Fiyat Aksiyon', signature: 'İmza Eşleşme', historical_signature: 'Tarihsel İmza' }; for (const [k, v] of Object.entries(m)) { if (t.includes(k)) return v; } return t.replace(/_/g, ' '); };
+const stInfo = (st: string): { label: string; c: string } => { if (st === 'pending') return { label: 'Bekliyor', c: 'badge-amber' }; if (st === 'processed') return { label: 'İşlendi', c: 'badge-green' }; if (st === 'filtered_duplicate') return { label: 'Duplikat', c: 'badge-purple' }; if (st === 'filtered_low_return') return { label: 'Düşük Getiri', c: 'badge-purple' }; if (st?.startsWith('risk_')) return { label: 'Risk Red', c: 'badge-red' }; if (st?.startsWith('filtered_')) return { label: 'Filtrelendi', c: 'badge-amber' }; return { label: st || '—', c: '' }; };
 
 /* ───────── Mini Bar Chart ───────── */
 function MiniBarChart({ data, height = 48, color = "var(--accent)" }: { data: number[]; height?: number; color?: string }) {
@@ -88,6 +94,22 @@ function CandleChart({ candles, height = 200 }: { candles: Candle[]; height?: nu
       <div className="candle-axis"><span>{fmtUsd(min)}</span><span>{fmtUsd(max)}</span></div>
     </div>
   );
+}
+
+/* ───────── Error Boundary ───────── */
+class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean; error: string}> {
+  constructor(props: any) { super(props); this.state = { hasError: false, error: '' }; }
+  static getDerivedStateFromError(error: Error) { return { hasError: true, error: error.message }; }
+  render() {
+    if (this.state.hasError) {
+      return <div style={{ padding: 40, color: '#ff3d57', background: '#0a0f1e', minHeight: '100vh', fontFamily: 'Inter, sans-serif' }}>
+        <h2>⚠ Görüntüleme Hatası</h2>
+        <p style={{ color: '#8b9cc0', marginTop: 12 }}>{this.state.error}</p>
+        <button onClick={() => { this.setState({ hasError: false, error: '' }); }} style={{ marginTop: 20, padding: '10px 24px', background: '#448aff', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700 }}>Yeniden Dene</button>
+      </div>;
+    }
+    return this.props.children;
+  }
 }
 
 /* ═══════════════════ MAIN APP ═══════════════════ */
@@ -447,70 +469,248 @@ function App() {
 
         {/* ═══ BOT ═══ */}
         {tab === "bot" && (<>
-          <div className="tab-header"><h2>Bot Performansı & Sinyaller</h2></div>
+          <div className="tab-header"><h2>Sinyal İstihbarat Merkezi</h2><span className="badge badge-live">CANLI</span></div>
+
+          {/* ── KPI Strip ── */}
           <div className="kpi-strip">
-            <KPI label="Toplam Sim." value={botSummary ? String(botSummary.total_simulations) : "0"} icon="🔄" />
-            <KPI label="Açık" value={botSummary ? String(botSummary.open_simulations) : "0"} icon="🟢" accent="green" />
-            <KPI label="Kapalı" value={botSummary ? String(botSummary.closed_simulations) : "0"} icon="🔒" />
-            <KPI label="Kazanç" value={botSummary ? String(botSummary.wins) : "0"} icon="✅" accent="green" />
-            <KPI label="Kayıp" value={botSummary ? String(botSummary.losses) : "0"} icon="❌" accent="red" />
-            <KPI label="Ort. PnL %" value={botSummary ? `${fmt(botSummary.average_pnl_pct)}%` : "0%"} icon="📊" accent={botSummary && botSummary.average_pnl_pct > 0 ? "green" : "red"} />
+            <KPI label="Toplam Sinyal" value={String(signals.length)} icon="📡" />
+            <KPI label="Bekleyen" value={String(signals.filter(s => s.status === 'pending').length)} icon="⏳" accent="amber" />
+            <KPI label="İşlenen" value={String(signals.filter(s => s.status === 'processed').length)} icon="✅" accent="green" />
+            <KPI label="Reddedilen" value={String(signals.filter(s => s.status?.startsWith('risk_') || s.status?.startsWith('filtered')).length)} icon="🛡" accent="red" />
+            <KPI label="Açık Sim." value={botSummary ? String(botSummary.open_simulations) : "0"} icon="👻" accent="green" />
+            <KPI label="Win Rate" value={botSummary ? `${fmt(botSummary.win_rate ?? 0, 1)}%` : "0%"} icon="🏆" accent={botSummary && (botSummary.win_rate ?? 0) >= 50 ? "green" : "amber"} />
           </div>
+
+          {/* ── Win Rate + Direction Summary ── */}
           <div className="grid-2">
-            <div className="card card-center"><h3>Win Rate</h3><ProgressRing value={botSummary?.win_rate ?? 0} size={120} stroke={10} color={botSummary && botSummary.win_rate >= 50 ? "var(--green)" : "var(--red)"} /><div className="text-muted" style={{ marginTop: 12 }}>{botSummary?.wins ?? 0}W / {botSummary?.losses ?? 0}L</div></div>
+            <div className="card card-center">
+              <h3>Win Rate</h3>
+              <ProgressRing value={botSummary?.win_rate ?? 0} size={120} stroke={10} color={botSummary && (botSummary.win_rate ?? 0) >= 50 ? "var(--green)" : "var(--red)"} />
+              <div className="text-muted" style={{ marginTop: 12 }}>{botSummary?.wins ?? 0}W / {botSummary?.losses ?? 0}L • Ort. PnL: {botSummary ? `${fmt(botSummary.average_pnl_pct ?? 0)}%` : "0%"}</div>
+            </div>
             <div className="card">
-              <div className="card-header"><h3>Aktif Sinyaller</h3><span className="badge badge-live">{signals.filter(s => s.status === 'pending').length} bekleyen</span></div>
-              <div className="kpi-strip" style={{ padding: "8px 0" }}>
-                <KPI label="Toplam" value={String(signals.length)} icon="📡" />
-                <KPI label="Bekleyen" value={String(signals.filter(s => s.status === 'pending').length)} icon="⏳" accent="amber" />
-                <KPI label="İşlenen" value={String(signals.filter(s => s.status === 'processed').length)} icon="✅" accent="green" />
-                <KPI label="Reddedilen" value={String(signals.filter(s => s.status?.startsWith('risk_') || s.status?.startsWith('filtered')).length)} icon="🛡" accent="red" />
-              </div>
+              <div className="card-header"><h3>Yön Dağılımı</h3><span className="badge badge-cyan">LONG vs SHORT</span></div>
+              {(() => {
+                const longs = signals.filter(s => getDir(s) === 'long').length;
+                const shorts = signals.filter(s => getDir(s) === 'short').length;
+                const total = longs + shorts || 1;
+                const longPct = (longs / total * 100);
+                return (
+                  <div style={{ padding: 22 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontWeight: 700 }}>
+                      <span className="text-green">↑ YUKARIŞ ({longs})</span>
+                      <span className="text-red">↓ DÜŞÜŞ ({shorts})</span>
+                    </div>
+                    <div style={{ height: 14, background: 'var(--red-dim)', borderRadius: 99, overflow: 'hidden' }}>
+                      <div style={{ width: `${longPct}%`, height: '100%', background: 'linear-gradient(90deg, var(--green), rgba(0,230,118,0.6))', borderRadius: '99px 0 0 99px', transition: 'width 0.5s' }} />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12, fontSize: 12 }}>
+                      <span className="text-muted">{longPct.toFixed(0)}% Yükseliş</span>
+                      <span className="text-muted">{(100 - longPct).toFixed(0)}% Düşüş</span>
+                    </div>
+                    <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+                      <div style={{ padding: '10px 12px', background: 'var(--bg3)', borderRadius: 8, textAlign: 'center' }}>
+                        <div className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Toplam Sim.</div>
+                        <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{botSummary?.total_simulations ?? 0}</div>
+                      </div>
+                      <div style={{ padding: '10px 12px', background: 'var(--bg3)', borderRadius: 8, textAlign: 'center' }}>
+                        <div className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Kazanç</div>
+                        <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4, color: 'var(--green)' }}>{botSummary?.wins ?? 0}</div>
+                      </div>
+                      <div style={{ padding: '10px 12px', background: 'var(--bg3)', borderRadius: 8, textAlign: 'center' }}>
+                        <div className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Kayıp</div>
+                        <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4, color: 'var(--red)' }}>{botSummary?.losses ?? 0}</div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
 
-          {/* Professional Signal Table */}
+          {/* ── PROFESSIONAL SIGNAL TABLE ── */}
           <div className="card">
-            <div className="card-header"><h3>Son Sinyaller (Veritabanı)</h3><span className="badge badge-blue">{signals.length} kayıtlı</span></div>
-            <div className="table-wrap"><table className="tbl">
-              <thead><tr><th>Sembol</th><th>Yön</th><th>Sinyal Tipi</th><th>Güven</th><th>Giriş Fiyatı</th><th>Hedef %</th><th>Durum</th><th>Zaman</th></tr></thead>
-              <tbody>{signals.slice(0, 20).map((s, i) => {
-                const meta = typeof s.metadata === 'string' ? (() => { try { return JSON.parse(s.metadata); } catch { return {}; } })() : (s.metadata || {});
-                const direction = meta.position_bias || (s.signal_type?.includes('long') ? 'long' : s.signal_type?.includes('short') ? 'short' : '—');
-                const targetPct = meta.target_pct ? `${(meta.target_pct * 100).toFixed(1)}%` : '≥2%';
-                const signalLabel = s.signal_type?.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()) || '—';
-                const statusLabel = s.status === 'pending' ? 'Bekliyor' : s.status === 'processed' ? 'İşlendi' : s.status === 'filtered_low_return' ? 'Düşük Getiri' : s.status?.startsWith('risk_') ? 'Reddedildi' : s.status;
-                const statusColor = s.status === 'pending' ? 'badge-amber' : s.status === 'processed' ? 'badge-green' : 'badge-red';
-                return (
-                  <tr key={i}>
-                    <td><strong>{s.symbol}</strong><br /><span className="text-muted text-xs">{s.market_type}</span></td>
-                    <td><span className={cls("side-badge", direction === "long" ? "side-long" : direction === "short" ? "side-short" : "")}>{direction === 'long' ? 'LONG' : direction === 'short' ? 'SHORT' : '—'}</span></td>
-                    <td className="text-xs">{signalLabel}</td>
-                    <td><strong>{(Number(s.confidence) * 100).toFixed(0)}%</strong></td>
-                    <td className="text-mono">{fmtUsd(Number(s.price))}</td>
-                    <td className="text-green"><strong>{targetPct}</strong></td>
-                    <td><span className={cls("badge badge-sm", statusColor)}>{statusLabel}</span></td>
-                    <td className="text-muted">{fmtTime(s.timestamp)}</td>
-                  </tr>);
-              })}</tbody>
-            </table>{signals.length === 0 && <div className="empty-state">Henüz sinyal üretilmedi — Sistem veri topluyor ve pattern arıyor. İlk sinyaller kısa süre içinde gelecek.</div>}</div>
+            <div className="card-header">
+              <h3>📡 Sinyal Akışı — Detaylı Görünüm</h3>
+              <span className="badge badge-cyan">{signals.length} kayıt</span>
+            </div>
+            <div className="table-wrap">
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>Coin</th>
+                    <th>Yön</th>
+                    <th>Fiyat</th>
+                    <th>Strateji</th>
+                    <th>Güven</th>
+                    <th>Hedef</th>
+                    <th>Piyasa</th>
+                    <th>Durum</th>
+                    <th>Tarih / Saat</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {signals.slice(0, 30).map((s, i) => {
+                    const meta = safeMeta(s.metadata);
+                    const dir = getDir(s);
+                    const price = safeNum(s.price);
+                    const conf = safeNum(s.confidence) * 100;
+                    const target = meta.target_pct != null ? safeNum(meta.target_pct) : null;
+                    const mkt = (meta.market_type || s.market_type || 'spot').toUpperCase();
+                    const si = stInfo(s.status);
+                    const ts = s.timestamp || s.created_at || '';
+                    return (
+                      <tr key={s.id || i} className={dir === 'long' ? 'sig-row-long' : dir === 'short' ? 'sig-row-short' : ''}>
+                        <td>
+                          <div className="coin-cell">
+                            <span className="coin-icon">{dir === 'long' ? '🟢' : dir === 'short' ? '🔴' : '⚪'}</span>
+                            <div>
+                              <strong className="coin-name">{(s.symbol || '').replace('USDT', '')}</strong>
+                              <span className="coin-pair">/USDT</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <span className={cls("dir-badge", dir === "long" ? "dir-long" : dir === "short" ? "dir-short" : "dir-neutral")}>
+                            {dir === 'long' ? '↑ YUKARIŞ' : dir === 'short' ? '↓ DÜŞÜŞ' : '—'}
+                          </span>
+                        </td>
+                        <td className="text-mono" style={{ fontWeight: 700 }}>{price > 0 ? fmtUsd(price) : '—'}</td>
+                        <td><span className="strat-badge">{sigLabel(s.signal_type)}</span></td>
+                        <td>
+                          <div className="conf-cell">
+                            <div className="conf-bar"><div className="conf-fill" style={{ width: `${Math.min(conf, 100)}%`, background: conf >= 70 ? 'var(--green)' : conf >= 50 ? 'var(--amber)' : 'var(--red)' }} /></div>
+                            <span className="conf-text">{conf.toFixed(0)}%</span>
+                          </div>
+                        </td>
+                        <td className="text-green" style={{ fontWeight: 700 }}>{target != null ? `%${target.toFixed(1)}` : '—'}</td>
+                        <td><span className="badge badge-sm">{mkt}</span></td>
+                        <td><span className={cls("badge badge-sm", si.c)}>{si.label}</span></td>
+                        <td>
+                          <div className="time-cell">
+                            <span className="time-main">{fmtDateTime(ts)}</span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {signals.length === 0 && (
+                <div className="empty-state">
+                  <div style={{ fontSize: 48, marginBottom: 12 }}>📡</div>
+                  <p><strong>Henüz sinyal üretilmedi</strong></p>
+                  <p className="text-xs text-muted" style={{ marginTop: 8 }}>Sistem veri topluyor ve pattern arıyor. İlk sinyaller kısa süre içinde gelecek.</p>
+                </div>
+              )}
+            </div>
           </div>
-          <div className="card"><div className="card-header"><h3>Simülasyonlar</h3><span className="badge">{simulations.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Yön</th><th>Giriş</th><th>Çıkış</th><th>PnL</th><th>PnL %</th><th>Durum</th></tr></thead><tbody>{simulations.slice(0, 15).map((s, i) => (<tr key={i}><td><strong>{s.symbol}</strong></td><td><span className={cls("side-badge", s.side === "long" ? "side-long" : "side-short")}>{s.side}</span></td><td>{fmtUsd(Number(s.entry_price))}</td><td>{s.exit_price ? fmtUsd(Number(s.exit_price)) : "—"}</td><td className={Number(s.pnl || 0) >= 0 ? "text-green" : "text-red"}>{s.pnl ? fmtUsd(Number(s.pnl)) : "—"}</td><td>{s.pnl_pct ? `${Number(s.pnl_pct).toFixed(2)}%` : "—"}</td><td><span className={cls("status-badge", `status-${s.status}`)}>{s.status}</span></td></tr>))}</tbody></table>{simulations.length === 0 && <div className="empty-state">Ghost simulator henüz aktif değil</div>}</div></div>
-          <div className="card"><div className="card-header"><h3>Tespit Edilen Hareketler</h3><span className="badge badge-amber">{movements.length}</span></div><div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Borsa</th><th>Tip</th><th>Değişim</th><th>Yön</th><th>Hacim</th><th>Başlangıç</th><th>Bitiş</th></tr></thead><tbody>{movements.slice(0, 12).map((m, i) => (<tr key={i}><td><strong>{m.symbol}</strong></td><td>{m.exchange}</td><td><span className="badge badge-sm">{m.market_type}</span></td><td className={Number(m.change_pct) >= 0 ? "text-green" : "text-red"}>{fmtPct(Number(m.change_pct) * 100)}</td><td>{m.direction}</td><td>{fmt(Number(m.volume), 2)}</td><td>{fmtTimeShort(m.start_time)}</td><td>{fmtTimeShort(m.end_time)}</td></tr>))}</tbody></table>{movements.length === 0 && <div className="empty-state">Henüz %2'den büyük hareket tespit edilmedi</div>}</div></div>
 
-          {/* Signal Summary by Type */}
+          {/* ── ACTIVE SIMULATIONS ── */}
+          {simulations.filter(s => s.status === 'open').length > 0 && (
+            <div className="card">
+              <div className="card-header"><h3>👻 Aktif Simülasyonlar</h3><span className="badge badge-green">{simulations.filter(s => s.status === 'open').length} açık</span></div>
+              <div className="sim-grid">
+                {simulations.filter(s => s.status === 'open').map((s, i) => {
+                  const entry = safeNum(s.entry_price);
+                  const lp = livePrices.find(p => p.symbol === s.symbol);
+                  const current = lp ? lp.price : entry;
+                  const pnlEst = entry > 0 ? ((s.side === 'long' ? (current - entry) : (entry - current)) / entry * 100) : 0;
+                  const dur = s.entry_time ? Math.floor((Date.now() - new Date(s.entry_time).getTime()) / 60000) : 0;
+                  return (
+                    <div key={s.id || i} className={cls("sim-card", pnlEst >= 0 ? "sim-card-win" : "sim-card-loss")}>
+                      <div className="sim-card-top">
+                        <div className="sim-coin">
+                          <strong>{(s.symbol || '').replace('USDT', '')}</strong>
+                          <span className={cls("dir-badge dir-sm", s.side === 'long' ? "dir-long" : "dir-short")}>{s.side === 'long' ? '↑ LONG' : '↓ SHORT'}</span>
+                        </div>
+                        <div className={cls("sim-pnl", pnlEst >= 0 ? "text-green" : "text-red")}>
+                          {pnlEst >= 0 ? '+' : ''}{pnlEst.toFixed(2)}%
+                        </div>
+                      </div>
+                      <div className="sim-card-body">
+                        <div className="sim-detail"><span className="text-muted">Giriş:</span> <span className="text-mono">{fmtUsd(entry)}</span></div>
+                        <div className="sim-detail"><span className="text-muted">Güncel:</span> <span className="text-mono">{fmtUsd(current)}</span></div>
+                        <div className="sim-detail"><span className="text-muted">Süre:</span> {ago(dur)}</div>
+                        <div className="sim-detail"><span className="text-muted">Açılış:</span> {s.entry_time ? fmtDateTime(s.entry_time) : '—'}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ── CLOSED SIMULATIONS ── */}
+          <div className="card">
+            <div className="card-header"><h3>Simülasyon Geçmişi</h3><span className="badge">{simulations.length} toplam</span></div>
+            <div className="table-wrap">
+              <table className="tbl">
+                <thead>
+                  <tr><th>Coin</th><th>Yön</th><th>Giriş Fiyatı</th><th>Çıkış Fiyatı</th><th>PnL</th><th>PnL %</th><th>Giriş Zamanı</th><th>Çıkış Zamanı</th><th>Durum</th></tr>
+                </thead>
+                <tbody>
+                  {simulations.slice(0, 20).map((s, i) => {
+                    const pnlVal = safeNum(s.pnl);
+                    const pnlPctVal = safeNum(s.pnl_pct);
+                    return (
+                      <tr key={s.id || i}>
+                        <td><strong>{(s.symbol || '').replace('USDT', '')}</strong><span className="text-muted">/USDT</span></td>
+                        <td><span className={cls("dir-badge dir-sm", s.side === "long" ? "dir-long" : "dir-short")}>{s.side === 'long' ? '↑ LONG' : '↓ SHORT'}</span></td>
+                        <td className="text-mono">{fmtUsd(safeNum(s.entry_price))}</td>
+                        <td className="text-mono">{s.exit_price ? fmtUsd(safeNum(s.exit_price)) : <span className="text-muted">—</span>}</td>
+                        <td className={pnlVal >= 0 ? "text-green" : "text-red"} style={{ fontWeight: 700 }}>{s.pnl != null ? `${pnlVal >= 0 ? '+' : ''}${fmtUsd(pnlVal)}` : "—"}</td>
+                        <td className={pnlPctVal >= 0 ? "text-green" : "text-red"} style={{ fontWeight: 700 }}>{s.pnl_pct != null ? `${pnlPctVal >= 0 ? '+' : ''}${pnlPctVal.toFixed(2)}%` : "—"}</td>
+                        <td className="text-muted">{s.entry_time ? fmtDateTime(s.entry_time) : '—'}</td>
+                        <td className="text-muted">{s.exit_time ? fmtDateTime(s.exit_time) : '—'}</td>
+                        <td><span className={cls("status-badge", `status-${s.status || 'unknown'}`)}>{s.status || '—'}</span></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {simulations.length === 0 && <div className="empty-state">Ghost simulator henüz aktif değil</div>}
+            </div>
+          </div>
+
+          {/* ── Market Movements ── */}
+          <div className="card">
+            <div className="card-header"><h3>Tespit Edilen Piyasa Hareketleri</h3><span className="badge badge-amber">{movements.length}</span></div>
+            <div className="table-wrap">
+              <table className="tbl">
+                <thead><tr><th>Coin</th><th>Borsa</th><th>Tip</th><th>Değişim</th><th>Yön</th><th>Hacim</th><th>Başlangıç</th><th>Bitiş</th></tr></thead>
+                <tbody>
+                  {movements.slice(0, 12).map((m, i) => (
+                    <tr key={i}>
+                      <td><strong>{(m.symbol || '').replace('USDT', '')}</strong><span className="text-muted">/USDT</span></td>
+                      <td>{m.exchange || '—'}</td>
+                      <td><span className="badge badge-sm">{m.market_type || '—'}</span></td>
+                      <td className={safeNum(m.change_pct) >= 0 ? "text-green" : "text-red"} style={{ fontWeight: 700 }}>{fmtPct(safeNum(m.change_pct) * 100)}</td>
+                      <td>{m.direction || '—'}</td>
+                      <td className="text-mono">{fmt(safeNum(m.volume), 2)}</td>
+                      <td className="text-muted">{m.start_time ? fmtTimeShort(m.start_time) : '—'}</td>
+                      <td className="text-muted">{m.end_time ? fmtTimeShort(m.end_time) : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {movements.length === 0 && <div className="empty-state">Henüz %2'den büyük hareket tespit edilmedi</div>}
+            </div>
+          </div>
+
+          {/* ── Signal Type Distribution ── */}
           {signalSummary.length > 0 && (
             <div className="card">
-              <div className="card-header"><h3>Sinyal Tipi Dağılımı</h3><span className="badge badge-purple">{signalSummary.reduce((s, r) => s + Number(r.total || r.count || 0), 0)} toplam</span></div>
+              <div className="card-header"><h3>Sinyal Tipi Dağılımı</h3><span className="badge badge-purple">{signalSummary.reduce((a, r) => a + safeNum(r.total || r.count), 0)} toplam</span></div>
               <div className="db-stats-grid">
                 {signalSummary.map((s, i) => (
                   <div key={i} className="db-stat-card">
-                    <div className="db-stat-name">{s.signal_type}</div>
-                    <div className="db-stat-value">{fmt(Number(s.total || s.count || 0), 0)}</div>
+                    <div className="db-stat-name">{sigLabel(s.signal_type)}</div>
+                    <div className="db-stat-value">{fmt(safeNum(s.total || s.count), 0)}</div>
                     <div className="text-muted text-xs">
-                      {s.pending > 0 && <span className="text-amber">{s.pending} bekleyen · </span>}
-                      {s.processed > 0 && <span className="text-green">{s.processed} işlendi · </span>}
-                      güven: {s.avg_confidence != null ? `${(Number(s.avg_confidence) * 100).toFixed(0)}%` : "—"}
+                      {safeNum(s.pending) > 0 && <span className="text-amber">{s.pending} bekleyen · </span>}
+                      {safeNum(s.processed) > 0 && <span className="text-green">{s.processed} işlendi · </span>}
+                      güven: {s.avg_confidence != null ? `${(safeNum(s.avg_confidence) * 100).toFixed(0)}%` : "—"}
                     </div>
                   </div>
                 ))}
@@ -518,62 +718,62 @@ function App() {
             </div>
           )}
 
-          {/* Historical Signatures */}
+          {/* ── Historical Signatures ── */}
           {signatures.length > 0 && (
             <div className="card">
               <div className="card-header"><h3>Tarihsel İmzalar (Cosine Benzerlik)</h3><span className="badge badge-cyan">{signatures.length}</span></div>
-              <div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Piyasa</th><th>Zaman Dilimi</th><th>Yön</th><th>Değişim %</th><th>Kayıt</th></tr></thead><tbody>
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Coin</th><th>Piyasa</th><th>Zaman Dilimi</th><th>Yön</th><th>Değişim %</th><th>Kayıt</th></tr></thead><tbody>
                 {signatures.map((s, i) => (
                   <tr key={i}>
-                    <td><strong>{s.symbol}</strong></td>
-                    <td><span className="badge badge-sm">{s.market_type}</span></td>
-                    <td>{s.timeframe}</td>
-                    <td><span className={cls("side-badge", s.direction === "up" ? "side-long" : "side-short")}>{s.direction === "up" ? "YUKARI" : "AŞAĞI"}</span></td>
-                    <td className={Number(s.change_pct) >= 0 ? "text-green" : "text-red"}>{fmtPct(Number(s.change_pct || 0) * 100)}</td>
-                    <td className="text-muted">{s.created_at ? fmtTime(s.created_at) : "—"}</td>
+                    <td><strong>{(s.symbol || '').replace('USDT', '')}</strong><span className="text-muted">/USDT</span></td>
+                    <td><span className="badge badge-sm">{s.market_type || '—'}</span></td>
+                    <td>{s.timeframe || '—'}</td>
+                    <td><span className={cls("dir-badge dir-sm", s.direction === "up" ? "dir-long" : "dir-short")}>{s.direction === "up" ? "↑ YUKARIŞ" : "↓ DÜŞÜŞ"}</span></td>
+                    <td className={safeNum(s.change_pct) >= 0 ? "text-green" : "text-red"} style={{ fontWeight: 700 }}>{fmtPct(safeNum(s.change_pct) * 100)}</td>
+                    <td className="text-muted">{s.created_at ? fmtDateTime(s.created_at) : "—"}</td>
                   </tr>
                 ))}
               </tbody></table></div>
             </div>
           )}
 
-          {/* RCA Results */}
+          {/* ── RCA Results ── */}
           {rcaResults.length > 0 && (
             <div className="card">
               <div className="card-header"><h3>Kök Neden Analizi (RCA)</h3><span className="badge badge-red">{rcaResults.length}</span></div>
-              <div className="table-wrap"><table className="tbl"><thead><tr><th>Sembol</th><th>Başarısızlık Tipi</th><th>Güven</th><th>Tahmin Vol.</th><th>Gerçek Vol.</th><th>Öneri</th><th>Zaman</th></tr></thead><tbody>
+              <div className="table-wrap"><table className="tbl"><thead><tr><th>Coin</th><th>Başarısızlık</th><th>Güven</th><th>Tahmin Vol.</th><th>Gerçek Vol.</th><th>Öneri</th><th>Zaman</th></tr></thead><tbody>
                 {rcaResults.slice(0, 15).map((r, i) => (
                   <tr key={i}>
-                    <td><strong>{r.symbol || "—"}</strong></td>
+                    <td><strong>{(r.symbol || '—').replace('USDT', '')}</strong></td>
                     <td><span className="badge badge-sm badge-red">{r.failure_type || "—"}</span></td>
-                    <td>{r.confidence != null ? `${(Number(r.confidence) * 100).toFixed(0)}%` : "—"}</td>
-                    <td className="text-mono">{r.predicted_volatility != null ? Number(r.predicted_volatility).toFixed(4) : "—"}</td>
-                    <td className="text-mono">{r.actual_volatility != null ? Number(r.actual_volatility).toFixed(4) : "—"}</td>
+                    <td>{r.confidence != null ? `${(safeNum(r.confidence) * 100).toFixed(0)}%` : "—"}</td>
+                    <td className="text-mono">{r.predicted_volatility != null ? safeNum(r.predicted_volatility).toFixed(4) : "—"}</td>
+                    <td className="text-mono">{r.actual_volatility != null ? safeNum(r.actual_volatility).toFixed(4) : "—"}</td>
                     <td className="text-xs" style={{ maxWidth: 250, overflow: "hidden", textOverflow: "ellipsis" }}>{r.recommendation || "—"}</td>
-                    <td className="text-muted">{r.created_at ? fmtTime(r.created_at) : "—"}</td>
+                    <td className="text-muted">{r.created_at ? fmtDateTime(r.created_at) : "—"}</td>
                   </tr>
                 ))}
               </tbody></table></div>
             </div>
           )}
 
-          {/* RCA Stats */}
+          {/* ── RCA Stats ── */}
           {rcaStats.length > 0 && (
             <div className="card">
               <div className="card-header"><h3>RCA Başarısızlık Dağılımı</h3><span className="badge badge-amber">İstatistik</span></div>
               <div className="db-stats-grid">
                 {rcaStats.map((s, i) => (
                   <div key={i} className="db-stat-card">
-                    <div className="db-stat-name">{s.failure_type}</div>
-                    <div className="db-stat-value">{fmt(Number(s.count || 0), 0)}</div>
-                    <div className="text-muted text-xs">ort. güven: {s.avg_confidence != null ? `${(Number(s.avg_confidence) * 100).toFixed(0)}%` : "—"}</div>
+                    <div className="db-stat-name">{s.failure_type || '—'}</div>
+                    <div className="db-stat-value">{fmt(safeNum(s.count), 0)}</div>
+                    <div className="text-muted text-xs">ort. güven: {s.avg_confidence != null ? `${(safeNum(s.avg_confidence) * 100).toFixed(0)}%` : "—"}</div>
                   </div>
                 ))}
               </div>
             </div>
           )}
 
-          {/* Correction Notes */}
+          {/* ── Correction Notes ── */}
           {corrections.length > 0 && (
             <div className="card">
               <div className="card-header"><h3>Oto-Düzeltme Notları</h3><span className="badge badge-green">{corrections.filter(c => c.applied).length} uygulandı</span></div>
@@ -586,7 +786,7 @@ function App() {
                     <td className="text-mono">{c.adjustment_value || "—"}</td>
                     <td>{c.applied ? <span className="badge badge-sm badge-green">Uygulandı</span> : <span className="badge badge-sm badge-amber">Bekliyor</span>}</td>
                     <td className="text-xs" style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis" }}>{c.reason || "—"}</td>
-                    <td className="text-muted">{c.created_at ? fmtTime(c.created_at) : "—"}</td>
+                    <td className="text-muted">{c.created_at ? fmtDateTime(c.created_at) : "—"}</td>
                   </tr>
                 ))}
               </tbody></table></div>
@@ -911,4 +1111,4 @@ function KPI({ label, value, sub, icon, accent }: { label: string; value: string
 }
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);
-root.render(<React.StrictMode><App /></React.StrictMode>);
+root.render(<React.StrictMode><ErrorBoundary><App /></ErrorBoundary></React.StrictMode>);
