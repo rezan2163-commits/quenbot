@@ -5,8 +5,9 @@ module.exports = {
     {
       name: "quenbot-api",
       cwd: "./artifacts/api-server",
-      script: "node",
-      args: "--loader tsx src/index.ts",
+      script: "npx",
+      args: "tsx src/index.ts",
+      interpreter: "none",
       env: {
         NODE_ENV: "production",
         PORT: 3001,
@@ -25,8 +26,9 @@ module.exports = {
     {
       name: "quenbot-agents",
       cwd: "./python_agents",
-      script: "./start.sh",
-      interpreter: "bash",
+      script: "python3",
+      args: "main.py",
+      interpreter: "none",
       env: {
         PYTHONUNBUFFERED: "1",
         DB_HOST: "localhost",
