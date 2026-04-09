@@ -418,22 +418,59 @@ class Database:
                 _dumps(movement_data['t10_data']))
 
     async def get_recent_movements(self, symbol: str, hours: int = 24, market_type: str = None) -> List[Dict[str, Any]]:
-        """Get recent price movements (max 200)"""
+        """Get recent price movements — lightweight, no JSONB (max 100)"""
         async with self.pool.acquire() as conn:
             cutoff_time = datetime.utcnow() - timedelta(hours=hours)
             if market_type:
                 rows = await conn.fetch("""
-                    SELECT * FROM price_movements
+                    SELECT id, symbol, market_type, direction, change_pct,
+                           start_price, end_price, volume, start_time, end_time
+                    FROM price_movements
                     WHERE symbol = $1 AND market_type = $2 AND start_time >= $3
-                    ORDER BY start_time DESC LIMIT 200
+                    ORDER BY start_time DESC LIMIT 100
                 """, symbol, market_type, cutoff_time)
             else:
                 rows = await conn.fetch("""
-                    SELECT * FROM price_movements
+                    SELECT id, symbol, market_type, direction, change_pct,
+                           start_price, end_price, volume, start_time, end_time
+                    FROM price_movements
                     WHERE symbol = $1 AND start_time >= $2
-                    ORDER BY start_time DESC LIMIT 200
+                    ORDER BY start_time DESC LIMIT 100
                 """, symbol, cutoff_time)
             return [dict(row) for row in rows]
+
+    async def get_movement_profiles(self, symbol: str, hours: int = 24, market_type: str = None, limit: int = 50) -> List[List[float]]:
+        """Get only price_profile arrays from recent movements (memory-efficient)"""
+        async with self.pool.acquire() as conn:
+            cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+            if market_type:
+                rows = await conn.fetch("""
+                    SELECT t10_data->'price_profile' as profile
+                    FROM price_movements
+                    WHERE symbol = $1 AND market_type = $2 AND start_time >= $3
+                          AND t10_data IS NOT NULL
+                    ORDER BY start_time DESC LIMIT $4
+                """, symbol, market_type, cutoff_time, limit)
+            else:
+                rows = await conn.fetch("""
+                    SELECT t10_data->'price_profile' as profile
+                    FROM price_movements
+                    WHERE symbol = $1 AND start_time >= $2
+                          AND t10_data IS NOT NULL
+                    ORDER BY start_time DESC LIMIT $3
+                """, symbol, cutoff_time, limit)
+            results = []
+            for row in rows:
+                profile = row['profile']
+                if profile:
+                    if isinstance(profile, str):
+                        try:
+                            profile = json.loads(profile)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                    if isinstance(profile, list) and len(profile) > 2:
+                        results.append(profile)
+            return results
 
     # Signal operations
     async def insert_signal(self, signal_data: Dict[str, Any]) -> int:
@@ -1036,19 +1073,19 @@ class Database:
     async def get_trades_in_range(self, symbol: str, start_time: datetime,
                                    end_time: datetime,
                                    market_type: str = None) -> List[Dict[str, Any]]:
-        """Belirli zaman aralığındaki trade'leri getir (max 1000)"""
+        """Belirli zaman aralığındaki trade'leri getir (max 300)"""
         async with self.pool.acquire() as conn:
             if market_type:
                 rows = await conn.fetch("""
                     SELECT * FROM trades
                     WHERE symbol = $1 AND market_type = $2
                       AND timestamp >= $3 AND timestamp <= $4
-                    ORDER BY timestamp ASC LIMIT 1000
+                    ORDER BY timestamp ASC LIMIT 300
                 """, symbol, market_type, start_time, end_time)
             else:
                 rows = await conn.fetch("""
                     SELECT * FROM trades
                     WHERE symbol = $1 AND timestamp >= $2 AND timestamp <= $3
-                    ORDER BY timestamp ASC LIMIT 1000
+                    ORDER BY timestamp ASC LIMIT 300
                 """, symbol, start_time, end_time)
             return [dict(row) for row in rows]

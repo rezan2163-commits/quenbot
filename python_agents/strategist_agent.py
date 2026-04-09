@@ -330,23 +330,15 @@ class StrategistAgent:
                         if movement_vector is None or movement_vector.size == 0:
                             continue
 
-                        historical_movements = await self.db.get_recent_movements(symbol, hours=24, market_type=market_type)
+                        historical_profiles = await self.db.get_movement_profiles(symbol, hours=24, market_type=market_type, limit=50)
                         historical_vectors = []
-                        for movement in historical_movements:
-                            t10_data = movement.get('t10_data') or {}
-                            if isinstance(t10_data, str):
-                                try:
-                                    t10_data = json.loads(t10_data)
-                                except (json.JSONDecodeError, TypeError):
-                                    t10_data = {}
-                            profile = t10_data.get('price_profile') if isinstance(t10_data, dict) else None
-                            if isinstance(profile, list) and len(profile) > 2:
-                                try:
-                                    vec = np.array(profile, dtype=np.float64)
-                                    if vec.size > 0:
-                                        historical_vectors.append(vec)
-                                except:
-                                    continue
+                        for profile in historical_profiles:
+                            try:
+                                vec = np.array(profile, dtype=np.float64)
+                                if vec.size > 0:
+                                    historical_vectors.append(vec)
+                            except Exception:
+                                continue
 
                         similarities = compare_similarity(movement_vector, historical_vectors) if movement_vector.size > 0 else []
                         best_similarity = max(similarities) if similarities else 0.0
