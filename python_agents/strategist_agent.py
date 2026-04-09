@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import logging
 from datetime import datetime, timedelta
@@ -21,12 +22,10 @@ from intelligence_core import FeatureEngine, MarketRegimeDetector
 
 logger = logging.getLogger(__name__)
 
-# Çoklu zaman dilimi analizi pencereleri (dakika)
+# Çoklu zaman dilimi analizi pencereleri (dakika) — bellek-dostu set
 TIMEFRAME_WINDOWS = {
     '15m': 15,
     '1h': 60,
-    '4h': 240,
-    '1d': 1440,
 }
 
 
@@ -235,6 +234,7 @@ class StrategistAgent:
                             continue
 
             self.analysis_count += 1
+            gc.collect()  # Bellek temizliği
 
         except Exception as e:
             logger.error(f"Multi-timeframe analysis error: {e}")
@@ -475,6 +475,7 @@ class StrategistAgent:
                         continue
 
             self.last_activity = datetime.utcnow()
+            gc.collect()  # Bellek temizliği
 
         except Exception as e:
             logger.error(f"Error in strategy analysis: {e}")

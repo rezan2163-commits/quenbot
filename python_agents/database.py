@@ -786,22 +786,24 @@ class Database:
 
     async def get_trades_for_snapshot(self, symbol: str, minutes: int = 15,
                                        market_type: str = None) -> List[Dict[str, Any]]:
-        """Son N dakikadaki trade'leri getir (Brain snapshot için)"""
+        """Son N dakikadaki trade'leri getir (Brain snapshot için). Max 500 kayıt."""
         async with self.pool.acquire() as conn:
             cutoff = datetime.utcnow() - timedelta(minutes=minutes)
             if market_type:
                 rows = await conn.fetch("""
                     SELECT * FROM trades
                     WHERE symbol = $1 AND market_type = $2 AND timestamp >= $3
-                    ORDER BY timestamp ASC
+                    ORDER BY timestamp DESC LIMIT 500
                 """, symbol, market_type, cutoff)
             else:
                 rows = await conn.fetch("""
                     SELECT * FROM trades
                     WHERE symbol = $1 AND timestamp >= $2
-                    ORDER BY timestamp ASC
+                    ORDER BY timestamp DESC LIMIT 500
                 """, symbol, cutoff)
-            return [dict(row) for row in rows]
+            result = [dict(row) for row in rows]
+            result.reverse()  # ASC order
+            return result
 
     async def get_price_at_time(self, symbol: str, target_time: datetime) -> Optional[float]:
         """Belirli bir zamandaki fiyatı getir (en yakın trade)"""
@@ -1034,19 +1036,19 @@ class Database:
     async def get_trades_in_range(self, symbol: str, start_time: datetime,
                                    end_time: datetime,
                                    market_type: str = None) -> List[Dict[str, Any]]:
-        """Belirli zaman aralığındaki trade'leri getir"""
+        """Belirli zaman aralığındaki trade'leri getir (max 1000)"""
         async with self.pool.acquire() as conn:
             if market_type:
                 rows = await conn.fetch("""
                     SELECT * FROM trades
                     WHERE symbol = $1 AND market_type = $2
                       AND timestamp >= $3 AND timestamp <= $4
-                    ORDER BY timestamp ASC
+                    ORDER BY timestamp ASC LIMIT 1000
                 """, symbol, market_type, start_time, end_time)
             else:
                 rows = await conn.fetch("""
                     SELECT * FROM trades
                     WHERE symbol = $1 AND timestamp >= $2 AND timestamp <= $3
-                    ORDER BY timestamp ASC
+                    ORDER BY timestamp ASC LIMIT 1000
                 """, symbol, start_time, end_time)
             return [dict(row) for row in rows]

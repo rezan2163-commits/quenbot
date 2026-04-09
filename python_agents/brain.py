@@ -118,6 +118,8 @@ class PatternRecord:
 class BrainModule:
     """Merkezi AI Zeka Modülü"""
 
+    MAX_PATTERN_MEMORY = 500
+
     def __init__(self, db):
         self.db = db
         self.pattern_memory: List[PatternRecord] = []
@@ -422,6 +424,9 @@ class BrainModule:
                     new_records.append(record)
                 if new_records:
                     self.pattern_memory.extend(new_records)
+                    # Bellek sınırı: eski pattern'ları at
+                    if len(self.pattern_memory) > self.MAX_PATTERN_MEMORY:
+                        self.pattern_memory = self.pattern_memory[-self.MAX_PATTERN_MEMORY:]
                     # Intelligence Core'a da ekle
                     if self.intelligence_core:
                         for rec in new_records:

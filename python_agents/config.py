@@ -41,8 +41,8 @@ class Config:
     SIMULATION_TIMEOUT_HOURS = 24
 
     # Evolutionary strategy parameters
-    STRATEGY_POPULATION_SIZE = 40
-    STRATEGY_GENERATIONS = 30
+    STRATEGY_POPULATION_SIZE = 20
+    STRATEGY_GENERATIONS = 15
     STRATEGY_MIN_MEAN_PROFIT = 0.005
 
     # Paper trading thresholds
