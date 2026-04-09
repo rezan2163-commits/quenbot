@@ -16,6 +16,16 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
+# Intelligence Core lazy import (circular import koruması)
+_intelligence_core_module = None
+
+def _get_intelligence_core():
+    global _intelligence_core_module
+    if _intelligence_core_module is None:
+        from intelligence_core import IntelligenceCore
+        _intelligence_core_module = IntelligenceCore
+    return _intelligence_core_module
+
 # ─── Zaman Dilimleri ───
 TIMEFRAMES = {
     '15m': 15,
@@ -121,6 +131,8 @@ class BrainModule:
         self.prediction_accuracy = {'correct': 0, 'total': 0}
         self.signal_type_scores: Dict[str, Dict] = {}
         self.last_learning_update = None
+        # Intelligence Core (gelişmiş zeka katmanı)
+        self.intelligence_core = None
 
     async def initialize(self):
         """Geçmiş pattern'ları yükle"""
@@ -157,6 +169,15 @@ class BrainModule:
             logger.info(f"🧠 Brain: Loaded {len(self.pattern_memory)} historical patterns")
         except Exception as e:
             logger.warning(f"Brain: Could not load patterns: {e}")
+
+        # Intelligence Core başlat
+        try:
+            ICClass = _get_intelligence_core()
+            self.intelligence_core = ICClass(self)
+            await self.intelligence_core.initialize()
+        except Exception as e:
+            logger.warning(f"Brain: Intelligence Core init failed (degraded mode): {e}")
+            self.intelligence_core = None
 
     def build_snapshot_from_trades(self, trades: List[Dict], symbol: str,
                                     exchange: str, market_type: str) -> Optional[TradeSnapshot]:
@@ -280,8 +301,28 @@ class BrainModule:
             self.prediction_accuracy['correct'] += 1
         self.prediction_accuracy['total'] += 1
         self.last_learning_update = datetime.utcnow()
+
+        # Adaptive learning weights based on signal performance
+        self._update_adaptive_weights()
+
         logger.info(f"🧠 Brain learning: {signal_type} {'✓' if was_correct else '✗'} | "
                      f"Accuracy: {self.get_accuracy():.1%}")
+
+    def _update_adaptive_weights(self):
+        """Signal performance'a göre learning_weights ayarla."""
+        if self.prediction_accuracy['total'] < 10:
+            return  # Yeterli veri yok
+
+        accuracy = self.get_accuracy()
+
+        # Düşük accuracy → similarity ağırlığını artır (daha sıkı matching)
+        if accuracy < 0.4:
+            self.learning_weights['similarity'] = min(self.learning_weights['similarity'] + 0.02, 0.5)
+            self.learning_weights['confidence_history'] = max(self.learning_weights['confidence_history'] - 0.01, 0.1)
+        # Yüksek accuracy → daha dengeli ağırlıklar
+        elif accuracy > 0.6:
+            self.learning_weights['similarity'] = max(self.learning_weights['similarity'] - 0.01, 0.25)
+            self.learning_weights['volume_match'] = min(self.learning_weights['volume_match'] + 0.01, 0.35)
 
     def get_accuracy(self) -> float:
         if self.prediction_accuracy['total'] == 0:
@@ -306,7 +347,7 @@ class BrainModule:
 
     def get_brain_status(self) -> Dict[str, Any]:
         """Brain durumunu döndür"""
-        return {
+        status = {
             'total_patterns': len(self.pattern_memory),
             'accuracy': self.get_accuracy(),
             'prediction_stats': dict(self.prediction_accuracy),
@@ -318,6 +359,31 @@ class BrainModule:
             'last_learning_update': self.last_learning_update.isoformat() if self.last_learning_update else None,
             'learning_weights': self.learning_weights,
         }
+        # Intelligence Core durumu
+        if self.intelligence_core:
+            status['intelligence_core'] = self.intelligence_core.get_status()
+        return status
+
+    def enhanced_analyze(self, snapshot, indicators: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
+        """
+        Intelligence Core ile gelişmiş analiz.
+        Core yoksa None döner (degraded mode — mevcut brain yoluna fall back).
+        """
+        if not self.intelligence_core:
+            return None
+        try:
+            return self.intelligence_core.analyze(snapshot, indicators)
+        except Exception as e:
+            logger.debug(f"Enhanced analyze error: {e}")
+            return None
+
+    def record_enriched_pattern(self, snapshot, indicators: Optional[Dict] = None):
+        """Intelligence Core pattern library'sine yeni pattern ekle."""
+        if self.intelligence_core:
+            try:
+                self.intelligence_core.record_pattern(snapshot, indicators)
+            except Exception as e:
+                logger.debug(f"Record enriched pattern error: {e}")
 
     async def refresh_patterns(self):
         """Yeni pattern'ları DB'den memory'ye yükle"""
@@ -356,6 +422,13 @@ class BrainModule:
                     new_records.append(record)
                 if new_records:
                     self.pattern_memory.extend(new_records)
+                    # Intelligence Core'a da ekle
+                    if self.intelligence_core:
+                        for rec in new_records:
+                            base_vec = rec.snapshot.to_vector()
+                            import numpy as _np
+                            enriched = _np.concatenate([base_vec, _np.zeros(12)])
+                            self.intelligence_core.pattern_library.add_pattern(rec, enriched)
                     logger.info(f"🧠 Brain: Loaded {len(new_records)} new patterns (total: {len(self.pattern_memory)})")
         except Exception as e:
             logger.debug(f"Brain refresh error: {e}")

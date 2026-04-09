@@ -17,6 +17,7 @@ from strategy import (
     build_movement_vector,
     compare_similarity
 )
+from intelligence_core import FeatureEngine, MarketRegimeDetector
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,77 @@ class StrategistAgent:
                                     'market_type': market_type,
                                     'snapshot_data': snapshot.to_dict(),
                                 })
+
+                                # ── Intelligence Core analizi (mevcut brain'in ÜSTÜNE) ──
+                                if self.brain and self.brain.intelligence_core:
+                                    try:
+                                        prices_arr = np.array([float(t['price']) for t in reversed(trades)], dtype=np.float64)
+                                        volumes_arr = np.array([float(t['quantity']) * float(t['price']) for t in reversed(trades)], dtype=np.float64)
+                                        ind = compute_all_indicators(prices_arr, volumes=volumes_arr)
+                                        if not isinstance(ind, dict):
+                                            ind = {}
+
+                                        intel_result = self.brain.enhanced_analyze(snapshot, ind)
+                                        if intel_result and intel_result.get('direction') and intel_result.get('confidence', 0) > 0:
+                                            intel_conf = intel_result['confidence']
+                                            intel_dir = intel_result['direction']
+                                            regime = intel_result.get('regime', {})
+                                            regime_name = regime.get('regime', 'UNKNOWN') if isinstance(regime, dict) else 'UNKNOWN'
+
+                                            # Mode-aware confidence threshold
+                                            min_intel_conf = 0.35 if (self.state_tracker and
+                                                self.state_tracker.get_mode() in ('BOOTSTRAP', 'LEARNING')) else 0.55
+
+                                            if intel_conf >= min_intel_conf:
+                                                # En iyi timeframe seç
+                                                intel_tfs = intel_result.get('timeframes', {})
+                                                best_intel_tf = None
+                                                best_intel_strength = 0
+                                                for itf, itf_data in intel_tfs.items():
+                                                    if itf_data.get('strength', 0) > best_intel_strength:
+                                                        best_intel_strength = itf_data['strength']
+                                                        best_intel_tf = itf
+
+                                                if best_intel_tf:
+                                                    itf_change = abs(intel_tfs[best_intel_tf].get('avg_change_pct', 0))
+                                                    if itf_change >= 0.01:  # Minimum %1 beklenen hareket
+                                                        last_price = float(trades[-1]['price'])
+                                                        signal_type = f'intel_{intel_dir}_{best_intel_tf}'
+                                                        signal_payload = {
+                                                            'market_type': market_type,
+                                                            'symbol': symbol,
+                                                            'signal_type': signal_type,
+                                                            'confidence': float(min(intel_conf, 0.95)),
+                                                            'price': last_price,
+                                                            'timestamp': datetime.utcnow(),
+                                                            'metadata': {
+                                                                'position_bias': intel_dir,
+                                                                'target_pct': float(max(itf_change, 0.02)),
+                                                                'timeframe': best_intel_tf,
+                                                                'match_count': intel_result.get('match_count', 0),
+                                                                'avg_similarity': intel_result.get('avg_similarity', 0),
+                                                                'top3_similarity': intel_result.get('top3_similarity', 0),
+                                                                'regime': regime_name,
+                                                                'regime_multiplier': intel_result.get('regime_multiplier', 1.0),
+                                                                'tf_agreement': intel_result.get('tf_agreement', 0),
+                                                                'avg_consistency': intel_result.get('avg_consistency', 0),
+                                                                'enriched_dim': intel_result.get('enriched_dim', 18),
+                                                                'intelligence_version': intel_result.get('intelligence_version', '1.0'),
+                                                                'market_type': market_type,
+                                                            }
+                                                        }
+                                                        await self.db.insert_signal(signal_payload)
+                                                        self.signals_generated += 1
+                                                        logger.info(
+                                                            f"🧬 Intel signal [{market_type}] {symbol} {intel_dir} "
+                                                            f"tf={best_intel_tf} conf={intel_conf:.2f} "
+                                                            f"regime={regime_name} matches={intel_result.get('match_count', 0)}")
+
+                                        # Pattern'ı enriched library'ye de kaydet
+                                        self.brain.record_enriched_pattern(snapshot, ind)
+
+                                    except Exception as e:
+                                        logger.debug(f"Intel analysis error {symbol}: {e}")
 
                         except Exception as e:
                             logger.debug(f"Multi-TF error {symbol} {tf_key}: {e}")
