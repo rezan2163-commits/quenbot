@@ -40,7 +40,7 @@ module.exports = {
       instances: 1,
       autorestart: true,
       watch: false,
-      max_memory_restart: "1G",
+      max_memory_restart: "2G",
       error_file: "./logs/agents-error.log",
       out_file: "./logs/agents-out.log",
       merge_logs: true,
