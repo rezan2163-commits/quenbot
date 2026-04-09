@@ -432,6 +432,7 @@ class ScoutAgent:
             total_volume = buy_volume + sell_volume
             aggressiveness = float(buy_volume / max(sell_volume, 1e-8)) if direction == 'long' \
                 else float(sell_volume / max(buy_volume, 1e-8))
+            aggressiveness = min(aggressiveness, 9999.99)  # cap for DB NUMERIC column
 
             norm_profile = self._build_movement_vector(prices)
 
