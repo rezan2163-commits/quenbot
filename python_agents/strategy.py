@@ -30,7 +30,22 @@ class StrategyHelper:
     def compare_similarity(current_vector: np.ndarray, historical_vectors: List[np.ndarray]) -> List[float]:
         if current_vector.size == 0 or not historical_vectors:
             return []
-        matrix = np.vstack([current_vector] + historical_vectors)
+        target_len = current_vector.size
+        resized = []
+        for v in historical_vectors:
+            if v.size == 0:
+                continue
+            if v.size == target_len:
+                resized.append(v)
+            else:
+                resized.append(np.interp(
+                    np.linspace(0, 1, target_len),
+                    np.linspace(0, 1, v.size),
+                    v
+                ))
+        if not resized:
+            return []
+        matrix = np.vstack([current_vector] + resized)
         similarity_matrix = cosine_similarity(matrix)
         current_similarities = similarity_matrix[0, 1:]
         return current_similarities.tolist()

@@ -7,6 +7,17 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
+
+def _json_serial(obj):
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Type {type(obj)} not serializable")
+
+
+def _dumps(obj):
+    return _dumps(obj, default=_json_serial)
+
+
 class Database:
     def __init__(self):
         self.pool: Optional[asyncpg.Pool] = None
@@ -390,7 +401,7 @@ class Database:
                 movement_data['start_price'], movement_data['end_price'], movement_data['change_pct'], movement_data['volume'],
                 movement_data.get('buy_volume'), movement_data.get('sell_volume'), movement_data.get('direction'),
                 movement_data.get('aggressiveness'), movement_data['start_time'], movement_data['end_time'],
-                json.dumps(movement_data['t10_data']))
+                _dumps(movement_data['t10_data']))
 
     async def get_recent_movements(self, symbol: str, hours: int = 24, market_type: str = None) -> List[Dict[str, Any]]:
         """Get recent price movements"""
@@ -420,7 +431,7 @@ class Database:
                 RETURNING id
             """, signal_data.get('market_type', 'spot'), signal_data['symbol'], signal_data['signal_type'],
                 signal_data['confidence'], signal_data['price'], signal_data['timestamp'],
-                json.dumps(signal_data.get('metadata', {})))
+                _dumps(signal_data.get('metadata', {})))
 
     async def update_signal_status(self, signal_id: int, status: str) -> bool:
         """Update signal status"""
@@ -453,7 +464,7 @@ class Database:
             """, sim_data.get('signal_id'), sim_data.get('market_type', 'spot'), sim_data['symbol'],
                 sim_data['entry_price'], sim_data['quantity'], sim_data['side'], sim_data['entry_time'],
                 sim_data.get('stop_loss'), sim_data.get('take_profit'),
-                json.dumps(sim_data.get('metadata', {})))
+                _dumps(sim_data.get('metadata', {})))
 
     async def update_simulation(self, sim_id: int, update_data: Dict[str, Any]) -> bool:
         """Update simulation with exit data"""
@@ -514,7 +525,7 @@ class Database:
                 INSERT INTO blacklist_patterns (pattern_type, pattern_data, confidence, reason, created_by)
                 VALUES ($1, $2, $3, $4, $5)
                 RETURNING id
-            """, pattern_data['pattern_type'], json.dumps(pattern_data['pattern_data']),
+            """, pattern_data['pattern_type'], _dumps(pattern_data['pattern_data']),
                 pattern_data['confidence'], pattern_data.get('reason'), pattern_data.get('created_by'))
 
     async def get_blacklist_patterns(self, pattern_type: str = None) -> List[Dict[str, Any]]:
@@ -542,8 +553,8 @@ class Database:
                 VALUES ($1, $2, $3, $4, $5)
                 RETURNING id
             """, audit_data.get('signal_id'), audit_data.get('simulation_id'),
-                json.dumps(audit_data['analysis']), audit_data.get('lessons_learned'),
-                json.dumps(audit_data.get('recommendations', [])))
+                _dumps(audit_data['analysis']), audit_data.get('lessons_learned'),
+                _dumps(audit_data.get('recommendations', [])))
 
     # Agent config operations
     async def get_agent_config(self, agent_name: str, config_key: str) -> Any:
@@ -563,7 +574,7 @@ class Database:
                 VALUES ($1, $2, $3)
                 ON CONFLICT (agent_name, config_key)
                 DO UPDATE SET config_value = EXCLUDED.config_value, updated_at = CURRENT_TIMESTAMP
-            """, agent_name, config_key, json.dumps(config_value))
+            """, agent_name, config_key, _dumps(config_value))
 
     # Analytics queries
     async def get_dashboard_summary(self) -> Dict[str, Any]:
@@ -624,7 +635,7 @@ class Database:
             """, audit_data['timestamp'], audit_data['total_simulations'],
                 audit_data['successful_simulations'], audit_data['failed_simulations'],
                 audit_data['success_rate'], audit_data['avg_win_pct'], audit_data['avg_loss_pct'],
-                json.dumps(audit_data.get('metadata', {})))
+                _dumps(audit_data.get('metadata', {})))
 
     async def get_recent_audits(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get recent audit records"""
@@ -646,7 +657,7 @@ class Database:
                 RETURNING id
             """, analysis_data['timestamp'], analysis_data.get('signal_type'),
                 analysis_data['failure_count'], analysis_data['avg_loss_pct'],
-                analysis_data['recommendation'], json.dumps(analysis_data.get('metadata', {})))
+                analysis_data['recommendation'], _dumps(analysis_data.get('metadata', {})))
 
     # ─── Pattern Record Operations (Brain) ───
 
@@ -658,7 +669,7 @@ class Database:
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 RETURNING id
             """, data['symbol'], data.get('exchange'), data.get('market_type', 'spot'),
-                json.dumps(data['snapshot_data']),
+                _dumps(data['snapshot_data']),
                 data.get('outcome_15m'), data.get('outcome_1h'),
                 data.get('outcome_4h'), data.get('outcome_1d'))
 
@@ -743,7 +754,7 @@ class Database:
             return await conn.fetchval("""
                 INSERT INTO brain_learning_log (signal_type, was_correct, pnl_pct, context)
                 VALUES ($1, $2, $3, $4) RETURNING id
-            """, signal_type, was_correct, pnl_pct, json.dumps(context or {}))
+            """, signal_type, was_correct, pnl_pct, _dumps(context or {}))
 
     async def get_learning_stats(self) -> Dict[str, Any]:
         async with self.pool.acquire() as conn:
@@ -815,7 +826,7 @@ class Database:
                 ON CONFLICT (agent_name)
                 DO UPDATE SET status = $2, last_heartbeat = CURRENT_TIMESTAMP,
                               metadata = COALESCE($3, agent_heartbeat.metadata)
-            """, agent_name, status, json.dumps(metadata or {}))
+            """, agent_name, status, _dumps(metadata or {}))
 
     async def get_agent_heartbeats(self) -> List[Dict[str, Any]]:
         """Tüm agent heartbeat'lerini getir"""
@@ -847,7 +858,7 @@ class Database:
                 VALUES ($1, $2, CURRENT_TIMESTAMP)
                 ON CONFLICT (state_key)
                 DO UPDATE SET state_value = $2, updated_at = CURRENT_TIMESTAMP
-            """, state_key, json.dumps(state_value))
+            """, state_key, _dumps(state_value))
 
     async def insert_state_history(self, data: Dict[str, Any]) -> int:
         """State snapshot'ı history'ye kaydet"""
@@ -867,7 +878,7 @@ class Database:
                 data.get('win_rate', 0),
                 data.get('active_positions', 0),
                 data.get('total_trades', 0),
-                json.dumps(data.get('metadata', {})))
+                _dumps(data.get('metadata', {})))
 
     async def get_state_history(self, hours: int = 24, limit: int = 100) -> List[Dict[str, Any]]:
         """State history getir"""
@@ -894,8 +905,8 @@ class Database:
                 data['failure_type'],
                 data.get('confidence', 0),
                 data.get('explanation'),
-                json.dumps(data.get('recommendations', [])),
-                json.dumps(data.get('context', {})))
+                _dumps(data.get('recommendations', [])),
+                _dumps(data.get('context', {})))
 
     async def get_rca_stats(self, limit: int = 50) -> Dict[str, Any]:
         """RCA istatistiklerini getir"""
@@ -967,9 +978,9 @@ class Database:
                 RETURNING id
             """, data['symbol'], data.get('market_type', 'spot'),
                 data['timeframe'], data['direction'], data['change_pct'],
-                json.dumps(data['pre_move_vector']),
-                json.dumps(data.get('pre_move_indicators', {})),
-                json.dumps(data.get('volume_profile', {})),
+                _dumps(data['pre_move_vector']),
+                _dumps(data.get('pre_move_indicators', {})),
+                _dumps(data.get('volume_profile', {})),
                 data.get('movement_id'))
 
     async def get_historical_signatures(self, symbol: str = None,

@@ -175,7 +175,12 @@ class StrategistAgent:
             patterns = await self.db.get_pattern_records(limit=50)
             for p in patterns:
                 snap = p.get('snapshot_data', {})
-                if not snap.get('end_time'):
+                if isinstance(snap, str):
+                    try:
+                        snap = json.loads(snap)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                if not isinstance(snap, dict) or not snap.get('end_time'):
                     continue
                 end_time = datetime.fromisoformat(snap['end_time']) if isinstance(snap['end_time'], str) else snap['end_time']
                 symbol = snap.get('symbol', p.get('symbol'))
