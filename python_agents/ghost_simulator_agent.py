@@ -28,14 +28,41 @@ class GhostSimulatorAgent:
     async def initialize(self):
         logger.info("Initializing Ghost Simulator Agent...")
         open_sims = await self.db.get_open_simulations()
+
+        # Deduplicate: keep only the newest simulation per symbol, close duplicates
+        symbol_sims: Dict[str, List[Dict]] = {}
         for sim in open_sims:
-            self.active_simulations[sim['id']] = sim
+            sym = sim.get('symbol', '')
+            symbol_sims.setdefault(sym, []).append(sim)
+
+        for sym, sims in symbol_sims.items():
+            if len(sims) > 1:
+                # Sort by id desc (newest first), close older duplicates
+                sims.sort(key=lambda s: s.get('id', 0), reverse=True)
+                keeper = sims[0]
+                self.active_simulations[keeper['id']] = keeper
+                for dup in sims[1:]:
+                    try:
+                        await self._close_simulation_direct(dup, 'duplicate_cleanup')
+                        logger.info(f"🧹 Closed duplicate sim #{dup.get('id')} for {sym}")
+                    except Exception as e:
+                        logger.error(f"Error closing duplicate sim #{dup.get('id')}: {e}")
+            else:
+                self.active_simulations[sims[0]['id']] = sims[0]
+
+        # Sync state_tracker active_symbols with actual open simulations
+        if self.state_tracker:
+            actual_symbols = list(set(s.get('symbol', '') for s in self.active_simulations.values()))
+            self.state_tracker.state['active_symbols'] = actual_symbols
+            await self.state_tracker.save_state()
+            logger.info(f"📊 Synced active_symbols: {actual_symbols}")
+
         # Geçmiş istatistikleri yükle
         closed = await self.db.get_closed_simulations(limit=1000)
         self.total_closed = len(closed)
         self.total_wins = sum(1 for s in closed if float(s.get('pnl', 0)) > 0)
         self.total_pnl = sum(float(s.get('pnl', 0)) for s in closed)
-        logger.info(f"Loaded {len(self.active_simulations)} open simulations, {self.total_closed} historical")
+        logger.info(f"Loaded {len(self.active_simulations)} open simulations (deduped), {self.total_closed} historical")
 
     async def start(self):
         self.running = True
@@ -60,8 +87,15 @@ class GhostSimulatorAgent:
     async def _process_pending_signals(self):
         try:
             pending_signals = await self.db.get_pending_signals()
+            # Get currently active symbols from in-memory simulations
+            active_syms = set(s.get('symbol', '') for s in self.active_simulations.values())
             for signal in pending_signals:
-                if signal['id'] not in [s.get('signal_id') for s in self.active_simulations.values()]:
+                if signal['id'] in [s.get('signal_id') for s in self.active_simulations.values()]:
+                    continue
+                # Block duplicate symbol positions at Ghost level (before risk check)
+                if signal['symbol'] in active_syms:
+                    await self.db.update_signal_status(signal['id'], 'filtered_duplicate')
+                    continue
                     # RiskManager gate check
                     if self.risk_manager:
                         approved, reason = self.risk_manager.check_signal(signal)
@@ -221,6 +255,32 @@ class GhostSimulatorAgent:
             entry_time = datetime.fromisoformat(entry_time)
         elapsed = datetime.utcnow() - entry_time
         return elapsed.total_seconds() > (Config.SIMULATION_TIMEOUT_HOURS * 3600)
+
+    async def _close_simulation_direct(self, sim_data: Dict[str, Any], reason: str):
+        """Close a simulation directly from its data dict (used during dedup cleanup)."""
+        sim_id = sim_data.get('id')
+        if not sim_id:
+            return
+        try:
+            entry_price = float(sim_data.get('entry_price', 0))
+            current_prices = await self._get_current_prices()
+            symbol = sim_data.get('symbol', '')
+            exit_price = current_prices.get(symbol, entry_price)
+            quantity = float(sim_data.get('quantity', 0))
+            side = sim_data.get('side', 'long')
+
+            pnl = (exit_price - entry_price) * quantity if side == 'long' else (entry_price - exit_price) * quantity
+            pnl_pct = (pnl / (entry_price * quantity)) * 100 if entry_price * quantity else 0.0
+
+            await self.db.update_simulation(sim_id, {
+                'exit_price': exit_price,
+                'exit_time': datetime.utcnow(),
+                'pnl': pnl,
+                'pnl_pct': pnl_pct,
+                'status': 'closed'
+            })
+        except Exception as e:
+            logger.error(f"Error in _close_simulation_direct #{sim_id}: {e}")
 
     async def _close_simulation(self, sim_id: int, reason: str, exit_price: float = None):
         try:

@@ -185,10 +185,10 @@ function App() {
       if (lst) setLearningStats(lst);
       if (agSt?.agents) setAgentStatuses(agSt.agents);
       if (rcaR) setRcaResults(Array.isArray(rcaR) ? rcaR : []);
-      if (rcaS) setRcaStats(Array.isArray(rcaS) ? rcaS : []);
+      if (rcaS) setRcaStats(Array.isArray(rcaS) ? rcaS : (rcaS?.distribution ?? []));
       if (corr) setCorrections(Array.isArray(corr) ? corr : []);
       if (sigs) setSignatures(Array.isArray(sigs) ? sigs : []);
-      if (sigSum) setSignalSummary(Array.isArray(sigSum) ? sigSum : []);
+      if (sigSum) setSignalSummary(Array.isArray(sigSum) ? sigSum : (sigSum?.by_type ?? []));
       setError(null); setLastUpdate(new Date()); setRefreshCount(c => c + 1);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setLoading(false); }
@@ -501,13 +501,17 @@ function App() {
           {/* Signal Summary by Type */}
           {signalSummary.length > 0 && (
             <div className="card">
-              <div className="card-header"><h3>Sinyal Tipi Dağılımı</h3><span className="badge badge-purple">{signalSummary.reduce((s, r) => s + Number(r.count || 0), 0)} toplam</span></div>
+              <div className="card-header"><h3>Sinyal Tipi Dağılımı</h3><span className="badge badge-purple">{signalSummary.reduce((s, r) => s + Number(r.total || r.count || 0), 0)} toplam</span></div>
               <div className="db-stats-grid">
                 {signalSummary.map((s, i) => (
                   <div key={i} className="db-stat-card">
                     <div className="db-stat-name">{s.signal_type}</div>
-                    <div className="db-stat-value">{fmt(Number(s.count || 0), 0)}</div>
-                    <div className="text-muted text-xs">ort. güven: {s.avg_confidence != null ? `${(Number(s.avg_confidence) * 100).toFixed(0)}%` : "—"}</div>
+                    <div className="db-stat-value">{fmt(Number(s.total || s.count || 0), 0)}</div>
+                    <div className="text-muted text-xs">
+                      {s.pending > 0 && <span className="text-amber">{s.pending} bekleyen · </span>}
+                      {s.processed > 0 && <span className="text-green">{s.processed} işlendi · </span>}
+                      güven: {s.avg_confidence != null ? `${(Number(s.avg_confidence) * 100).toFixed(0)}%` : "—"}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -593,6 +597,37 @@ function App() {
         {/* ═══ BRAIN ═══ */}
         {tab === "brain" && (<>
           <div className="tab-header"><h2>AI Beyin Merkezi</h2><span className="badge badge-purple">Öğrenme Sistemi</span></div>
+
+          {/* Agent Status Overview */}
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div className="card-header"><h3>Agent Koordinasyonu</h3><span className="badge badge-live">Canlı</span></div>
+            <div className="agent-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12, padding: 16 }}>
+              {[
+                { name: "Scout", key: "scout", icon: "🔍", desc: "Veri toplama" },
+                { name: "Strategist", key: "strategist", icon: "📡", desc: "Sinyal üretimi" },
+                { name: "Ghost Sim.", key: "ghost_simulator", icon: "👻", desc: "Simülasyon" },
+                { name: "Auditor", key: "auditor", icon: "📋", desc: "Denetim" },
+                { name: "Brain", key: "brain", icon: "🧠", desc: "AI öğrenme" },
+              ].map(a => {
+                const agentData = agentStatuses[a.key];
+                const isOk = agentData?.status === "running";
+                const isStale = agentData?.status === "stale";
+                return (
+                  <div key={a.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderRadius: 8, background: isOk ? "rgba(34,197,94,0.08)" : isStale ? "rgba(245,158,11,0.08)" : "rgba(148,163,184,0.05)" }}>
+                    <span style={{ fontSize: 22 }}>{a.icon}</span>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>{a.name}</div>
+                      <div style={{ fontSize: 11, color: isOk ? "var(--green)" : isStale ? "var(--amber)" : "var(--muted)", marginTop: 2 }}>
+                        {isOk ? "✓ Aktif" : isStale ? "⚠ Yanıtlamıyor" : "— Bekleniyor"}
+                        {agentData?.age_seconds != null && ` · ${Math.round(agentData.age_seconds)}sn`}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="kpi-strip">
             <KPI label="Öğrenilen Pattern" value={brainStatus ? fmt(brainStatus.pattern_count, 0) : "0"} icon="🧬" accent="purple" />
             <KPI label="Tahmin Doğruluğu" value={brainStatus ? `${brainStatus.learning.accuracy.toFixed(1)}%` : "0%"} icon="🎯" accent={brainStatus && brainStatus.learning.accuracy >= 50 ? "green" : "amber"} />

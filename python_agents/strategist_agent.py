@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
@@ -239,7 +240,12 @@ class StrategistAgent:
                         historical_vectors = []
                         for movement in historical_movements:
                             t10_data = movement.get('t10_data') or {}
-                            profile = t10_data.get('price_profile')
+                            if isinstance(t10_data, str):
+                                try:
+                                    t10_data = json.loads(t10_data)
+                                except (json.JSONDecodeError, TypeError):
+                                    t10_data = {}
+                            profile = t10_data.get('price_profile') if isinstance(t10_data, dict) else None
                             if isinstance(profile, list) and len(profile) > 2:
                                 try:
                                     vec = np.array(profile, dtype=np.float64)
