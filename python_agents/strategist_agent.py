@@ -395,7 +395,8 @@ class StrategistAgent:
                                     )
 
                     except Exception as e:
-                        logger.error(f"Error processing {symbol} ({market_type}): {e}")
+                        import traceback
+                        logger.error(f"Error processing {symbol} ({market_type}): {e}\n{traceback.format_exc()}")
                         continue
 
             self.last_activity = datetime.utcnow()

@@ -2,6 +2,7 @@ import asyncpg
 import json
 import logging
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import List, Dict, Any, Optional
 from config import Config
 
@@ -11,6 +12,8 @@ logger = logging.getLogger(__name__)
 def _json_serial(obj):
     if isinstance(obj, datetime):
         return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
     raise TypeError(f"Type {type(obj)} not serializable")
 
 
