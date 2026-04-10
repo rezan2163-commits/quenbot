@@ -32,6 +32,18 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+# Lazy LLM bridge import
+_llm_bridge = None
+def _get_llm_bridge():
+    global _llm_bridge
+    if _llm_bridge is None:
+        try:
+            from llm_bridge import get_llm_bridge
+            _llm_bridge = get_llm_bridge()
+        except Exception:
+            _llm_bridge = None
+    return _llm_bridge
+
 # Çoklu zaman dilimi analizi pencereleri (dakika) — bellek-dostu set
 TIMEFRAME_WINDOWS = {
     '15m': 15,
@@ -159,6 +171,29 @@ class StrategistAgent:
                                         logger.info(
                                             f"🧠 Brain signal [{market_type}] {symbol} {direction} "
                                             f"tf={best_tf} conf={confidence:.2f} matches={prediction['match_count']}")
+
+                                        # LLM-enhanced signal evaluation
+                                        bridge = _get_llm_bridge()
+                                        if bridge:
+                                            try:
+                                                llm_eval = await bridge.strategist_evaluate_signal(
+                                                    symbol=symbol,
+                                                    signal_type=signal_type,
+                                                    direction=direction,
+                                                    confidence=confidence,
+                                                    indicators={},
+                                                    regime="UNKNOWN",
+                                                    pattern_matches=prediction['match_count'],
+                                                    recent_performance=self.brain.signal_type_scores.get(signal_type, {}),
+                                                )
+                                                if llm_eval and llm_eval.get("_parsed"):
+                                                    llm_risk = llm_eval.get("risk_score", 0.5)
+                                                    logger.info(
+                                                        f"🤖 LLM Strategist [{symbol}]: risk={llm_risk:.2f} "
+                                                        f"entry_reason={llm_eval.get('entry_reason', 'N/A')[:50]}"
+                                                    )
+                                            except Exception as e:
+                                                logger.debug(f"LLM signal eval skipped: {e}")
 
                             # Pattern'ı kaydet (matches olsun olmasın — library'yi doldur)
                             await self.db.insert_pattern_record({

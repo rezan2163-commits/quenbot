@@ -18,7 +18,7 @@ type WatchlistItem = { id: number; symbol: string; exchange: string; market_type
 type BrainStatus = { pattern_count: number; learning: { total: number; correct: number; accuracy: number; avg_pnl: number }; recent_patterns: RecordRow[]; signal_type_stats: RecordRow[] };
 type LiveDataStream = { latest_trades: RecordRow[]; exchange_freshness: RecordRow[]; five_min_breakdown: RecordRow[] };
 type TableStats = { table_name: string; row_count: number }[];
-type Tab = "overview" | "markets" | "orderflow" | "bot" | "livedata" | "brain" | "chat" | "admin" | "system";
+type Tab = "overview" | "markets" | "orderflow" | "bot" | "livedata" | "brain" | "chat" | "admin" | "system" | "mastercontrol";
 
 /* ───────── Helpers ───────── */
 const fmt = (v: any, d = 2) => { const n = Number(v); return new Intl.NumberFormat("en-US", { maximumFractionDigits: d }).format(isNaN(n) ? 0 : n); };
@@ -159,6 +159,11 @@ function App() {
   const [corrections, setCorrections] = useState<RecordRow[]>([]);
   const [signatures, setSignatures] = useState<RecordRow[]>([]);
   const [signalSummary, setSignalSummary] = useState<RecordRow[]>([]);
+  const [masterDirective, setMasterDirective] = useState("");
+  const [directiveSaving, setDirectiveSaving] = useState(false);
+  const [directiveStatus, setDirectiveStatus] = useState<string | null>(null);
+  const [llmStatus, setLlmStatus] = useState<RecordRow | null>(null);
+  const [queueStatus, setQueueStatus] = useState<RecordRow | null>(null);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -212,6 +217,19 @@ function App() {
       if (corr) setCorrections(Array.isArray(corr) ? corr : []);
       if (sigs) setSignatures(Array.isArray(sigs) ? sigs : []);
       if (sigSum) setSignalSummary(Array.isArray(sigSum) ? sigSum : (sigSum?.by_type ?? []));
+
+      // Fetch LLM/directive data from port 3002
+      try {
+        const [dirRes, llmRes, qRes] = await Promise.all([
+          fetch("/api/directives").then(r => r.ok ? r.json() : null).catch(() => null),
+          fetch("/api/llm/status").then(r => r.ok ? r.json() : null).catch(() => null),
+          fetch("/api/llm/queue").then(r => r.ok ? r.json() : null).catch(() => null),
+        ]);
+        if (dirRes && dirRes.master_directive !== undefined && !directiveSaving) setMasterDirective(dirRes.master_directive);
+        if (llmRes) setLlmStatus(llmRes);
+        if (qRes) setQueueStatus(qRes);
+      } catch {}
+
       setError(null); setLastUpdate(new Date()); setRefreshCount(c => c + 1);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setLoading(false); }
@@ -266,6 +284,7 @@ function App() {
       { key: "chat", label: "Sohbet", icon: "💬" },
     ]},
     { title: "Yönetim", items: [
+      { key: "mastercontrol" as Tab, label: "Master Kontrol", icon: "🎯" },
       { key: "admin", label: "Admin Panel", icon: "🛠" },
       { key: "system", label: "Sistem", icon: "⚙️" },
     ]},
@@ -957,6 +976,112 @@ function App() {
               <button className="chat-send-btn" onClick={sendChatMessage} disabled={chatSending || !chatInput.trim()}>{chatSending ? "..." : "Gönder"}</button>
             </div>
           </div>
+        </>)}
+
+        {/* ═══ MASTER CONTROL ═══ */}
+        {tab === "mastercontrol" && (<>
+          <div className="tab-header"><h2>Master Kontrol Merkezi</h2><span className="badge badge-purple">AI Beyin Kontrolü</span></div>
+
+          {/* LLM Status */}
+          <div className="kpi-strip">
+            <KPI label="LLM Durumu" value={llmStatus?.healthy ? "Aktif" : "Devre Dışı"} icon="🧠" accent={llmStatus?.healthy ? "green" : "red"} />
+            <KPI label="Toplam Çağrı" value={llmStatus?.call_count != null ? fmt(llmStatus.call_count, 0) : "—"} icon="📡" accent="blue" />
+            <KPI label="Ort. Gecikme" value={llmStatus?.llm_stats?.avg_latency_ms != null ? `${fmt(llmStatus.llm_stats.avg_latency_ms, 0)}ms` : "—"} icon="⏱" />
+            <KPI label="Kuyruk" value={queueStatus?.queue_size != null ? fmt(queueStatus.queue_size, 0) : "—"} sub={queueStatus ? `${queueStatus.total_completed ?? 0} tamamlandı` : ""} icon="📋" accent="amber" />
+          </div>
+
+          {/* Permanent Directives */}
+          <div className="card">
+            <div className="card-header"><h3>Kalıcı Direktifler (Master System Prompt)</h3><span className="badge badge-amber">TÜM AJANLARA</span></div>
+            <p style={{color:"var(--text-secondary)",fontSize:"0.85rem",margin:"0 0 12px"}}>
+              Buraya yazdığınız direktifler her LLM çağrısına master system prompt olarak eklenir.
+              Örnek: "Risk toleransını artır", "Momentum sinyallerine öncelik ver", "BTC dışındaki coinlerde temkinli ol"
+            </p>
+            <textarea
+              className="directive-textarea"
+              value={masterDirective}
+              onChange={(e) => setMasterDirective(e.target.value)}
+              placeholder="Kalıcı direktiflerinizi buraya yazın... Bu direktifler tüm ajan çağrılarına sistem promptu olarak eklenir."
+              rows={6}
+              style={{width:"100%",background:"var(--glass)",border:"1px solid var(--border)",borderRadius:8,padding:12,color:"var(--text-primary)",fontFamily:"inherit",fontSize:"0.9rem",resize:"vertical"}}
+            />
+            <div style={{display:"flex",gap:8,marginTop:8,alignItems:"center"}}>
+              <button
+                className="btn btn-primary"
+                disabled={directiveSaving}
+                onClick={async () => {
+                  setDirectiveSaving(true); setDirectiveStatus(null);
+                  try {
+                    const res = await fetch("/api/directives", {
+                      method: "POST", headers: {"Content-Type":"application/json"},
+                      body: JSON.stringify({ master_directive: masterDirective })
+                    });
+                    if (res.ok) { setDirectiveStatus("✅ Kaydedildi"); }
+                    else { setDirectiveStatus("❌ Hata oluştu"); }
+                  } catch { setDirectiveStatus("❌ Bağlantı hatası (port 3002)"); }
+                  finally { setDirectiveSaving(false); setTimeout(() => setDirectiveStatus(null), 3000); }
+                }}
+              >
+                {directiveSaving ? "Kaydediliyor..." : "💾 Direktifi Kaydet"}
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={async () => {
+                  if (!confirm("Tüm direktifler silinecek. Emin misiniz?")) return;
+                  try {
+                    await fetch("/api/directives", { method: "DELETE" });
+                    setMasterDirective(""); setDirectiveStatus("🗑 Temizlendi");
+                    setTimeout(() => setDirectiveStatus(null), 3000);
+                  } catch { setDirectiveStatus("❌ Hata"); }
+                }}
+              >
+                🗑 Temizle
+              </button>
+              {directiveStatus && <span style={{fontSize:"0.85rem",color:"var(--text-secondary)"}}>{directiveStatus}</span>}
+            </div>
+          </div>
+
+          {/* Task Queue Status */}
+          {queueStatus && (
+            <div className="card">
+              <div className="card-header"><h3>Görev Kuyruğu</h3><span className="badge badge-blue">Async İşleme</span></div>
+              <div className="kpi-strip">
+                <KPI label="Bekleyen" value={fmt(queueStatus.queue_size ?? 0, 0)} icon="⏳" />
+                <KPI label="Aktif" value={fmt(queueStatus.active_tasks ?? 0, 0)} icon="🔄" accent="blue" />
+                <KPI label="Tamamlanan" value={fmt(queueStatus.total_completed ?? 0, 0)} icon="✅" accent="green" />
+                <KPI label="Başarısız" value={fmt(queueStatus.total_failed ?? 0, 0)} icon="❌" accent="red" />
+                <KPI label="Düşen" value={fmt(queueStatus.total_dropped ?? 0, 0)} icon="🚫" />
+                <KPI label="Ort. Süre" value={queueStatus.avg_duration_ms != null ? `${fmt(queueStatus.avg_duration_ms, 0)}ms` : "—"} icon="⏱" />
+              </div>
+              {queueStatus.recent_tasks && queueStatus.recent_tasks.length > 0 && (
+                <div className="table-wrap" style={{marginTop:12}}>
+                  <table className="tbl"><thead><tr><th>Ajan</th><th>Görev</th><th>Durum</th><th>Süre</th></tr></thead><tbody>
+                    {queueStatus.recent_tasks.slice(-10).reverse().map((t: RecordRow, i: number) => (
+                      <tr key={i}>
+                        <td>{t.agent}</td>
+                        <td style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis"}}>{t.description}</td>
+                        <td><span className={cls("badge", t.status === "completed" ? "badge-green" : t.status === "failed" ? "badge-red" : "badge-amber")}>{t.status}</span></td>
+                        <td>{t.duration_ms ? `${fmt(t.duration_ms, 0)}ms` : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody></table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* LLM Model Info */}
+          {llmStatus && (
+            <div className="card">
+              <div className="card-header"><h3>LLM Model Bilgisi</h3><span className={cls("badge", llmStatus.healthy ? "badge-green" : "badge-red")}>{llmStatus.healthy ? "Bağlı" : "Bağlantı Yok"}</span></div>
+              <div className="db-stats-grid">
+                <div className="db-stat-card"><div className="db-stat-name">Model</div><div className="db-stat-value">{llmStatus.llm_stats?.model ?? "—"}</div></div>
+                <div className="db-stat-card"><div className="db-stat-name">Endpoint</div><div className="db-stat-value">{llmStatus.llm_stats?.base_url ?? "—"}</div></div>
+                <div className="db-stat-card"><div className="db-stat-name">Toplam Çağrı</div><div className="db-stat-value">{fmt(llmStatus.llm_stats?.total_calls ?? 0, 0)}</div></div>
+                <div className="db-stat-card"><div className="db-stat-name">Hatalar</div><div className="db-stat-value">{fmt(llmStatus.llm_stats?.total_errors ?? 0, 0)}</div></div>
+              </div>
+            </div>
+          )}
         </>)}
 
         {/* ═══ ADMIN ═══ */}

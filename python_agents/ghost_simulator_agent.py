@@ -9,6 +9,18 @@ from database import Database
 
 logger = logging.getLogger(__name__)
 
+# Lazy LLM bridge import
+_llm_bridge = None
+def _get_llm_bridge():
+    global _llm_bridge
+    if _llm_bridge is None:
+        try:
+            from llm_bridge import get_llm_bridge
+            _llm_bridge = get_llm_bridge()
+        except Exception:
+            _llm_bridge = None
+    return _llm_bridge
+
 # Minimum potansiyel getiri filtresi
 MIN_POTENTIAL_RETURN = 0.02  # %2
 
@@ -359,6 +371,29 @@ class GhostSimulatorAgent:
 
             # Brain'e feedback gönder (öğrenme döngüsü)
             await self._send_feedback_to_brain(sim_data, was_correct, pnl_pct)
+
+            # LLM post-trade analysis (background priority)
+            bridge = _get_llm_bridge()
+            if bridge:
+                try:
+                    llm_analysis = await bridge.ghost_post_trade_analysis({
+                        "symbol": symbol,
+                        "side": side,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "pnl_pct": pnl_pct,
+                        "close_reason": reason,
+                        "metadata": sim_data.get("metadata", {}),
+                        "holding_time_min": int(
+                            (datetime.utcnow() - (sim_data.get('entry_time') or datetime.utcnow())).total_seconds() / 60
+                        ) if isinstance(sim_data.get('entry_time'), datetime) else 0,
+                    })
+                    if llm_analysis and llm_analysis.get("_parsed"):
+                        lesson = llm_analysis.get("lesson", "")
+                        if lesson:
+                            logger.info(f"🤖 LLM Ghost [{symbol}]: {lesson[:120]}")
+                except Exception as e:
+                    logger.debug(f"LLM post-trade analysis skipped: {e}")
 
         except Exception as e:
             logger.error(f"Error closing simulation {sim_id}: {e}")

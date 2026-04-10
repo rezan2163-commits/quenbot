@@ -15,6 +15,18 @@ from similarity_engine import cosine_sim
 
 logger = logging.getLogger(__name__)
 
+# Lazy LLM bridge import
+_llm_bridge = None
+def _get_llm_bridge():
+    global _llm_bridge
+    if _llm_bridge is None:
+        try:
+            from llm_bridge import get_llm_bridge
+            _llm_bridge = get_llm_bridge()
+        except Exception:
+            _llm_bridge = None
+    return _llm_bridge
+
 # Multi-timeframe windows for movement detection (minutes)
 MOVEMENT_TIMEFRAMES = {
     '5m': 5,
@@ -464,6 +476,28 @@ class ScoutAgent:
             mv_id = await self.db.insert_price_movement(movement_data)
             logger.info(f"📊 Movement [{tf_key}] [{market_type}] {symbol}: "
                          f"{change_pct:+.2%}, dir={direction}, agg={aggressiveness:.2f}")
+
+            # LLM-powered anomaly classification
+            bridge = _get_llm_bridge()
+            if bridge and abs_change >= 0.015:  # Only for significant moves
+                try:
+                    llm_analysis = await bridge.scout_analyze_anomaly(
+                        symbol=symbol,
+                        price_change_pct=change_pct,
+                        volume_ratio=aggressiveness,
+                        buy_sell_ratio=buy_volume / max(total_volume, 1e-8),
+                        timeframe=tf_key,
+                        recent_prices=prices[-20:],
+                    )
+                    if llm_analysis and llm_analysis.get("_parsed"):
+                        severity = llm_analysis.get("severity", "medium")
+                        event_type = llm_analysis.get("event_type", "UNKNOWN")
+                        logger.info(
+                            f"🤖 LLM Scout [{symbol}]: {event_type} severity={severity} "
+                            f"conf={llm_analysis.get('confidence', 0):.2f}"
+                        )
+                except Exception as e:
+                    logger.debug(f"LLM anomaly analysis skipped: {e}")
 
             # ≥2% move → capture historical signature (pre-move pattern)
             if abs_change >= SIGNATURE_THRESHOLD:

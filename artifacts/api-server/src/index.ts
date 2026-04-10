@@ -895,6 +895,44 @@ app.get("/api/signals/summary", async (req, res) => {
   }
 });
 
+/* ═══ LLM Directive Proxy (forwards to Python directive API on port 3002) ═══ */
+const DIRECTIVE_API = "http://localhost:3002";
+
+app.get("/api/directives", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/directives`);
+    res.json(await r.json());
+  } catch { res.json({ master_directive: "", agent_overrides: {}, error: "Directive API unavailable" }); }
+});
+
+app.post("/api/directives", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/directives`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req.body) });
+    res.json(await r.json());
+  } catch (e) { res.status(502).json({ error: "Directive API unavailable" }); }
+});
+
+app.delete("/api/directives", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/directives`, { method: "DELETE" });
+    res.json(await r.json());
+  } catch { res.json({ status: "Directive API unavailable" }); }
+});
+
+app.get("/api/llm/status", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/llm/status`);
+    res.json(await r.json());
+  } catch { res.json({ healthy: false, error: "LLM API unavailable" }); }
+});
+
+app.get("/api/llm/queue", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/llm/queue`);
+    res.json(await r.json());
+  } catch { res.json({ queue_size: 0, error: "Queue API unavailable" }); }
+});
+
 app.listen(port, async () => {
   await connectDatabase();
   await createTables();

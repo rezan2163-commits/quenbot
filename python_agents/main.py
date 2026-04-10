@@ -17,6 +17,10 @@ from auditor_agent import AuditorAgent
 from state_tracker import StateTracker
 from risk_manager import RiskManager
 from rca_engine import RCAEngine
+from llm_client import get_llm_client
+from llm_bridge import get_llm_bridge
+from directive_store import get_directive_store
+from task_queue import get_task_queue
 
 # Setup logging
 LOG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,6 +48,10 @@ class AgentOrchestrator:
         self.state_tracker = None
         self.risk_manager = None
         self.rca_engine = None
+        self.llm_client = None
+        self.llm_bridge = None
+        self.task_queue = None
+        self.directive_store = None
         self.running = False
         self._agent_restart_counts: dict = {}
         self._max_restarts = 50  # max restart per agent before giving up
@@ -76,6 +84,23 @@ class AgentOrchestrator:
         # RCA Engine - failure analysis
         self.rca_engine = RCAEngine(self.db)
         logger.info("🔍 RCA Engine initialized")
+
+        # LLM Central Intelligence - local Ollama backbone
+        try:
+            self.llm_client = get_llm_client()
+            self.task_queue = get_task_queue()
+            await self.task_queue.start()
+            self.directive_store = get_directive_store()
+            self.llm_bridge = get_llm_bridge()
+
+            llm_healthy = await self.llm_client.health_check()
+            if llm_healthy:
+                logger.info("🧠 LLM Central Intelligence initialized (Ollama connected)")
+            else:
+                logger.warning("⚠ LLM backend not available — agents will use rule-based logic")
+        except Exception as e:
+            logger.warning(f"⚠ LLM initialization failed (degraded mode): {e}")
+            self.llm_bridge = None
 
         # Initialize agents with brain + state + risk connections
         self.scout = ScoutAgent(self.db, brain=self.brain)
@@ -118,6 +143,7 @@ class AgentOrchestrator:
             self._resilient_task("Auditor", self.auditor.start),
             self._resilient_task("HealthMonitor", self._health_monitor),
             self._resilient_task("ChatProcessor", self._chat_processor),
+            self._resilient_task("DirectiveAPI", self._directive_api_server),
         ]
 
         try:
@@ -166,6 +192,10 @@ class AgentOrchestrator:
             await self.strategist.stop()
             await self.ghost_simulator.stop()
             await self.auditor.stop()
+            if self.task_queue:
+                await self.task_queue.stop()
+            if self.llm_client:
+                await self.llm_client.close()
             await self.db.disconnect()
             logger.info("✓ All agents stopped")
         except Exception as e:
@@ -214,6 +244,13 @@ class AgentOrchestrator:
                     'registered_agents': list(self.chat_engine.agents.keys())
                 })
 
+                # LLM health
+                if self.llm_bridge:
+                    llm_available = await self.llm_client.health_check()
+                    llm_stats = self.llm_bridge.get_stats()
+                    await self.db.update_heartbeat('llm_brain', 
+                        'running' if llm_available else 'degraded', llm_stats)
+
                 # Brain pattern'larını yenile (yeni pattern'lar memory'ye yüklensin)
                 await self.brain.refresh_patterns()
 
@@ -247,6 +284,69 @@ class AgentOrchestrator:
 
             except Exception as e:
                 logger.error(f"Health monitoring error: {e}")
+
+    async def _directive_api_server(self):
+        """Lightweight HTTP server for directive management (Master Control).
+        Listens on port 3002 for directive CRUD operations."""
+        from aiohttp import web
+
+        async def get_directives(request):
+            store = get_directive_store()
+            data = await store.get_all()
+            return web.json_response(data)
+
+        async def set_directive(request):
+            try:
+                body = await request.json()
+                store = get_directive_store()
+
+                if "master_directive" in body:
+                    await store.set_master_directive(body["master_directive"])
+                if "agent_overrides" in body:
+                    for agent, text in body["agent_overrides"].items():
+                        await store.set_agent_override(agent, text)
+
+                data = await store.get_all()
+                return web.json_response({"status": "ok", **data})
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=400)
+
+        async def clear_directives(request):
+            store = get_directive_store()
+            await store.clear()
+            return web.json_response({"status": "cleared"})
+
+        async def get_llm_status(request):
+            if self.llm_bridge:
+                stats = self.llm_bridge.get_stats()
+                healthy = await self.llm_client.health_check()
+                stats["healthy"] = healthy
+                return web.json_response(stats)
+            return web.json_response({"healthy": False, "error": "LLM not initialized"})
+
+        async def get_queue_status(request):
+            if self.task_queue:
+                return web.json_response(self.task_queue.get_stats())
+            return web.json_response({"error": "Queue not initialized"})
+
+        app = web.Application()
+        app.router.add_get("/api/directives", get_directives)
+        app.router.add_post("/api/directives", set_directive)
+        app.router.add_delete("/api/directives", clear_directives)
+        app.router.add_get("/api/llm/status", get_llm_status)
+        app.router.add_get("/api/llm/queue", get_queue_status)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", 3002)
+        await site.start()
+        logger.info("📡 Directive API server running on port 3002")
+
+        # Keep alive
+        while self.running:
+            await asyncio.sleep(5)
+
+        await runner.cleanup()
 
 async def main():
     orchestrator = AgentOrchestrator()

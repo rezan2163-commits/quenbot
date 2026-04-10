@@ -16,6 +16,18 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
+# Lazy LLM bridge import
+_llm_bridge = None
+def _get_llm_bridge():
+    global _llm_bridge
+    if _llm_bridge is None:
+        try:
+            from llm_bridge import get_llm_bridge
+            _llm_bridge = get_llm_bridge()
+        except Exception:
+            _llm_bridge = None
+    return _llm_bridge
+
 # Intelligence Core lazy import (circular import koruması)
 _intelligence_core_module = None
 

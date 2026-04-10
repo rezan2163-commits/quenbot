@@ -10,6 +10,18 @@ from strategy import StrategyHelper
 
 logger = logging.getLogger(__name__)
 
+# Lazy LLM bridge import
+_llm_bridge = None
+def _get_llm_bridge():
+    global _llm_bridge
+    if _llm_bridge is None:
+        try:
+            from llm_bridge import get_llm_bridge
+            _llm_bridge = get_llm_bridge()
+        except Exception:
+            _llm_bridge = None
+    return _llm_bridge
+
 
 class AuditorAgent:
     def __init__(self, db: Database, brain=None, rca_engine=None):
@@ -94,6 +106,36 @@ class AuditorAgent:
 
             if success_rate < auditor_config.get('false_positive_threshold', 0.7):
                 await self._investigate_false_positives(failed)
+
+            # LLM-powered failure analysis
+            bridge = _get_llm_bridge()
+            if bridge and len(closed_sims) >= 20:
+                try:
+                    # Build failure type summary
+                    failure_types = {}
+                    for f in failed:
+                        meta = f.get('metadata', {})
+                        if isinstance(meta, str):
+                            try:
+                                meta = json.loads(meta)
+                            except (json.JSONDecodeError, TypeError):
+                                meta = {}
+                        st = meta.get('signal_type', 'unknown')
+                        failure_types[st] = failure_types.get(st, 0) + 1
+
+                    llm_analysis = await bridge.auditor_analyze_failures(
+                        failure_summary={"total_failed": len(failed), "total_success": len(successful)},
+                        win_rate=success_rate,
+                        avg_win_pct=avg_win,
+                        avg_loss_pct=avg_loss,
+                        top_failure_types=failure_types,
+                    )
+                    if llm_analysis and llm_analysis.get("_parsed"):
+                        correction = llm_analysis.get("correction", "")
+                        if correction:
+                            logger.info(f"🤖 LLM Auditor recommendation: {correction[:150]}")
+                except Exception as e:
+                    logger.debug(f"LLM auditor analysis skipped: {e}")
 
             await self.db.insert_audit_record({
                 'timestamp': datetime.utcnow(),
