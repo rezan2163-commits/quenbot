@@ -375,11 +375,15 @@ function App() {
     setChatMsg("");
     
     try {
+      const chatCtrl = new AbortController();
+      const chatTimer = setTimeout(() => chatCtrl.abort(), 90000);
       const res = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMsg })
+        body: JSON.stringify({ message: userMsg }),
+        signal: chatCtrl.signal,
       });
+      clearTimeout(chatTimer);
       const data = await res.json();
       setChatHistory(prev => [...prev, { role: 'gemma', message: data.message || "Gemma yanıt veremedi" }]);
     } catch (e) {
@@ -976,13 +980,13 @@ function App() {
 
         {/* ══════ CHAT ══════ */}
         {tab === "chat" && <>
-          <div className="card"><div className="card-h"><h3>💬 Gemma 4 Chat - Strateji Yönetimi</h3><span className="badge badge-p">Beta</span></div>
+          <div className="card"><div className="card-h"><h3>💬 QuenBot AI Chat</h3><span className="badge badge-g">Online</span></div>
             <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px', height: 'calc(100vh - 300px)' }}>
               <div style={{ flex: 1, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius2)', padding: '12px', background: 'var(--bg3)' }}>
                 {chatHistory.length === 0 ? (
                   <div style={{ textAlign: 'center', color: 'var(--text3)' }}>
                     <p>💬 Strateji komutlarını doğal dilde yazın</p>
-                    <p style={{ fontSize: 11, marginTop: 8 }}>Örnek: "stratejimi aggressive yap", "risk limitini düşür", "BTCUSDT analiz et"</p>
+                    <p style={{ fontSize: 11, marginTop: 8 }}>Örnek: "Selam!", "BTC ne durumda?", "Piyasa analizi yap", "Strateji öner"</p>
                   </div>
                 ) : (
                   chatHistory.map((msg, i) => (
@@ -996,7 +1000,7 @@ function App() {
                 {chatLoading && <div style={{ textAlign: 'center', color: 'var(--text3)' }}>⏳ Gemma işleniyor...</div>}
               </div>
               <div style={{ display: 'flex', gap: '8px' }}>
-                <input type="text" value={chatMsg} onChange={e => setChatMsg(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleChat()} placeholder="Komutunuzu yazın..." style={{ flex: 1, padding: '8px 12px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--radius2)', color: 'var(--text)', fontFamily: 'var(--font)' }} />
+                <input type="text" value={chatMsg} onChange={e => setChatMsg(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleChat()} placeholder="Mesajınızı yazın..." style={{ flex: 1, padding: '8px 12px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--radius2)', color: 'var(--text)', fontFamily: 'var(--font)' }} />
                 <button onClick={handleChat} disabled={chatLoading || !chatMsg} style={{ padding: '8px 16px', background: 'var(--c)', color: 'var(--bg)', border: 'none', borderRadius: 'var(--radius2)', cursor: 'pointer', fontWeight: 600 }}>Gönder</button>
               </div>
             </div>

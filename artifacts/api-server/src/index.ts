@@ -1131,7 +1131,7 @@ app.post("/api/chat", express.json(), async (req, res) => {
     // Forward to Python agents on port 3002
     // Note: Agents process runs in same system, using localhost:3002
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const timeoutId = setTimeout(() => controller.abort(), 90000);
     
     try {
       const agentResponse = await fetch("http://127.0.0.1:3002/api/chat", {
@@ -1157,11 +1157,11 @@ app.post("/api/chat", express.json(), async (req, res) => {
       console.warn("Agents connection attempt:", fetchError instanceof Error ? fetchError.message : "timeout");
     }
 
-    // Fallback: Return message received status if agents unavailable
+    // Fallback: Agents unavailable
     res.json({
       success: true,
-      message: `✓ Komut alındı: "${message.substring(0, 100)}..."`,
-      status: "processing_in_agents",
+      message: "⏳ AI asistan şu an meşgul, lütfen birkaç saniye sonra tekrar deneyin.",
+      status: "agents_unavailable",
       timestamp: new Date().toISOString(),
     });
   } catch (error) {

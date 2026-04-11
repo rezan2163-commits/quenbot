@@ -776,36 +776,59 @@ class ChatEngine:
         return await self._gemma_director(msg, ctx)
 
     async def _gemma_director(self, msg: str, ctx: dict) -> str:
-        """Gemma LLM ile serbest komutu yorumla ve agentlara dağıt."""
+        """Gemma LLM ile doğal sohbet - kullanıcıya samimi Türkçe yanıt."""
         bridge = _get_llm_bridge()
         if bridge is None or not await bridge.is_available():
             return self._fallback_response(msg, ctx)
 
-        # Sistem context'ini kompakt JSON olarak hazırla
+        # Sistem context'ini kompakt formatta hazırla
         s = ctx.get("summary", {})
         b = ctx.get("brain", {})
         prices = ctx.get("prices", {})
         ah = ctx.get("agent_health", {})
+        memory = ctx.get("memory_insights", {})
+        market = ctx.get("market_state", {})
+        recent_sigs = ctx.get("recent_signals", [])
+        perf = ctx.get("performance", {})
 
-        system_state = json.dumps({
-            "prices": {k: round(v, 2) for k, v in list(prices.items())[:10]},
-            "total_trades": s.get("total_trades", 0),
-            "active_signals": s.get("active_signals", 0),
-            "open_sims": s.get("open_simulations", 0),
-            "win_rate": s.get("win_rate", 0),
-            "total_pnl": round(s.get("total_pnl", 0), 2),
-            "brain_patterns": b.get("total_patterns", 0),
-            "brain_accuracy": round(b.get("accuracy", 0) * 100, 1),
-            "agents_healthy": sum(1 for v in ah.values() if v.get("healthy")),
-            "agents_total": len(ah),
-            "state_mode": self.state_tracker.get_mode() if self.state_tracker else "?",
-            "risk": self.risk_manager.get_risk_summary() if self.risk_manager else {},
-        }, default=str, separators=(",", ":"))
+        # Fiyatları okunaklı formata çevir
+        price_lines = []
+        for sym, p in sorted(prices.items(), key=lambda x: x[1], reverse=True)[:8]:
+            if p > 0:
+                price_lines.append(f"  {sym}: ${p:,.2f}")
+
+        context_text = (
+            f"📊 CANLI PİYASA:\n" + ("\n".join(price_lines) if price_lines else "  Veri yükleniyor...") + "\n\n"
+            f"📈 SİSTEM:\n"
+            f"  Toplam trade: {s.get('total_trades', 0):,}\n"
+            f"  Aktif sinyal: {s.get('active_signals', 0)}\n"
+            f"  Açık simülasyon: {s.get('open_simulations', 0)}\n"
+            f"  Win rate: %{s.get('win_rate', 0):.1f}\n"
+            f"  Toplam PnL: ${s.get('total_pnl', 0):.2f}\n"
+            f"  Brain pattern: {b.get('total_patterns', 0)} (Doğruluk: %{b.get('accuracy', 0) * 100:.1f})\n"
+            f"  Agent durumu: {sum(1 for v in ah.values() if v.get('healthy'))}/{len(ah)} aktif\n"
+            f"  Mod: {self.state_tracker.get_mode() if self.state_tracker else 'bilinmiyor'}\n"
+        )
+
+        if market:
+            context_text += f"\n🌍 PİYASA DURUMU: Trend={market.get('trend', '?')}, Volatilite={market.get('volatility', '?')}\n"
+
+        if recent_sigs:
+            sig_lines = [f"  {sig.get('type','?')} — Güven: %{sig.get('confidence',0):.0f} ({sig.get('status','?')})" for sig in recent_sigs[:3]]
+            context_text += f"\n📡 SON SİNYALLER:\n" + "\n".join(sig_lines) + "\n"
+
+        if perf:
+            context_text += f"\n💰 PERFORMANS: Win rate=%{perf.get('win_rate',0):.1f}, PnL=${perf.get('total_pnl',0):.2f}, Toplam sim={perf.get('total_sims',0)}\n"
+
+        if memory and memory.get("similar_chats"):
+            context_text += f"\n🧠 GEÇMİŞ SOHBET: {len(memory['similar_chats'])} benzer sohbet bulundu\n"
 
         prompt = (
-            f"KULLANICI KOMUTU: {msg}\n\n"
-            f"SİSTEM DURUMU:\n{system_state[:2000]}\n\n"
-            f"Bu komutu analiz et ve yapılacak eylemleri JSON olarak döndür."
+            f"Kullanıcı mesajı: {msg}\n\n"
+            f"--- SİSTEM CONTEXT ---\n{context_text}\n"
+            f"--- ---\n\n"
+            f"Yukarıdaki verileri kullanarak kullanıcıya doğal Türkçe cevap ver. "
+            f"JSON formatı KULLANMA, düz metin yaz."
         )
 
         try:
@@ -814,53 +837,15 @@ class ChatEngine:
             response = await client.generate(
                 prompt=prompt,
                 system=DIRECTOR_SYSTEM_PROMPT,
-                temperature=0.3,
-                json_mode=True,
+                temperature=0.7,
+                json_mode=False,
                 timeout_override=60,
             )
 
             if not response.success or not response.text.strip():
                 return self._fallback_response(msg, ctx)
 
-            result = response.as_json()
-            if result is None:
-                # JSON parse fallback
-                text = response.text.strip()
-                start = text.find("{")
-                end = text.rfind("}") + 1
-                if start >= 0 and end > start:
-                    try:
-                        result = json.loads(text[start:end])
-                    except json.JSONDecodeError:
-                        pass
-
-            if result is None:
-                # LLM text yanıt verdi ama JSON değil — direkt göster
-                return f"🤖 {response.text.strip()}"
-
-            # ─── Eylemleri uygula ───
-            actions = result.get("actions", [])
-            action_results = []
-            for action in actions:
-                action_result = await self._execute_action(action, ctx)
-                if action_result:
-                    action_results.append(action_result)
-
-            # Kullanıcıya yanıt oluştur
-            parts = []
-            user_response = result.get("response_to_user", "")
-            intent = result.get("user_intent", "")
-
-            if intent:
-                parts.append(f"🎯 **Anlaşılan**: {intent}")
-            if user_response:
-                parts.append(f"\n🤖 {user_response}")
-            if action_results:
-                parts.append(f"\n📋 **Yapılan İşlemler:**")
-                for ar in action_results:
-                    parts.append(f"  • {ar}")
-
-            return "\n".join(parts) if parts else f"🤖 {user_response or 'Komut alındı.'}"
+            return response.text.strip()
 
         except Exception as e:
             logger.error(f"Gemma director error: {e}")
