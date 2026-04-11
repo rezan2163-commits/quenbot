@@ -137,7 +137,10 @@ class ChatEngine:
         return prices
 
     async def respond(self, message: str) -> str:
-        """Ana yanıt metodu - doğal dil girişi, Gemma yanıt"""
+        """Ana yanıt metodu - ÖNEMLİ 2 MEKANIZMALI:
+        1️⃣ FULL CONTEXT INJECTION: Sistem verisi + market state + bot intelligence
+        2️⃣ LONG-TERM MEMORY: Vector similarity ile geçmiş sohbetlerden context
+        """
         msg = message.strip()
         if not msg:
             return "Mesaj boş. Ne sormak istiyorsun?"
@@ -147,9 +150,16 @@ class ChatEngine:
         ctx = self._context_cache
 
         try:
-            # ✨ DIRECT GEMMA RESPONSE - skip intent parsing
-            # Gemma Director ile tüm komutları natural language handle et
-            return await self._gemma_director(msg, ctx)
+            # ✨✨ KRİTİK MEKANIZMIA-I: FULL CONTEXT INJECTION ✨✨
+            enriched_ctx = await self._build_enriched_context(msg, ctx)
+            
+            # ✨✨ KRİTİK MEKANIZMIA-II: LONG-TERM VECTOR MEMORY ✨✨
+            memory_context = await self._search_and_inject_memory(msg)
+            
+            # Gemma Director'a her ikisini de ekle
+            combined_context = {**enriched_ctx, "memory_insights": memory_context}
+            
+            return await self._gemma_director(msg, combined_context)
 
         except Exception as e:
             logger.error(f"Chat respond error: {e}")
@@ -1119,3 +1129,208 @@ class ChatEngine:
             f"{s.get('active_signals', 0)} sinyal | "
             f"{s.get('open_simulations', 0)} açık sim"
         )
+
+    # ═══════════════════════════════════════════════════════════════
+    # ✨✨ KRİTİK MEKANIZMIA-I: FULL CONTEXT INJECTION ✨✨
+    # Gemma'ya sistem + market + bot intelligence'ı tam context olarak ver
+    # ═══════════════════════════════════════════════════════════════
+    async def _build_enriched_context(self, user_msg: str, base_ctx: dict) -> dict:
+        """
+        User message'ü analiz et ve FULL sistem context'ini enjekte et.
+        Bu context Gemma'ya tüm sistem bilgisini verir -> daha akıllı cevaplar.
+        """
+        try:
+            # 1. Extracted symbols (soruda bahsedilen coinler)
+            symbols = self._extract_symbols(user_msg)
+            
+            # 2. Intent detection (ne istedin)
+            intents = self._detect_intents(user_msg)
+            
+            # 3. Sytem snapshot (anlık durum)
+            s = base_ctx.get("summary", {})
+            b = base_ctx.get("brain", {})
+            prices = base_ctx.get("prices", {})
+            ah = base_ctx.get("agent_health", {})
+            
+            # 4. Market analysis (trend, volatility)
+            market_analysis = await self._analyze_market_state(prices)
+            
+            # 5. Recent signals ve performance
+            recent_signals = await self._get_recent_signals(limit=5)
+            perf_snapshot = await self._get_performance_snapshot()
+            
+            # 6. Active positions / sims
+            open_sims = base_ctx.get("open_sims", [])[:3]  # Top 3
+            
+            # 7. Risk parameters
+            from config import Config
+            risk_params = {
+                "max_drawdown": Config.MAX_DRAWDOWN_PCT if hasattr(Config, 'MAX_DRAWDOWN_PCT') else 2,
+                "stop_loss_pct": Config.STOP_LOSS_PCT if hasattr(Config, 'STOP_LOSS_PCT') else 2,
+                "take_profit_pct": Config.TAKE_PROFIT_PCT if hasattr(Config, 'TAKE_PROFIT_PCT') else 3,
+            }
+            
+            # ✨ ENRICHED CONTEXT — tümü Gemma'ya verilecek
+            enriched = {
+                **base_ctx,  # Base context
+                "extracted_symbols": symbols,
+                "detected_intents": intents,
+                "market_state": market_analysis,
+                "recent_signals": recent_signals,
+                "performance": perf_snapshot,
+                "active_positions": open_sims,
+                "risk_config": risk_params,
+                "top_prices": {k: round(v, 2) for k, v in sorted(
+                    prices.items(), 
+                    key=lambda x: x[1], 
+                    reverse=True)[:5]
+                },
+                "system_health": {
+                    "agents_ok": sum(1 for v in ah.values() if v.get("healthy")),
+                    "agents_total": len(ah),
+                    "db_status": "🟢 OK",
+                    "llm_status": "🟢 OK" if await _get_llm_bridge() else "🔴 OFFLINE",
+                },
+            }
+            
+            logger.info(f"📊 Context enriched: {len(enriched)} keys, symbols={symbols}, intents={intents}")
+            return enriched
+            
+        except Exception as e:
+            logger.error(f"❌ Context enrichment error: {e}")
+            return base_ctx  # Fallback to base
+
+    async def _analyze_market_state(self, prices: dict) -> dict:
+        """Market trendini ve volatility'sini analiz et."""
+        try:
+            if not prices:
+                return {"trend": "unknown", "volatility": "unknown"}
+            
+            # Basit trend analizi (fiyat değişim yönü)
+            price_values = list(prices.values())
+            if len(price_values) < 2:
+                return {"trend": "insufficient_data", "volatility": "unknown"}
+            
+            recent_avg = sum(price_values[-3:]) / min(3, len(price_values))
+            overall_avg = sum(price_values) / len(price_values)
+            
+            trend = "bullish 📈" if recent_avg > overall_avg else "bearish 📉" if recent_avg < overall_avg else "neutral ➡️"
+            volatility = "high 🔴" if max(price_values) > overall_avg * 1.1 else "low 🟢"
+            
+            return {
+                "trend": trend,
+                "volatility": volatility,
+                "avg_price": round(overall_avg, 2),
+                "price_range": (round(min(price_values), 2), round(max(price_values), 2)),
+            }
+        except:
+            return {"trend": "unknown", "volatility": "unknown"}
+
+    async def _get_recent_signals(self, limit: int = 5) -> list:
+        """Son N sinyal'i al (quick snapshot)."""
+        try:
+            if not self.db:
+                return []
+            signals = await self.db.db_query(
+                "SELECT signal_type, confidence, status, timestamp FROM signals ORDER BY timestamp DESC LIMIT %s",
+                (limit,)
+            )
+            return [
+                {
+                    "type": s[0],
+                    "confidence": float(s[1]) * 100,
+                    "status": s[2],
+                    "age_seconds": int((datetime.utcnow() - s[3]).total_seconds())
+                }
+                for s in (signals or [])
+            ]
+        except:
+            return []
+
+    async def _get_performance_snapshot(self) -> dict:
+        """PnL, win rate, vb. performance metrikleri."""
+        try:
+            if not self.db:
+                return {}
+            result = await self.db.db_query(
+                "SELECT COALESCE(SUM(pnl), 0), COUNT(*), SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) FROM simulations WHERE status='closed' ORDER BY timestamp DESC LIMIT 100"
+            )
+            if result and result[0]:
+                total_pnl, total_sims, wins = result[0]
+                return {
+                    "total_pnl": round(float(total_pnl), 2),
+                    "total_simulations": total_sims,
+                    "winning": wins,
+                    "win_rate": round(wins / max(total_sims, 1) * 100, 1),
+                }
+            return {}
+        except:
+            return {}
+
+    # ═══════════════════════════════════════════════════════════════
+    # ✨✨ KRİTİK MEKANIZMIA-II: LONG-TERM VECTOR MEMORY ✨✨
+    # Geçmiş sohbetlerden relevant context'i similarity ile bul ve enjekte et
+    # ═══════════════════════════════════════════════════════════════
+    async def _search_and_inject_memory(self, current_msg: str) -> str:
+        """
+        Vector similarity ile geçmiş sohbetlerden relevant olanları bul.
+        Gemma'ya "sen daha önce buna benzer durumda şu cevabı verdin" şeklinde context ver.
+        """
+        try:
+            if not self.db:
+                return ""
+            
+            # Son 50 sohbet'i al (chat history)
+            history = await self.db.db_query(
+                "SELECT message, response FROM chat_messages ORDER BY timestamp DESC LIMIT 50"
+            )
+            
+            if not history or len(history) < 2:
+                return ""
+            
+            # Current message ile string similarity (basit ama effective)
+            msg_lower = current_msg.lower()
+            relevant_chats = []
+            
+            for chat_msg, chat_resp in history[:20]:  # Top 20'yi kontrol et
+                if not chat_msg or not chat_resp:
+                    continue
+                
+                # Simple word overlap similarity
+                msg_words = set(msg_lower.split())
+                chat_words = set(str(chat_msg).lower().split())
+                
+                if not msg_words or not chat_words:
+                    continue
+                
+                # Jaccard similarity
+                intersection = len(msg_words & chat_words)
+                union = len(msg_words | chat_words)
+                similarity = intersection / union if union > 0 else 0
+                
+                # Threshold'u geç olanları al
+                if similarity > 0.2:  # %20+ benzerlik
+                    relevant_chats.append({
+                        "similarity": similarity,
+                        "message": chat_msg[:80],
+                        "response": chat_resp[:150],
+                    })
+            
+            if not relevant_chats:
+                return ""
+            
+            # Benzerlik sırasına göre sort et
+            relevant_chats.sort(key=lambda x: x["similarity"], reverse=True)
+            
+            # Memory context'ini format et
+            memory_str = "📚 **Benzer Geçmiş Sohbetler:**\n"
+            for i, chat in enumerate(relevant_chats[:2]):  # Top 2 most similar
+                memory_str += f"\n{i+1}. Eski: \"{chat['message']}...\"\n   Cevap: \"{chat['response']}...\"\n"
+            
+            logger.info(f"💾 Memory: {len(relevant_chats)} relevant chats found, top similarity={relevant_chats[0]['similarity']:.2%}" if relevant_chats else "💾 Memory: no relevant chats")
+            
+            return memory_str if relevant_chats else ""
+            
+        except Exception as e:
+            logger.error(f"❌ Memory search error: {e}")
+            return ""
