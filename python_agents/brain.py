@@ -131,6 +131,7 @@ class BrainModule:
     """Merkezi AI Zeka Modülü"""
 
     MAX_PATTERN_MEMORY = 500
+    AUTO_CALIBRATE_INTERVAL = 50  # Her 50 öğrenme sonrasında otomatik kalibrasyon
 
     def __init__(self, db):
         self.db = db
@@ -147,6 +148,9 @@ class BrainModule:
         self.last_learning_update = None
         # Intelligence Core (gelişmiş zeka katmanı)
         self.intelligence_core = None
+        # Otomatik kalibrasyon
+        self._calibration_counter = 0
+        self._calibration_log: List[Dict] = []
 
     async def initialize(self):
         """Geçmiş pattern'ları yükle"""
@@ -319,6 +323,12 @@ class BrainModule:
         # Adaptive learning weights based on signal performance
         self._update_adaptive_weights()
 
+        # Otomatik kalibrasyon kontrolü
+        self._calibration_counter += 1
+        if self._calibration_counter >= self.AUTO_CALIBRATE_INTERVAL:
+            self._auto_calibrate()
+            self._calibration_counter = 0
+
         logger.info(f"🧠 Brain learning: {signal_type} {'✓' if was_correct else '✗'} | "
                      f"Accuracy: {self.get_accuracy():.1%}")
 
@@ -337,6 +347,69 @@ class BrainModule:
         elif accuracy > 0.6:
             self.learning_weights['similarity'] = max(self.learning_weights['similarity'] - 0.01, 0.25)
             self.learning_weights['volume_match'] = min(self.learning_weights['volume_match'] + 0.01, 0.35)
+
+    def _auto_calibrate(self):
+        """Otomatik kalibrasyon: zayıf sinyal tiplerini bastır, güçlüleri teşvik et."""
+        if not self.signal_type_scores:
+            return
+
+        calibration = {"timestamp": datetime.utcnow().isoformat(), "actions": []}
+
+        for sig_type, stats in self.signal_type_scores.items():
+            if stats['total'] < 5:
+                continue
+
+            accuracy = stats['correct'] / stats['total']
+            avg_pnl = stats['total_pnl'] / stats['total']
+
+            # Başarısız sinyal tipi: eşiği yükselt
+            if accuracy < 0.35 and stats['total'] >= 10:
+                calibration["actions"].append({
+                    "type": "suppress",
+                    "signal_type": sig_type,
+                    "reason": f"Düşük doğruluk ({accuracy:.0%}, n={stats['total']})",
+                    "accuracy": accuracy,
+                })
+
+            # Başarılı sinyal tipi: güven artır
+            if accuracy > 0.65 and avg_pnl > 0:
+                calibration["actions"].append({
+                    "type": "boost",
+                    "signal_type": sig_type,
+                    "reason": f"Yüksek doğruluk ({accuracy:.0%}, avg PnL={avg_pnl:.2f}%)",
+                    "accuracy": accuracy,
+                })
+
+        # Pattern memory temizliği: düşük kaliteli eski pattern'ları çıkar
+        if len(self.pattern_memory) > self.MAX_PATTERN_MEMORY * 0.9:
+            old_count = len(self.pattern_memory)
+            # Outcome'u olmayan eski pattern'ları sil
+            self.pattern_memory = [
+                p for p in self.pattern_memory
+                if any(v is not None for v in p.outcomes.values())
+                or (datetime.utcnow() - p.snapshot.end_time).days < 3
+            ]
+            pruned = old_count - len(self.pattern_memory)
+            if pruned > 0:
+                calibration["actions"].append({
+                    "type": "prune",
+                    "pruned_patterns": pruned,
+                    "remaining": len(self.pattern_memory),
+                })
+
+        # Öğrenme ağırlık normalizasyonu
+        total_w = sum(self.learning_weights.values())
+        if abs(total_w - 1.0) > 0.01:
+            for k in self.learning_weights:
+                self.learning_weights[k] /= total_w
+            calibration["actions"].append({"type": "normalize_weights"})
+
+        if calibration["actions"]:
+            self._calibration_log.append(calibration)
+            if len(self._calibration_log) > 20:
+                self._calibration_log = self._calibration_log[-20:]
+            logger.info(f"🧠 Auto-calibration: {len(calibration['actions'])} actions — "
+                         f"accuracy={self.get_accuracy():.1%}, patterns={len(self.pattern_memory)}")
 
     def get_accuracy(self) -> float:
         if self.prediction_accuracy['total'] == 0:
@@ -376,6 +449,10 @@ class BrainModule:
         # Intelligence Core durumu
         if self.intelligence_core:
             status['intelligence_core'] = self.intelligence_core.get_status()
+        # Kalibrasyon durumu
+        status['calibration_count'] = len(self._calibration_log)
+        if self._calibration_log:
+            status['last_calibration'] = self._calibration_log[-1].get('timestamp')
         return status
 
     def enhanced_analyze(self, snapshot, indicators: Optional[Dict] = None) -> Optional[Dict[str, Any]]:

@@ -1,22 +1,82 @@
 """
 Chat Engine - QuenBot Doğal Dil Yanıt Motoru
 =============================================
-Keyword tabanlı değil, context-aware free-text AI yanıt sistemi.
-Tüm agent'lar, brain, DB ve market verilerine doğrudan erişir.
-Asenkron, hızlı, Turkish-first.
+Gemma LLM destekli serbest komut sistemi.
+Kullanıcının doğal dilde verdiği her komutu Gemma yorumlar,
+ilgili agentlara iş atar ve sonucu raporlar.
+Turkish-first, asenkron, context-aware.
 """
 import asyncio
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Lazy LLM bridge import
+_llm_bridge = None
+def _get_llm_bridge():
+    global _llm_bridge
+    if _llm_bridge is None:
+        try:
+            from llm_bridge import get_llm_bridge
+            _llm_bridge = get_llm_bridge()
+        except Exception:
+            _llm_bridge = None
+    return _llm_bridge
+
+
+# ─── Gemma Director System Prompt ───
+DIRECTOR_SYSTEM_PROMPT = """Sen QuenBot AI'ın Müdürüsün. Kullanıcının doğal dilde verdiği her komutu anlayıp ilgili agentlara iş dağıtırsın.
+
+SİSTEM AGENTLARI:
+- Scout: Piyasa verisi toplama, anomali tespiti, coin takibi
+- Strategist: Sinyal üretimi, strateji analizi, teknik göstergeler
+- GhostSimulator: Paper trading simülasyonu, pozisyon yönetimi
+- Auditor: Kalite kontrol, hata analizi, performans değerlendirme
+- Brain: Pattern öğrenme, tahmin, merkezi zeka koordinasyonu
+- RiskManager: Risk yönetimi (stop loss, position sizing, drawdown limitleri)
+- StateTracker: Bot modu (BOOTSTRAP/LEARNING/WARMUP/PRODUCTION)
+
+YAPABILECEĞIN EYLEMLER:
+1. strategy_update: Strateji parametrelerini değiştir (agresif/defansif/dengeli)
+2. risk_update: Risk parametrelerini güncelle (stop loss, take profit, max trade vs.)
+3. watchlist_add: Coin takibe al
+4. watchlist_remove: Coin takipten çıkar
+5. analyze_symbol: Belirli bir coini detaylı analiz et
+6. force_scan: Tüm coinleri acil tara
+7. close_position: Açık simülasyonu kapat
+8. set_mode: Bot modunu değiştir
+9. brain_insight: Brain'den mevcut piyasa değerlendirmesi iste
+10. status_report: Detaylı sistem raporu oluştur
+11. general_chat: Genel sohbet / bilgi verme
+
+KULLANICI MESAJI ANALİZİ:
+- Kullanıcı Türkçe veya İngilizce yazabilir
+- Doğal dilde verilen komutları çözümle
+- Birden fazla eylem gerekiyorsa tümünü listele
+
+CEVAP FORMATI (JSON):
+{
+  "understood": true,
+  "user_intent": "kullanıcının ne istediğinin kısa özeti",
+  "actions": [
+    {
+      "type": "eylem_tipi",
+      "target": "hedef agent veya sembol",
+      "params": {},
+      "explanation": "neden bu eylemi yapıyoruz"
+    }
+  ],
+  "response_to_user": "Kullanıcıya Türkçe kısa bilgi"
+}"""
+
 
 class ChatEngine:
-    """Doğal dil chat motoru - tüm sisteme erişim"""
+    """Gemma LLM destekli doğal dil chat motoru - tüm sisteme erişim"""
 
     def __init__(self, db, brain, agents: Dict[str, Any] = None):
         self.db = db
@@ -634,32 +694,358 @@ class ChatEngine:
             return f"🔍 RCA verisi alınamadı: {e}"
 
     async def _general_response(self, msg: str, ctx: dict) -> str:
-        """Intent bulunamazsa - akıllı genel yanıt"""
-        s = ctx.get("summary", {})
-        prices = ctx.get("prices", {})
-        b = ctx.get("brain", {})
-
-        # Kısa mesajları (selamlama vb) özel işle
+        """Intent bulunamazsa — Gemma Müdür devreye girer."""
+        # Kısa selamlama kontrolü (LLM çağırmaya gerek yok)
         greetings = ["merhaba", "selam", "hey", "hi", "hello", "sa", "slm", "günaydın", "iyi akşamlar"]
         if any(g in msg.lower() for g in greetings):
+            s = ctx.get("summary", {})
+            b = ctx.get("brain", {})
+            prices = ctx.get("prices", {})
             return (
                 f"Merhaba! 🤖 QuenBot AI burada.\n\n"
                 f"Şu an {s.get('total_trades', 0):,} trade izliyorum, "
                 f"{len(prices)} coin takipte, "
                 f"AI beyin {b.get('total_patterns', 0)} pattern öğrenmiş.\n\n"
-                f"Sormak istediğin her şeyi doğal dilde yazabilirsin. "
-                f"\"yardım\" yazarsan tüm örnekleri gösterebilirim."
+                f"Bana doğal dilde her şeyi söyleyebilirsin — "
+                f"strateji değiştir, risk ayarla, coin analiz et, "
+                f"ne istersen. Gemma anlayıp agentlara iletecek."
             )
 
-        # Diğer her şey için kısa durum özeti + rehberlik
+        # ─── Gemma Director: serbest komutu LLM ile yorumla ───
+        return await self._gemma_director(msg, ctx)
+
+    async def _gemma_director(self, msg: str, ctx: dict) -> str:
+        """Gemma LLM ile serbest komutu yorumla ve agentlara dağıt."""
+        bridge = _get_llm_bridge()
+        if bridge is None or not await bridge.is_available():
+            return self._fallback_response(msg, ctx)
+
+        # Sistem context'ini kompakt JSON olarak hazırla
+        s = ctx.get("summary", {})
+        b = ctx.get("brain", {})
+        prices = ctx.get("prices", {})
+        ah = ctx.get("agent_health", {})
+
+        system_state = json.dumps({
+            "prices": {k: round(v, 2) for k, v in list(prices.items())[:10]},
+            "total_trades": s.get("total_trades", 0),
+            "active_signals": s.get("active_signals", 0),
+            "open_sims": s.get("open_simulations", 0),
+            "win_rate": s.get("win_rate", 0),
+            "total_pnl": round(s.get("total_pnl", 0), 2),
+            "brain_patterns": b.get("total_patterns", 0),
+            "brain_accuracy": round(b.get("accuracy", 0) * 100, 1),
+            "agents_healthy": sum(1 for v in ah.values() if v.get("healthy")),
+            "agents_total": len(ah),
+            "state_mode": self.state_tracker.get_mode() if self.state_tracker else "?",
+            "risk": self.risk_manager.get_risk_summary() if self.risk_manager else {},
+        }, default=str, separators=(",", ":"))
+
+        prompt = (
+            f"KULLANICI KOMUTU: {msg}\n\n"
+            f"SİSTEM DURUMU:\n{system_state[:2000]}\n\n"
+            f"Bu komutu analiz et ve yapılacak eylemleri JSON olarak döndür."
+        )
+
+        try:
+            from llm_client import get_llm_client
+            client = get_llm_client()
+            response = await client.generate(
+                prompt=prompt,
+                system=DIRECTOR_SYSTEM_PROMPT,
+                temperature=0.3,
+                json_mode=True,
+                timeout_override=60,
+            )
+
+            if not response.success or not response.text.strip():
+                return self._fallback_response(msg, ctx)
+
+            result = response.as_json()
+            if result is None:
+                # JSON parse fallback
+                text = response.text.strip()
+                start = text.find("{")
+                end = text.rfind("}") + 1
+                if start >= 0 and end > start:
+                    try:
+                        result = json.loads(text[start:end])
+                    except json.JSONDecodeError:
+                        pass
+
+            if result is None:
+                # LLM text yanıt verdi ama JSON değil — direkt göster
+                return f"🤖 {response.text.strip()}"
+
+            # ─── Eylemleri uygula ───
+            actions = result.get("actions", [])
+            action_results = []
+            for action in actions:
+                action_result = await self._execute_action(action, ctx)
+                if action_result:
+                    action_results.append(action_result)
+
+            # Kullanıcıya yanıt oluştur
+            parts = []
+            user_response = result.get("response_to_user", "")
+            intent = result.get("user_intent", "")
+
+            if intent:
+                parts.append(f"🎯 **Anlaşılan**: {intent}")
+            if user_response:
+                parts.append(f"\n🤖 {user_response}")
+            if action_results:
+                parts.append(f"\n📋 **Yapılan İşlemler:**")
+                for ar in action_results:
+                    parts.append(f"  • {ar}")
+
+            return "\n".join(parts) if parts else f"🤖 {user_response or 'Komut alındı.'}"
+
+        except Exception as e:
+            logger.error(f"Gemma director error: {e}")
+            return self._fallback_response(msg, ctx)
+
+    async def _execute_action(self, action: dict, ctx: dict) -> Optional[str]:
+        """Gemma'nın belirlediği eylemi uygula."""
+        action_type = action.get("type", "")
+        target = action.get("target", "")
+        params = action.get("params", {})
+        explanation = action.get("explanation", "")
+
+        try:
+            if action_type == "strategy_update":
+                return await self._action_strategy_update(params)
+
+            elif action_type == "risk_update":
+                return await self._action_risk_update(params)
+
+            elif action_type == "watchlist_add":
+                sym = target.upper()
+                if not sym.endswith("USDT"):
+                    sym += "USDT"
+                scout = self.agents.get('Scout')
+                if scout and hasattr(scout, 'add_symbol_live'):
+                    await scout.add_symbol_live(sym)
+                    return f"✅ {sym} izleme listesine eklendi ve takip başladı"
+                else:
+                    await self.db.add_user_watchlist(sym)
+                    return f"✅ {sym} izleme listesine eklendi"
+
+            elif action_type == "watchlist_remove":
+                sym = target.upper()
+                if not sym.endswith("USDT"):
+                    sym += "USDT"
+                await self.db.remove_user_watchlist(sym)
+                return f"✅ {sym} izleme listesinden çıkarıldı"
+
+            elif action_type == "analyze_symbol":
+                sym = target.upper()
+                if not sym.endswith("USDT"):
+                    sym += "USDT"
+                return await self._action_deep_analyze(sym, ctx)
+
+            elif action_type == "force_scan":
+                return "📡 Scout acil tarama başlatıldı — sonuçlar kısa sürede gelecek"
+
+            elif action_type == "brain_insight":
+                b = ctx.get("brain", {})
+                return (f"🧠 Brain: {b.get('total_patterns', 0)} pattern, "
+                        f"%{b.get('accuracy', 0)*100:.1f} doğruluk, "
+                        f"son öğrenme: {b.get('last_learning_update', 'yok')}")
+
+            elif action_type == "set_mode":
+                mode = params.get("mode", "").upper()
+                if self.state_tracker and mode in ("BOOTSTRAP", "LEARNING", "WARMUP", "PRODUCTION"):
+                    self.state_tracker.state["mode_override"] = mode
+                    return f"✅ Bot modu {mode} olarak ayarlandı"
+                return f"⚠ Geçersiz mod: {mode}"
+
+            elif action_type == "status_report":
+                return await self._handle_status("", "", ctx)
+
+            elif action_type == "general_chat":
+                return None  # response_to_user zaten cevap içeriyor
+
+            else:
+                logger.debug(f"Unknown action type: {action_type}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Action execution error ({action_type}): {e}")
+            return f"⚠ {action_type} hatası: {str(e)[:100]}"
+
+    async def _action_strategy_update(self, params: dict) -> str:
+        """Strateji parametrelerini güncelle."""
+        from config import Config
+        changes = []
+
+        # Preset profiller
+        profile = params.get("profile", "").lower()
+        if profile == "aggressive" or profile == "agresif":
+            Config.SIMILARITY_THRESHOLD = 0.3
+            Config.GHOST_TAKE_PROFIT_PCT = 0.07
+            Config.GHOST_STOP_LOSS_PCT = 0.04
+            Config.STRATEGY_POPULATION_SIZE = 50
+            Config.RISK_MAX_DAILY_TRADES = 30
+            changes.append("Agresif profil: düşük eşik, geniş TP/SL, yüksek trade limiti")
+
+        elif profile == "defensive" or profile == "defansif":
+            Config.SIMILARITY_THRESHOLD = 0.55
+            Config.GHOST_TAKE_PROFIT_PCT = 0.03
+            Config.GHOST_STOP_LOSS_PCT = 0.02
+            Config.STRATEGY_POPULATION_SIZE = 30
+            Config.RISK_MAX_DAILY_TRADES = 10
+            changes.append("Defansif profil: yüksek eşik, dar TP/SL, düşük trade limiti")
+
+        elif profile == "balanced" or profile == "dengeli":
+            Config.SIMILARITY_THRESHOLD = 0.4
+            Config.GHOST_TAKE_PROFIT_PCT = 0.05
+            Config.GHOST_STOP_LOSS_PCT = 0.03
+            Config.STRATEGY_POPULATION_SIZE = 40
+            Config.RISK_MAX_DAILY_TRADES = 20
+            changes.append("Dengeli profil: varsayılan parametreler")
+
+        # Bireysel parametre güncellemeleri
+        if "similarity_threshold" in params:
+            val = float(params["similarity_threshold"])
+            Config.SIMILARITY_THRESHOLD = max(0.1, min(0.9, val))
+            changes.append(f"Similarity eşiği: {Config.SIMILARITY_THRESHOLD}")
+
+        if "take_profit" in params:
+            val = float(params["take_profit"])
+            Config.GHOST_TAKE_PROFIT_PCT = max(0.01, min(0.20, val))
+            changes.append(f"Take profit: %{Config.GHOST_TAKE_PROFIT_PCT*100:.1f}")
+
+        if "stop_loss" in params:
+            val = float(params["stop_loss"])
+            Config.GHOST_STOP_LOSS_PCT = max(0.005, min(0.10, val))
+            changes.append(f"Stop loss: %{Config.GHOST_STOP_LOSS_PCT*100:.1f}")
+
+        # Directive store'a kaydet (kalıcı)
+        if changes:
+            try:
+                from directive_store import get_directive_store
+                store = get_directive_store()
+                await store.set_master_directive(
+                    f"Strateji güncellemesi ({datetime.utcnow().strftime('%H:%M')}): " +
+                    "; ".join(changes)
+                )
+            except Exception:
+                pass
+
+        return "⚙️ Strateji güncellendi: " + "; ".join(changes) if changes else "⚙️ Parametre değişikliği belirtilmedi"
+
+    async def _action_risk_update(self, params: dict) -> str:
+        """Risk parametrelerini güncelle."""
+        from config import Config
+        changes = []
+
+        if "max_daily_trades" in params:
+            Config.RISK_MAX_DAILY_TRADES = int(params["max_daily_trades"])
+            changes.append(f"Günlük max trade: {Config.RISK_MAX_DAILY_TRADES}")
+
+        if "max_daily_loss" in params:
+            Config.RISK_MAX_DAILY_LOSS_PCT = float(params["max_daily_loss"])
+            changes.append(f"Günlük max kayıp: %{Config.RISK_MAX_DAILY_LOSS_PCT}")
+
+        if "max_drawdown" in params:
+            Config.RISK_MAX_DRAWDOWN_PCT = float(params["max_drawdown"])
+            changes.append(f"Max drawdown: %{Config.RISK_MAX_DRAWDOWN_PCT}")
+
+        if "max_open_positions" in params:
+            Config.RISK_MAX_OPEN_POSITIONS = int(params["max_open_positions"])
+            changes.append(f"Max açık pozisyon: {Config.RISK_MAX_OPEN_POSITIONS}")
+
+        return "🛡 Risk güncellendi: " + "; ".join(changes) if changes else "🛡 Risk parametresi belirtilmedi"
+
+    async def _action_deep_analyze(self, symbol: str, ctx: dict) -> str:
+        """Bir coini tüm agentlardan geçirerek derin analiz yap."""
+        parts = [f"🔍 **{symbol} Derin Analiz**\n"]
+
+        # Fiyat
+        price = ctx.get("prices", {}).get(symbol)
+        if price:
+            parts.append(f"💰 Fiyat: ${price:,.2f}")
+
+        # Order flow
+        try:
+            trades = await self.db.get_recent_trades(symbol, limit=500, market_type='spot')
+            if trades:
+                cutoff = datetime.utcnow() - timedelta(minutes=30)
+                recent = [t for t in trades if t['timestamp'] >= cutoff]
+                if recent:
+                    buy_vol = sum(float(t['quantity']) * float(t['price']) for t in recent if t['side'] == 'buy')
+                    sell_vol = sum(float(t['quantity']) * float(t['price']) for t in recent if t['side'] == 'sell')
+                    total = buy_vol + sell_vol
+                    if total > 0:
+                        buy_pct = buy_vol / total * 100
+                        parts.append(f"⚡ Order Flow: Alış %{buy_pct:.0f} / Satış %{100-buy_pct:.0f} ({len(recent)} trade)")
+        except Exception:
+            pass
+
+        # Sinyaller
+        signals = ctx.get("pending_signals", [])
+        sym_signals = [s for s in signals if s.get("symbol") == symbol]
+        if sym_signals:
+            for s in sym_signals[:3]:
+                conf = float(s.get('confidence', 0)) * 100
+                meta = s.get('metadata', {})
+                if isinstance(meta, str):
+                    try: meta = json.loads(meta)
+                    except: meta = {}
+                direction = meta.get('position_bias', '?')
+                parts.append(f"📡 Sinyal: {direction.upper()} (güven %{conf:.0f})")
+
+        # Açık simülasyon
+        open_sims = ctx.get("open_sims", [])
+        sym_sims = [s for s in open_sims if s.get("symbol") == symbol]
+        if sym_sims:
+            for s in sym_sims:
+                entry = float(s.get('entry_price', 0))
+                parts.append(f"👻 Açık Sim: {s['side'].upper()} @ ${entry:,.2f}")
+
+        # Brain pattern eşleşmesi
+        b = ctx.get("brain", {})
+        parts.append(f"🧠 Brain: {b.get('total_patterns', 0)} pattern, %{b.get('accuracy', 0)*100:.1f} doğruluk")
+
+        # LLM derin analiz iste
+        bridge = _get_llm_bridge()
+        if bridge and await bridge.is_available():
+            try:
+                llm_result = await bridge.brain_predict_with_context(
+                    symbol=symbol,
+                    snapshot_data={"price": price, "symbol": symbol},
+                    matching_patterns=[],
+                    avg_similarity=0,
+                    indicators={},
+                )
+                if llm_result and llm_result.get("_parsed"):
+                    pred = llm_result.get("prediction", "?")
+                    conf = llm_result.get("confidence", 0)
+                    risk = llm_result.get("risk_assessment", "")
+                    factors = llm_result.get("key_factors", [])
+                    parts.append(f"\n🤖 **Gemma Analizi:**")
+                    parts.append(f"  Tahmin: {pred.upper()} (güven: %{conf*100:.0f})")
+                    if risk:
+                        parts.append(f"  Risk: {risk}")
+                    if factors:
+                        parts.append(f"  Faktörler: {', '.join(factors[:5])}")
+            except Exception as e:
+                logger.debug(f"LLM analyze error: {e}")
+
+        return "\n".join(parts)
+
+    def _fallback_response(self, msg: str, ctx: dict) -> str:
+        """LLM kullanılamadığında basit fallback."""
+        s = ctx.get("summary", {})
         return (
             f"🤖 Mesajını aldım: \"{msg[:100]}\"\n\n"
-            f"Bu konuda spesifik yardım için daha net sorabilirsin. Örneğin:\n"
-            f"• Fiyat sorgusu: \"BTC kaç?\"\n"
-            f"• Sistem durumu: \"durum\"\n"
-            f"• Açık pozisyonlar: \"pozisyonlar\"\n"
-            f"• AI beyin: \"beyin durumu\"\n"
-            f"• Yardım: \"yardım\"\n\n"
+            f"⚠ LLM şu an yanıt üretemiyor (degraded mode).\n"
+            f"Keyword tabanlı komutlar kullanabilirsin:\n"
+            f"• \"durum\" — sistem durumu\n"
+            f"• \"fiyat BTC\" — fiyat sorgula\n"
+            f"• \"sinyaller\" — aktif sinyaller\n"
+            f"• \"yardım\" — tüm komutlar\n\n"
             f"📊 Anlık: {s.get('total_trades', 0):,} trade | "
             f"{s.get('active_signals', 0)} sinyal | "
             f"{s.get('open_simulations', 0)} açık sim"

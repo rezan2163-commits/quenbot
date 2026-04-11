@@ -379,7 +379,7 @@ class AgentOrchestrator:
         last_processed_id = 0
         while self.running:
             try:
-                await asyncio.sleep(1)  # 1 saniyede bir kontrol (hızlı yanıt)
+                await asyncio.sleep(0.5)  # 500ms polling — hızlı yanıt
                 messages = await self.db.get_chat_messages(limit=10)
                 for msg in messages:
                     if msg['role'] == 'user' and msg['id'] > last_processed_id:

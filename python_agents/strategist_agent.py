@@ -79,7 +79,7 @@ class StrategistAgent:
                 await self._update_pattern_outcomes()
             except Exception as e:
                 logger.error(f"Strategist cycle error: {e}")
-            await asyncio.sleep(60)  # Her 1 dakikada bir
+            await asyncio.sleep(45)  # Her 45 saniyede bir
 
     async def stop(self):
         self.running = False

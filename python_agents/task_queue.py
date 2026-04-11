@@ -45,9 +45,9 @@ class Task:
 
 class TaskQueue:
     """
-    Async priority task queue for CPU-bound LLM inference.
+    Async priority task queue for LLM inference.
 
-    - Single worker (CPU can only do one inference at a time)
+    - Multiple workers for 12 vCPU / 24 GB RAM parallel inference
     - Priority ordering (risk checks before background analysis)
     - Task deduplication (skip duplicate agent requests)
     - Timeout protection (kill stale tasks)
@@ -56,9 +56,9 @@ class TaskQueue:
 
     def __init__(
         self,
-        max_workers: int = 1,
-        max_queue_size: int = 50,
-        task_timeout: int = 180,
+        max_workers: int = 3,
+        max_queue_size: int = 80,
+        task_timeout: int = 120,
     ):
         self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue(
             maxsize=max_queue_size
