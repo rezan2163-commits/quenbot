@@ -34,6 +34,18 @@ const summaryCache: { data: SummaryCache; updatedAt: number; refreshing: boolean
   refreshing: false,
 };
 
+const pricesCache: { data: any[]; updatedAt: number; refreshing: boolean } = {
+  data: [],
+  updatedAt: 0,
+  refreshing: false,
+};
+
+const moversCache: { data: any[]; updatedAt: number; refreshing: boolean } = {
+  data: [],
+  updatedAt: 0,
+  refreshing: false,
+};
+
 async function refreshSummaryCache() {
   if (summaryCache.refreshing) return;
   summaryCache.refreshing = true;
@@ -76,6 +88,53 @@ async function refreshSummaryCache() {
   }
 }
 
+async function refreshPricesCache() {
+  if (pricesCache.refreshing) return;
+  pricesCache.refreshing = true;
+  try {
+    // Lightweight source: latest movement end prices per symbol.
+    const rows = await sql`
+      SELECT DISTINCT ON (symbol)
+             symbol,
+             'derived'::text AS exchange,
+             end_price::double precision AS price,
+             end_time AS timestamp
+      FROM price_movements
+      ORDER BY symbol, end_time DESC
+    `;
+    pricesCache.data = rows;
+    pricesCache.updatedAt = Date.now();
+  } catch (error) {
+    console.error("Prices cache refresh failed:", error);
+  } finally {
+    pricesCache.refreshing = false;
+  }
+}
+
+async function refreshMoversCache() {
+  if (moversCache.refreshing) return;
+  moversCache.refreshing = true;
+  try {
+    const rows = await sql`
+      SELECT symbol,
+             start_price::double precision AS open_price,
+             end_price::double precision AS current_price,
+             (change_pct * 100)::double precision AS change_pct,
+             end_time AS timestamp
+      FROM price_movements
+      WHERE end_time >= NOW() - INTERVAL '3 hours'
+      ORDER BY ABS(change_pct) DESC
+      LIMIT 20
+    `;
+    moversCache.data = rows;
+    moversCache.updatedAt = Date.now();
+  } catch (error) {
+    console.error("Movers cache refresh failed:", error);
+  } finally {
+    moversCache.refreshing = false;
+  }
+}
+
 // Performance: gzip compression for all responses
 app.use(compression());
 app.use(cors());
@@ -83,8 +142,15 @@ app.use(express.json());
 
 app.get("/api/health", async (req, res) => {
   try {
-    await sql`SELECT 1`;
-    res.json({ status: "ok", database: "connected", timestamp: new Date().toISOString() });
+    res.json({
+      status: "ok",
+      timestamp: new Date().toISOString(),
+      cache: {
+        summary_age_ms: Date.now() - summaryCache.updatedAt,
+        prices_age_ms: Date.now() - pricesCache.updatedAt,
+        movers_age_ms: Date.now() - moversCache.updatedAt,
+      },
+    });
   } catch (error) {
     res.status(500).json({ status: "error", error: String(error) });
   }
@@ -103,12 +169,10 @@ app.get("/api/dashboard/summary", async (req, res) => {
 
 app.get("/api/live/prices", async (req, res) => {
   try {
-    const prices = await sql`
-      SELECT DISTINCT ON (symbol) symbol, exchange, price::double precision AS price, timestamp
-      FROM trades
-      ORDER BY symbol, timestamp DESC
-    `;
-    res.json(prices);
+    if (Date.now() - pricesCache.updatedAt > 2000) {
+      void refreshPricesCache();
+    }
+    res.json(pricesCache.data);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -263,18 +327,10 @@ app.get("/api/analytics/volume-by-exchange", async (req, res) => {
 // Top movers (price change in last hour)
 app.get("/api/analytics/top-movers", async (req, res) => {
   try {
-    const rows = await sql`
-      SELECT symbol,
-             start_price::double precision AS open_price,
-             end_price::double precision AS current_price,
-             (change_pct * 100)::double precision AS change_pct,
-             end_time AS timestamp
-      FROM price_movements
-      WHERE end_time >= NOW() - INTERVAL '3 hours'
-      ORDER BY ABS(change_pct) DESC
-      LIMIT 20
-    `;
-    res.json(rows);
+    if (Date.now() - moversCache.updatedAt > 3000) {
+      void refreshMoversCache();
+    }
+    res.json(moversCache.data);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -1061,8 +1117,16 @@ app.listen(port, async () => {
   await connectDatabase();
   await createTables();
   await refreshSummaryCache();
+  await refreshPricesCache();
+  await refreshMoversCache();
   setInterval(() => {
     void refreshSummaryCache();
+  }, 5000);
+  setInterval(() => {
+    void refreshPricesCache();
+  }, 3000);
+  setInterval(() => {
+    void refreshMoversCache();
   }, 5000);
   console.log(`API Server running on port ${port}`);
 }).keepAliveTimeout = 65_000;  // Keep-alive > ALB default (60s) for connection reuse
