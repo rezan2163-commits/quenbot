@@ -1,10 +1,13 @@
 import express from "express";
 import cors from "cors";
+import compression from "compression";
 import { connectDatabase, createTables, sql } from "./db";
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
 
+// Performance: gzip compression for all responses
+app.use(compression());
 app.use(cors());
 app.use(express.json());
 
@@ -933,6 +936,40 @@ app.get("/api/llm/queue", async (req, res) => {
   } catch { res.json({ queue_size: 0, error: "Queue API unavailable" }); }
 });
 
+/* ═══ System Resource & Status Proxy ═══ */
+app.get("/api/system/resources", async (req, res) => {
+  try {
+    const compact = req.query.compact === "1" ? "?compact=1" : "";
+    const r = await fetch(`${DIRECTIVE_API}/api/system/resources${compact}`);
+    res.json(await r.json());
+  } catch {
+    // Fallback: read from heartbeat DB
+    try {
+      const [hb] = await sql`SELECT metadata FROM agent_heartbeat WHERE agent_name = 'system_resources'`;
+      if (hb?.metadata) {
+        const m = typeof hb.metadata === 'string' ? JSON.parse(hb.metadata) : hb.metadata;
+        res.json(m);
+      } else {
+        res.json({ error: "Resource monitor unavailable", cpu_percent: 0, ram_percent: 0, disk_percent: 0 });
+      }
+    } catch { res.json({ error: "Resource monitor unavailable" }); }
+  }
+});
+
+app.get("/api/system/summary", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/system/summary`);
+    res.json(await r.json());
+  } catch { res.json({ mode: "unknown", error: "System API unavailable" }); }
+});
+
+app.get("/api/system/events", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/system/events`);
+    res.json(await r.json());
+  } catch { res.json({ total_events: 0, recent_events: [], error: "Event API unavailable" }); }
+});
+
 /* ═══ DATA AUDIT / VALIDATION ═══ */
 app.get("/api/audit/validate", async (req, res) => {
   try {
@@ -982,4 +1019,4 @@ app.listen(port, async () => {
   await connectDatabase();
   await createTables();
   console.log(`API Server running on port ${port}`);
-});
+}).keepAliveTimeout = 65_000;  // Keep-alive > ALB default (60s) for connection reuse

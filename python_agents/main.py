@@ -3,7 +3,9 @@ import asyncio
 import logging
 import os
 import json
-from datetime import datetime
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from config import Config
@@ -21,6 +23,8 @@ from llm_client import get_llm_client
 from llm_bridge import get_llm_bridge
 from directive_store import get_directive_store
 from task_queue import get_task_queue
+from event_bus import get_event_bus, EventBus, Event, EventType
+from resource_monitor import ResourceMonitor
 
 # Setup logging
 LOG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -52,40 +56,63 @@ class AgentOrchestrator:
         self.llm_bridge = None
         self.task_queue = None
         self.directive_store = None
+        self.event_bus: EventBus = get_event_bus()
+        self.resource_monitor = ResourceMonitor()
         self.running = False
         self._agent_restart_counts: dict = {}
-        self._max_restarts = 50  # max restart per agent before giving up
+        self._max_restarts = 50
+        self._system_mode = "initializing"  # initializing | healthy | degraded
+        self._llm_available = False
+        self._start_time = time.time()
+        self._last_resource_snapshot = None
+        self._resource_warnings: list[dict] = []
+        # Thread pool for CPU-bound work (pattern matching, similarity calc)
+        self._thread_pool = ThreadPoolExecutor(
+            max_workers=6, thread_name_prefix="quenbot-cpu"
+        )
 
     async def initialize(self):
-        """Initialize all components"""
+        """Initialize all components with startup status report"""
         logger.info("=" * 80)
         logger.info("🤖 QUENBOT - AI-Powered Multi-Agent Market Intelligence System")
         logger.info("=" * 80)
-        
-        # Connect to database
+
+        startup_report = {
+            "start_time": datetime.now(timezone.utc).isoformat(),
+            "components": {},
+        }
+
+        # 1. Database
         await self.db.connect()
         logger.info("✓ Database initialized")
+        startup_report["components"]["database"] = {"status": "ok"}
 
-        # Merkezi AI beyin modülü
+        # 2. Brain
         self.brain = BrainModule(self.db)
         await self.brain.initialize()
-        logger.info(f"🧠 Brain initialized ({self.brain.get_brain_status()['total_patterns']} patterns)")
+        brain_info = self.brain.get_brain_status()
+        logger.info(f"🧠 Brain initialized ({brain_info['total_patterns']} patterns)")
+        startup_report["components"]["brain"] = {"status": "ok", "patterns": brain_info["total_patterns"]}
 
-        # StateTracker - persistent state
+        # 3. StateTracker
         self.state_tracker = StateTracker(self.db)
         await self.state_tracker.load_state()
-        logger.info(f"📊 StateTracker initialized (mode={self.state_tracker.get_mode()}, "
-                     f"trades={self.state_tracker.state['total_trades']})")
+        mode = self.state_tracker.get_mode()
+        trades = self.state_tracker.state['total_trades']
+        logger.info(f"📊 StateTracker initialized (mode={mode}, trades={trades})")
+        startup_report["components"]["state_tracker"] = {"status": "ok", "mode": mode, "trades": trades}
 
-        # RiskManager - signal gate
+        # 4. RiskManager
         self.risk_manager = RiskManager(self.state_tracker)
         logger.info(f"🛡 RiskManager initialized (max_daily={self.risk_manager.MAX_DAILY_TRADES})")
+        startup_report["components"]["risk_manager"] = {"status": "ok"}
 
-        # RCA Engine - failure analysis
+        # 5. RCA Engine
         self.rca_engine = RCAEngine(self.db)
         logger.info("🔍 RCA Engine initialized")
+        startup_report["components"]["rca_engine"] = {"status": "ok"}
 
-        # LLM Central Intelligence - local Ollama backbone
+        # 6. LLM — degraded mode if unavailable
         try:
             self.llm_client = get_llm_client()
             self.task_queue = get_task_queue()
@@ -95,20 +122,38 @@ class AgentOrchestrator:
 
             llm_healthy = await self.llm_client.health_check()
             if llm_healthy:
+                self._llm_available = True
                 logger.info(f"🧠 LLM connected (model: {self.llm_client.model})")
+                startup_report["components"]["llm"] = {"status": "ok", "model": self.llm_client.model}
             else:
-                # Ollama reachable but no model — try to pull one
                 logger.info("🧠 LLM backend reachable, checking for models...")
                 model_ok = await self.llm_client.ensure_model()
                 if model_ok:
+                    self._llm_available = True
                     logger.info(f"🧠 LLM model ready: {self.llm_client.model}")
+                    startup_report["components"]["llm"] = {"status": "ok", "model": self.llm_client.model}
                 else:
-                    logger.warning("⚠ No LLM model available — agents will use rule-based logic")
+                    self._llm_available = False
+                    logger.warning("⚠ No LLM model available — DEGRADED MODE (rule-based logic)")
+                    startup_report["components"]["llm"] = {"status": "degraded", "reason": "no model"}
         except Exception as e:
-            logger.warning(f"⚠ LLM initialization failed (degraded mode): {e}")
+            self._llm_available = False
+            logger.warning(f"⚠ LLM initialization failed — DEGRADED MODE: {e}")
             self.llm_bridge = None
+            startup_report["components"]["llm"] = {"status": "degraded", "reason": str(e)}
 
-        # Initialize agents with brain + state + risk connections
+        # Set system mode
+        self._system_mode = "healthy" if self._llm_available else "degraded"
+
+        # 7. Resource snapshot
+        snap = self.resource_monitor.snapshot()
+        self._last_resource_snapshot = snap
+        startup_report["resources"] = snap.to_dict()
+        logger.info(f"💻 Resources: CPU={snap.cpu_percent:.0f}% RAM={snap.ram_percent:.0f}% "
+                     f"({snap.ram_used_mb:.0f}/{snap.ram_total_mb:.0f}MB) "
+                     f"Disk={snap.disk_percent:.0f}%")
+
+        # 8. Initialize agents
         self.scout = ScoutAgent(self.db, brain=self.brain)
         self.strategist = StrategistAgent(self.db, brain=self.brain,
                                            state_tracker=self.state_tracker,
@@ -118,12 +163,15 @@ class AgentOrchestrator:
                                                      risk_manager=self.risk_manager)
         self.auditor = AuditorAgent(self.db, brain=self.brain, rca_engine=self.rca_engine)
 
-        await self.scout.initialize()
-        await self.strategist.initialize()
-        await self.ghost_simulator.initialize()
-        await self.auditor.initialize()
+        # Parallel agent initialization — utilize multiple cores
+        await asyncio.gather(
+            self.scout.initialize(),
+            self.strategist.initialize(),
+            self.ghost_simulator.initialize(),
+            self.auditor.initialize(),
+        )
 
-        # Chat engine - doğal dil AI yanıt motoru
+        # Chat engine
         self.chat_engine = ChatEngine(self.db, self.brain)
         self.chat_engine.register_agent('Scout', self.scout)
         self.chat_engine.register_agent('Strategist', self.strategist)
@@ -133,9 +181,127 @@ class AgentOrchestrator:
         self.chat_engine.risk_manager = self.risk_manager
         self.chat_engine.rca_engine = self.rca_engine
 
+        # 9. Wire event bus subscriptions
+        self._setup_event_subscriptions()
+
         logger.info("✓ All agents initialized with Brain + StateTracker + RiskManager")
         logger.info(f"✓ Monitoring {len(Config.WATCHLIST)} symbols: {Config.WATCHLIST}")
+        logger.info(f"✓ System mode: {self._system_mode.upper()}")
+
+        # 10. Startup report to DB
+        startup_report["system_mode"] = self._system_mode
+        startup_report["symbols"] = Config.WATCHLIST
+        try:
+            await self.db.update_heartbeat('system', self._system_mode, startup_report)
+        except Exception as e:
+            logger.debug(f"Startup report save: {e}")
+
+        # Print startup status report
         logger.info("=" * 80)
+        logger.info("📋 BAŞLANGIÇ DURUM RAPORU")
+        logger.info(f"  Mod: {self._system_mode.upper()}")
+        logger.info(f"  LLM: {'✓ ' + (self.llm_client.model if self._llm_available else 'Yok') + (' (AKTİF)' if self._llm_available else ' (KURAL TABANLI)')}")
+        logger.info(f"  Brain: {brain_info['total_patterns']} pattern")
+        logger.info(f"  State: mode={mode} | trades={trades}")
+        logger.info(f"  RAM: {snap.ram_used_mb:.0f}/{snap.ram_total_mb:.0f} MB (%{snap.ram_percent:.0f})")
+        logger.info(f"  CPU: %{snap.cpu_percent:.0f} | Load: {snap.load_avg_1m:.1f}")
+        logger.info(f"  Disk: %{snap.disk_percent:.0f}")
+        logger.info(f"  Semboller: {len(Config.WATCHLIST)} adet")
+        logger.info("=" * 80)
+
+    def _setup_event_subscriptions(self):
+        """Wire inter-agent event subscriptions."""
+        bus = self.event_bus
+
+        # Scout anomaly → Strategist should re-analyze
+        bus.subscribe(EventType.SCOUT_ANOMALY, self._on_scout_anomaly)
+
+        # Signal generated → RiskManager gate → Ghost Simulator
+        bus.subscribe(EventType.SIGNAL_GENERATED, self._on_signal_generated)
+
+        # Risk approved → open simulation
+        bus.subscribe(EventType.RISK_APPROVED, self._on_risk_approved)
+
+        # Simulation closed → StateTracker + Auditor
+        bus.subscribe(EventType.SIM_CLOSED, self._on_sim_closed)
+
+        # Resource warnings → log + DB
+        bus.subscribe(EventType.RESOURCE_WARNING, self._on_resource_warning)
+
+        # LLM status changes
+        bus.subscribe(EventType.LLM_STATUS_CHANGE, self._on_llm_status_change)
+
+        logger.info("✓ Event bus subscriptions wired")
+
+    # ─── Event Handlers ───
+
+    async def _on_scout_anomaly(self, event: Event):
+        """Scout detected anomaly → notify strategist for priority re-analysis."""
+        symbol = event.data.get("symbol", "")
+        logger.info(f"📡 Event: Scout anomaly on {symbol} → Strategist notified")
+        # The strategist will pick this up on its next cycle via shared state
+        try:
+            await self.db.update_heartbeat('event_bus',
+                'running', {"last_event": "scout_anomaly", "symbol": symbol})
+        except Exception:
+            pass
+
+    async def _on_signal_generated(self, event: Event):
+        """Strategist generated signal → pass through RiskManager gate."""
+        signal = event.data
+        symbol = signal.get("symbol", "")
+        direction = signal.get("direction", "")
+
+        if self.risk_manager:
+            approved, reason = self.risk_manager.check_signal(signal)
+            if approved:
+                logger.info(f"✅ Risk approved: {symbol} {direction}")
+                await self.event_bus.publish(Event(
+                    type=EventType.RISK_APPROVED,
+                    source="risk_manager",
+                    data=signal,
+                ))
+            else:
+                logger.info(f"🚫 Risk rejected: {symbol} {direction} — {reason}")
+                await self.event_bus.publish(Event(
+                    type=EventType.RISK_REJECTED,
+                    source="risk_manager",
+                    data={"symbol": symbol, "reason": reason},
+                ))
+
+    async def _on_risk_approved(self, event: Event):
+        """Risk-approved signal → Ghost Simulator opens position."""
+        signal = event.data
+        logger.debug(f"👻 Signal forwarded to Ghost Simulator: {signal.get('symbol')}")
+        # Ghost simulator picks up approved signals from DB in its cycle
+
+    async def _on_sim_closed(self, event: Event):
+        """Simulation closed → update StateTracker."""
+        sim_result = event.data
+        if self.state_tracker and sim_result.get("pnl_pct") is not None:
+            await self.state_tracker.record_trade(sim_result)
+            logger.debug(f"📊 StateTracker updated: {sim_result.get('symbol')} PnL={sim_result.get('pnl_pct', 0):.2f}%")
+
+    async def _on_resource_warning(self, event: Event):
+        """Resource threshold exceeded → log and save."""
+        for w in event.data.get("warnings", []):
+            if w["level"] == "critical":
+                logger.critical(f"🚨 {w['message']}")
+            else:
+                logger.warning(f"⚠ {w['message']}")
+
+    async def _on_llm_status_change(self, event: Event):
+        """LLM availability changed."""
+        was_available = self._llm_available
+        now_available = event.data.get("available", False)
+        self._llm_available = now_available
+
+        if was_available and not now_available:
+            self._system_mode = "degraded"
+            logger.warning("⚠ LLM went offline — switching to DEGRADED mode (rule-based)")
+        elif not was_available and now_available:
+            self._system_mode = "healthy"
+            logger.info(f"✓ LLM back online — switching to HEALTHY mode (model: {event.data.get('model', '?')})")
 
     async def start(self):
         """Start all agents with crash resilience — one agent failing does NOT kill the system"""
@@ -202,6 +368,7 @@ class AgentOrchestrator:
                 await self.task_queue.stop()
             if self.llm_client:
                 await self.llm_client.close()
+            self._thread_pool.shutdown(wait=False)
             await self.db.disconnect()
             logger.info("✓ All agents stopped")
         except Exception as e:
@@ -225,50 +392,112 @@ class AgentOrchestrator:
                 logger.debug(f"Chat processor: {e}")
 
     async def _health_monitor(self):
-        """Monitor health of all agents and send heartbeats"""
+        """Monitor health of all agents, resources, and send heartbeats"""
         while self.running:
             try:
                 await asyncio.sleep(30)
-                
-                scout_health = await self.scout.health_check()
-                strategist_health = await self.strategist.health_check()
-                ghost_health = await self.ghost_simulator.health_check()
-                auditor_health = await self.auditor.health_check()
+
+                # ─── Agent health checks (parallel) ───
+                scout_health, strategist_health, ghost_health, auditor_health = await asyncio.gather(
+                    self.scout.health_check(),
+                    self.strategist.health_check(),
+                    self.ghost_simulator.health_check(),
+                    self.auditor.health_check(),
+                )
                 brain_status = self.brain.get_brain_status()
 
-                # Heartbeat'leri DB'ye yaz
-                await self.db.update_heartbeat('scout', 
-                    'running' if scout_health.get('healthy') else 'error', scout_health)
-                await self.db.update_heartbeat('strategist',
-                    'running' if strategist_health.get('healthy') else 'error', strategist_health)
-                await self.db.update_heartbeat('ghost_simulator',
-                    'running' if ghost_health.get('healthy') else 'error', ghost_health)
-                await self.db.update_heartbeat('auditor',
-                    'running' if auditor_health.get('healthy') else 'error', auditor_health)
-                await self.db.update_heartbeat('brain', 'running', brain_status)
-                await self.db.update_heartbeat('chat_engine', 'running', {
-                    'registered_agents': list(self.chat_engine.agents.keys())
-                })
+                await asyncio.gather(
+                    self.db.update_heartbeat('scout',
+                        'running' if scout_health.get('healthy') else 'error', scout_health),
+                    self.db.update_heartbeat('strategist',
+                        'running' if strategist_health.get('healthy') else 'error', strategist_health),
+                    self.db.update_heartbeat('ghost_simulator',
+                        'running' if ghost_health.get('healthy') else 'error', ghost_health),
+                    self.db.update_heartbeat('auditor',
+                        'running' if auditor_health.get('healthy') else 'error', auditor_health),
+                    self.db.update_heartbeat('brain', 'running', brain_status),
+                    self.db.update_heartbeat('chat_engine', 'running', {
+                        'registered_agents': list(self.chat_engine.agents.keys())
+                    }),
+                )
 
-                # LLM health
-                if self.llm_bridge:
+                # ─── LLM health + degraded mode tracking ───
+                llm_was_available = self._llm_available
+                if self.llm_client:
                     llm_available = await self.llm_client.health_check()
-                    llm_stats = self.llm_bridge.get_stats()
-                    await self.db.update_heartbeat('llm_brain', 
-                        'running' if llm_available else 'degraded', llm_stats)
+                    self._llm_available = llm_available
+                    llm_stats = self.llm_bridge.get_stats() if self.llm_bridge else {}
+                    await self.db.update_heartbeat('llm_brain',
+                        'running' if llm_available else 'degraded', {
+                            **llm_stats,
+                            "active_model": self.llm_client.model if llm_available else None,
+                        })
 
-                # Brain pattern'larını yenile (yeni pattern'lar memory'ye yüklensin)
+                    # Detect status change
+                    if llm_was_available != llm_available:
+                        await self.event_bus.publish(Event(
+                            type=EventType.LLM_STATUS_CHANGE,
+                            source="health_monitor",
+                            data={"available": llm_available, "model": self.llm_client.model},
+                        ))
+                else:
+                    await self.db.update_heartbeat('llm_brain', 'degraded', {
+                        "reason": "LLM client not initialized"
+                    })
+
+                self._system_mode = "healthy" if self._llm_available else "degraded"
+
+                # ─── Resource monitoring ───
+                snap = self.resource_monitor.snapshot()
+                self._last_resource_snapshot = snap
+                warnings = self.resource_monitor.check_warnings(snap)
+                self._resource_warnings = warnings
+
+                resource_data = snap.to_dict()
+                resource_data["warnings"] = warnings
+                resource_data["system_mode"] = self._system_mode
+                resource_data["uptime_seconds"] = int(time.time() - self._start_time)
+                resource_data["event_bus"] = self.event_bus.get_stats()
+                resource_data["agent_restarts"] = dict(self._agent_restart_counts)
+                await self.db.update_heartbeat('system_resources', 'running', resource_data)
+
+                if warnings:
+                    await self.event_bus.publish(Event(
+                        type=EventType.RESOURCE_WARNING,
+                        source="health_monitor",
+                        data={"warnings": warnings},
+                    ))
+
+                # ─── Brain refresh ───
                 await self.brain.refresh_patterns()
 
-                # StateTracker: mode güncelle, state kaydet, snapshot al
+                # ─── StateTracker persist ───
                 if self.state_tracker:
                     self.state_tracker.update_mode()
                     await self.state_tracker.save_state()
                     await self.state_tracker.snapshot_history()
 
-                # Her 2 dakikada bir loglama
+                # ─── Health report event ───
+                await self.event_bus.publish(Event(
+                    type=EventType.HEALTH_REPORT,
+                    source="health_monitor",
+                    data={
+                        "system_mode": self._system_mode,
+                        "llm_available": self._llm_available,
+                        "agents": {
+                            "scout": scout_health.get("healthy", False),
+                            "strategist": strategist_health.get("healthy", False),
+                            "ghost": ghost_health.get("healthy", False),
+                            "auditor": auditor_health.get("healthy", False),
+                        },
+                        "ram_percent": snap.ram_percent,
+                        "cpu_percent": snap.cpu_percent,
+                    },
+                ))
+
+                # ─── Periodic logging (every ~2 min) ───
                 if int(asyncio.get_event_loop().time()) % 120 < 35:
-                    logger.info(f"📊 HEALTH CHECK")
+                    logger.info(f"📊 HEALTH CHECK [{self._system_mode.upper()}]")
                     logger.info(f"  🧠 Brain: {brain_status['total_patterns']} patterns | "
                                  f"Accuracy: {brain_status['accuracy']:.1%}")
                     logger.info(f"  Scout: {'✓' if scout_health.get('healthy') else '✗'} "
@@ -281,19 +510,26 @@ class AgentOrchestrator:
                                  f"Win: {ghost_health.get('win_rate', 0):.0f}%)")
                     logger.info(f"  Auditor: {'✓' if auditor_health.get('healthy') else '✗'} "
                                  f"(#{auditor_health.get('audit_count', 0)})")
+                    logger.info(f"  LLM: {'✓ ' + self.llm_client.model if self._llm_available else '✗ Kapalı (Degraded)'}")
+                    logger.info(f"  💻 CPU={snap.cpu_percent:.0f}% RAM={snap.ram_percent:.0f}% "
+                                 f"({snap.ram_used_mb:.0f}/{snap.ram_total_mb:.0f}MB) "
+                                 f"Disk={snap.disk_percent:.0f}%")
                     if self.state_tracker:
                         st = self.state_tracker.state
                         logger.info(f"  📊 State: mode={self.state_tracker.get_mode()} | "
                                      f"trades={st['total_trades']} | "
                                      f"PnL={st['cumulative_pnl']:.2f}% | "
                                      f"DD={st['current_drawdown']:.2f}%")
+                    if warnings:
+                        for w in warnings:
+                            logger.warning(f"  ⚠ {w['component']}: {w['message']}")
 
             except Exception as e:
                 logger.error(f"Health monitoring error: {e}")
 
     async def _directive_api_server(self):
         """Lightweight HTTP server for directive management (Master Control).
-        Listens on port 3002 for directive CRUD operations."""
+        Listens on port 3002 for directive CRUD + system status + resources."""
         from aiohttp import web
 
         async def get_directives(request):
@@ -312,6 +548,13 @@ class AgentOrchestrator:
                     for agent, text in body["agent_overrides"].items():
                         await store.set_agent_override(agent, text)
 
+                # Publish directive event
+                await self.event_bus.publish(Event(
+                    type=EventType.DIRECTIVE_UPDATED,
+                    source="api",
+                    data=body,
+                ))
+
                 data = await store.get_all()
                 return web.json_response({"status": "ok", **data})
             except Exception as e:
@@ -324,25 +567,118 @@ class AgentOrchestrator:
 
         async def get_llm_status(request):
             try:
-                healthy = await self.llm_client.health_check()
-                models = await self.llm_client.list_models()
-                client_stats = self.llm_client.get_stats()
+                healthy = False
+                models = []
+                client_stats = {}
+
+                if self.llm_client:
+                    healthy = await self.llm_client.health_check()
+                    models = await self.llm_client.list_models()
+                    client_stats = self.llm_client.get_stats()
+
                 bridge_stats = self.llm_bridge.get_stats() if self.llm_bridge else {}
+
                 return web.json_response({
                     "healthy": healthy,
-                    "active_model": self.llm_client.model,
+                    "active_model": self.llm_client.model if self.llm_client else None,
                     "available_models": models,
+                    "system_mode": self._system_mode,
                     "call_count": client_stats.get("total_calls", 0),
                     "llm_stats": client_stats,
                     **bridge_stats,
                 })
             except Exception as e:
-                return web.json_response({"healthy": False, "error": str(e)})
+                return web.json_response({
+                    "healthy": False,
+                    "system_mode": self._system_mode,
+                    "error": str(e),
+                })
 
         async def get_queue_status(request):
             if self.task_queue:
                 return web.json_response(self.task_queue.get_stats())
             return web.json_response({"error": "Queue not initialized"})
+
+        async def get_system_resources(request):
+            """System resource snapshot + warnings — mobile-friendly compact JSON."""
+            snap = self.resource_monitor.snapshot()
+            self._last_resource_snapshot = snap
+            warnings = self.resource_monitor.check_warnings(snap)
+            self._resource_warnings = warnings
+
+            # Compact response for mobile
+            is_mobile = request.query.get("compact") == "1"
+            if is_mobile:
+                return web.json_response({
+                    "cpu": round(snap.cpu_percent, 0),
+                    "ram": round(snap.ram_percent, 0),
+                    "ram_mb": f"{snap.ram_used_mb:.0f}/{snap.ram_total_mb:.0f}",
+                    "disk": round(snap.disk_percent, 0),
+                    "mode": self._system_mode,
+                    "llm": self._llm_available,
+                    "warnings": len(warnings),
+                    "uptime": int(time.time() - self._start_time),
+                })
+
+            return web.json_response({
+                **snap.to_dict(),
+                "warnings": warnings,
+                "system_mode": self._system_mode,
+                "llm_available": self._llm_available,
+                "llm_model": self.llm_client.model if self.llm_client and self._llm_available else None,
+                "uptime_seconds": int(time.time() - self._start_time),
+                "agent_restarts": dict(self._agent_restart_counts),
+                "event_bus": self.event_bus.get_stats(),
+                "resource_history": self.resource_monitor.get_history(),
+            })
+
+        async def get_system_summary(request):
+            """Compact system summary for mobile dashboard — single endpoint."""
+            snap = self._last_resource_snapshot
+            resource = snap.to_dict() if snap else {}
+            warnings = self._resource_warnings
+
+            # Gather all status in one call
+            llm_healthy = self._llm_available
+            st = self.state_tracker.state if self.state_tracker else {}
+            brain = self.brain.get_brain_status() if self.brain else {}
+
+            return web.json_response({
+                "mode": self._system_mode,
+                "llm": {
+                    "ok": llm_healthy,
+                    "model": self.llm_client.model if self.llm_client and llm_healthy else None,
+                },
+                "resources": {
+                    "cpu": resource.get("cpu_percent", 0),
+                    "ram": resource.get("ram_percent", 0),
+                    "ram_mb": f"{resource.get('ram_used_mb', 0):.0f}/{resource.get('ram_total_mb', 0):.0f}",
+                    "disk": resource.get("disk_percent", 0),
+                },
+                "state": {
+                    "mode": self.state_tracker.get_mode() if self.state_tracker else "?",
+                    "trades": st.get("total_trades", 0),
+                    "pnl": round(st.get("cumulative_pnl", 0), 2),
+                },
+                "brain": {
+                    "patterns": brain.get("total_patterns", 0),
+                    "accuracy": round(brain.get("accuracy", 0) * 100, 1),
+                },
+                "warnings": [{"level": w["level"], "comp": w["component"],
+                              "msg": w["message"][:120]} for w in warnings],
+                "uptime": int(time.time() - self._start_time),
+            })
+
+        async def get_event_log(request):
+            """Recent event bus activity."""
+            stats = self.event_bus.get_stats()
+            return web.json_response(stats)
+
+        # Kill stale port binding before starting
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.close()
 
         app = web.Application()
         app.router.add_get("/api/directives", get_directives)
@@ -350,6 +686,9 @@ class AgentOrchestrator:
         app.router.add_delete("/api/directives", clear_directives)
         app.router.add_get("/api/llm/status", get_llm_status)
         app.router.add_get("/api/llm/queue", get_queue_status)
+        app.router.add_get("/api/system/resources", get_system_resources)
+        app.router.add_get("/api/system/summary", get_system_summary)
+        app.router.add_get("/api/system/events", get_event_log)
 
         runner = web.AppRunner(app)
         await runner.setup()

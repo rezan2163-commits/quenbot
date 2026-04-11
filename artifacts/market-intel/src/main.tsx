@@ -147,6 +147,7 @@ function App() {
   const [masterDir, setMasterDir] = useState(""); const [dirSaving, setDirSaving] = useState(false); const [dirStatus, setDirStatus] = useState<string | null>(null);
   const [llmSt, setLlmSt] = useState<R | null>(null); const [queueSt, setQueueSt] = useState<R | null>(null);
   const [auditValidation, setAuditValidation] = useState<R | null>(null);
+  const [sysResources, setSysResources] = useState<R | null>(null);
   // Signal filters
   const [sigFilter, setSigFilter] = useState<'all' | 'pending' | 'processed' | 'rejected'>('all');
   const [sigDir, setSigDir] = useState<'all' | 'long' | 'short'>('all');
@@ -229,13 +230,14 @@ function App() {
     if (cor) setCorrections(Array.isArray(cor) ? cor : []);
     if (sig2) setSignatures(Array.isArray(sig2) ? sig2 : []);
     try {
-      const [dr, lr, qr, av] = await Promise.all([
-        apiFetch("/api/directives"), apiFetch("/api/llm/status"), apiFetch("/api/llm/queue"), apiFetch("/api/audit/validate"),
+      const [dr, lr, qr, av, sr] = await Promise.all([
+        apiFetch("/api/directives"), apiFetch("/api/llm/status"), apiFetch("/api/llm/queue"), apiFetch("/api/audit/validate"), apiFetch("/api/system/resources"),
       ]);
       if (dr?.master_directive !== undefined && !dirSaving) setMasterDir(dr.master_directive);
       if (lr) setLlmSt(lr);
       if (qr) setQueueSt(qr);
       if (av) setAuditValidation(av);
+      if (sr && !sr.error) setSysResources(sr);
     } catch {}
   }, [dirSaving]);
 
@@ -315,7 +317,9 @@ function App() {
           </nav>
         </div>
         <div className="topnav-right">
+          {llmSt && <div className="nav-stat"><span className={cls("dot-live", !llmSt.healthy && "dot-warn")} /><span>{llmSt.system_mode === 'degraded' ? 'Degraded' : llmSt.healthy ? 'LLM Aktif' : 'LLM Kapalı'}</span></div>}
           <div className="nav-stat"><span className="dot-live" /><span>{activeAgents}/{totalAgents} Agent</span></div>
+          {sysResources && <div className="nav-stat">{`RAM %${fmt(sysResources.ram_percent ?? 0, 0)}`}</div>}
           <div className="nav-stat">{sysStats ? `${fmt(sysStats.trades_per_minute, 0)} t/dk` : "—"}</div>
           <div className="nav-stat t-m">{fmtTime(lastUp.toISOString())}</div>
         </div>
@@ -744,13 +748,72 @@ function App() {
 
         {/* ══════ SYSTEM ══════ */}
         {tab === "system" && <>
-          <div className="section-header"><h2>Sistem Durumu</h2></div>
+          <div className="section-header"><h2>Sistem Durumu</h2>
+            {sysResources?.system_mode && <span className={cls("badge", sysResources.system_mode === 'healthy' ? 'badge-g' : 'badge-w')}>{sysResources.system_mode === 'healthy' ? '✓ TAM MOD' : '⚠ DEGRADED (Kural Tabanlı)'}</span>}
+          </div>
           <div className="kpi-row">
             <KPI label="Veritabanı" value={sysStats ? `${sysStats.db_size_mb} MB` : "—"} icon="💾" />
             <KPI label="Toplam Trade" value={sysStats ? fmt(sysStats.total_trades, 0) : "—"} icon="📦" />
             <KPI label="Trade/dk" value={sysStats ? fmt(sysStats.trades_per_minute, 0) : "—"} icon="⚡" accent="b" />
-            <KPI label="Uptime" value={sysStats ? ago(sysStats.uptime_minutes) : "—"} icon="⏱" accent="g" />
+            <KPI label="Uptime" value={sysResources?.uptime_seconds ? ago(Math.floor(sysResources.uptime_seconds / 60)) : sysStats ? ago(sysStats.uptime_minutes) : "—"} icon="⏱" accent="g" />
           </div>
+
+          {/* Resource Monitor */}
+          {sysResources && <div className="card"><div className="card-h"><h3>Kaynak Kullanımı</h3><span className="badge badge-live">CANLI</span></div>
+            <div className="kpi-row" style={{ padding: 12 }}>
+              <KPI label="CPU" value={`%${fmt(sysResources.cpu_percent ?? 0, 0)}`} icon="🖥" accent={sn(sysResources.cpu_percent) > 85 ? "r" : sn(sysResources.cpu_percent) > 60 ? "w" : "g"} />
+              <KPI label="RAM" value={`%${fmt(sysResources.ram_percent ?? 0, 0)}`} icon="🧮" accent={sn(sysResources.ram_percent) > 90 ? "r" : sn(sysResources.ram_percent) > 80 ? "w" : "g"} />
+              <KPI label="RAM Detay" value={`${fmt(sysResources.ram_used_mb ?? 0, 0)}/${fmt(sysResources.ram_total_mb ?? 0, 0)} MB`} icon="📊" />
+              <KPI label="Disk" value={`%${fmt(sysResources.disk_percent ?? 0, 0)}`} icon="💿" accent={sn(sysResources.disk_percent) > 85 ? "r" : "g"} />
+              <KPI label="Process" value={`${fmt(sysResources.process_rss_mb ?? 0, 0)} MB`} icon="🐍" />
+              <KPI label="Load" value={`${sn(sysResources.load_avg_1m ?? 0).toFixed(1)}`} icon="📈" accent={sn(sysResources.load_avg_1m) > 3 ? "w" : "g"} />
+            </div>
+            {/* Resource History Chart (simple bar) */}
+            {sysResources.resource_history?.length > 1 && <div style={{ padding: '0 16px 12px', display: 'flex', alignItems: 'flex-end', gap: 2, height: 50 }}>
+              {sysResources.resource_history.slice(-30).map((h: R, i: number) => {
+                const v = sn(h.ram_percent ?? 0);
+                return <div key={i} style={{ flex: 1, height: `${Math.max(v, 2)}%`, background: v > 90 ? 'var(--r)' : v > 80 ? 'var(--w)' : 'var(--g)', borderRadius: 2, opacity: 0.7, minWidth: 2 }} title={`RAM: %${v.toFixed(0)}`} />;
+              })}
+            </div>}
+          </div>}
+
+          {/* Resource Warnings */}
+          {sysResources?.warnings && sysResources.warnings.length > 0 && <div className="card"><div className="card-h"><h3>Kaynak Uyarıları</h3><span className="badge badge-r">{sysResources.warnings.length} Uyarı</span></div>
+            <div style={{ padding: 16 }}>
+              {sysResources.warnings.map((w: R, i: number) => (
+                <div key={i} style={{ padding: '8px 12px', marginBottom: 8, borderRadius: 8, background: w.level === 'critical' ? 'rgba(255,59,48,0.15)' : 'rgba(255,204,0,0.15)', border: `1px solid ${w.level === 'critical' ? 'var(--r)' : 'var(--w)'}` }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <span>{w.level === 'critical' ? '🚨' : '⚠️'}</span>
+                    <strong style={{ color: w.level === 'critical' ? 'var(--r)' : 'var(--w)' }}>{w.component}</strong>
+                  </div>
+                  <div className="t-m" style={{ fontSize: 12 }}>{w.message}</div>
+                </div>
+              ))}
+            </div>
+          </div>}
+
+          {/* Event Bus */}
+          {sysResources?.event_bus && <div className="card"><div className="card-h"><h3>Event Bus</h3><span className="badge badge-b">{fmt(sysResources.event_bus.total_events ?? 0, 0)} olay</span></div>
+            <div className="kpi-row" style={{ padding: 12 }}>
+              <KPI label="Toplam Olay" value={fmt(sysResources.event_bus.total_events ?? 0, 0)} icon="📨" />
+              <KPI label="Abone" value={fmt(sysResources.event_bus.subscriber_count ?? 0, 0)} icon="🔗" />
+            </div>
+            {sysResources.event_bus.topics && Object.keys(sysResources.event_bus.topics).length > 0 && <div style={{ padding: '0 16px 12px' }}>
+              <div className="t-m" style={{ fontSize: 11, marginBottom: 6 }}>Olay Kanalları:</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {Object.entries(sysResources.event_bus.topics).map(([k, v]) => <span key={k} className="badge badge-sm badge-b">{k}: {String(v)}</span>)}
+              </div>
+            </div>}
+          </div>}
+
+          {/* Agent Restarts */}
+          {sysResources?.agent_restarts && Object.values(sysResources.agent_restarts).some((v: any) => v > 0) && <div className="card"><div className="card-h"><h3>Agent Yeniden Başlatma</h3><span className="badge badge-w">Hata Kurtarma</span></div>
+            <div className="stat-grid" style={{ padding: 12 }}>
+              {Object.entries(sysResources.agent_restarts).map(([k, v]) => (
+                <div key={k} className="stat-card"><div className="stat-name">{k}</div><div className="stat-val" style={{ color: sn(v as number) > 3 ? 'var(--r)' : sn(v as number) > 0 ? 'var(--w)' : 'var(--g)' }}>{String(v)}</div></div>
+              ))}
+            </div>
+          </div>}
 
           <div className="g2">
             <div className="card"><div className="card-h"><h3>Agent Durumları</h3><span className="badge badge-g">{activeAgents} aktif</span></div>

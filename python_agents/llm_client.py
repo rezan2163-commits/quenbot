@@ -20,16 +20,16 @@ import aiohttp
 logger = logging.getLogger("quenbot.llm_client")
 
 # -------------------------------------------------------------------
-# Defaults tuned for 4 vCPU / 8 GB RAM
+# Defaults tuned for 12 vCPU / 24 GB RAM
 # -------------------------------------------------------------------
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "quenbot-brain"
 MODEL_CANDIDATES = ["quenbot-brain", "gemma3:4b-it-q4_K_M", "gemma3", "gemma2", "qwen3:1.7b", "qwen3"]
-DEFAULT_TIMEOUT = 120          # seconds — CPU inference is slow
-DEFAULT_MAX_TOKENS = 512       # keep responses short
-DEFAULT_MAX_PROMPT_CHARS = 3000  # trim prompts to avoid OOM
+DEFAULT_TIMEOUT = 90           # faster CPU = shorter timeout
+DEFAULT_MAX_TOKENS = 1024      # longer responses with more RAM
+DEFAULT_MAX_PROMPT_CHARS = 8000  # 3x more context fits in 24GB
 DEFAULT_MAX_RETRIES = 2
-DEFAULT_CONCURRENCY = 1        # single inference at a time on CPU
+DEFAULT_CONCURRENCY = 3        # parallel inferences with 12 vCPU + 24GB RAM
 
 
 @dataclass
@@ -83,7 +83,7 @@ class LLMClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            connector = aiohttp.TCPConnector(limit=2, force_close=False)
+            connector = aiohttp.TCPConnector(limit=8, force_close=False)
             timeout = aiohttp.ClientTimeout(total=self.timeout + 30)
             self._session = aiohttp.ClientSession(
                 connector=connector, timeout=timeout
@@ -201,8 +201,9 @@ PARAMETER temperature 0.3
 PARAMETER top_p 0.85
 PARAMETER top_k 30
 PARAMETER repeat_penalty 1.15
-PARAMETER num_ctx 2048
-PARAMETER num_predict 512
+PARAMETER num_ctx 8192
+PARAMETER num_predict 1024
+PARAMETER num_thread 10
 
 SYSTEM \"\"\"You are QuenBot Central Intelligence, a specialized cryptocurrency trading analysis AI.
 You operate as part of a multi-agent trading system with the following agents:
@@ -269,7 +270,8 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
                 "top_k": 30,
                 "repeat_penalty": 1.15,
                 "num_predict": self.max_tokens,
-                "num_ctx": 2048,
+                "num_ctx": 8192,
+                "num_thread": 10,
             },
         }
 

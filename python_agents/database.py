@@ -41,8 +41,8 @@ class Database:
         try:
             self.pool = await asyncpg.create_pool(
                 Config.DATABASE_URL,
-                min_size=5,
-                max_size=20,
+                min_size=8,
+                max_size=40,
                 command_timeout=60
             )
             await self.create_tables()

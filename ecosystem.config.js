@@ -1,4 +1,5 @@
 // PM2 Ecosystem Configuration - QuenBot
+// Optimized for 12 vCPU (AMD) / 24 GB RAM
 // Usage: pm2 start ecosystem.config.js
 module.exports = {
   apps: [
@@ -13,11 +14,13 @@ module.exports = {
         PORT: 3001,
         DATABASE_URL: "postgres://user:password@localhost:5432/trade_intel",
         ADMIN_PIN: process.env.ADMIN_PIN || "BABA",
+        UV_THREADPOOL_SIZE: "8",
+        NODE_OPTIONS: "--max-old-space-size=2048",
       },
       instances: 1,
       autorestart: true,
       watch: false,
-      max_memory_restart: "512M",
+      max_memory_restart: "2G",
       error_file: "./logs/api-error.log",
       out_file: "./logs/api-out.log",
       merge_logs: true,
@@ -27,20 +30,23 @@ module.exports = {
       name: "quenbot-agents",
       cwd: "./python_agents",
       script: "python3",
-      args: "main.py",
+      args: "-O main.py",
       interpreter: "none",
       env: {
         PYTHONUNBUFFERED: "1",
+        PYTHONOPTIMIZE: "1",
         DB_HOST: "localhost",
         DB_PORT: 5432,
         DB_USER: "user",
         DB_PASSWORD: "password",
         DB_NAME: "trade_intel",
+        OLLAMA_NUM_PARALLEL: "3",
+        OLLAMA_MAX_LOADED_MODELS: "2",
       },
       instances: 1,
       autorestart: true,
       watch: false,
-      max_memory_restart: "2G",
+      max_memory_restart: "8G",
       error_file: "./logs/agents-error.log",
       out_file: "./logs/agents-out.log",
       merge_logs: true,
