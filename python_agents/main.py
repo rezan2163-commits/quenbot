@@ -10,13 +10,27 @@ from dotenv import load_dotenv
 
 from config import Config
 from database import Database
+
+# ══ KATMAN 2: Biliş/Hafıza ══
 from brain import BrainModule
+
+# ══ KATMAN 3: Karar Çekirdeği ══
+from gemma_decision_core import get_decision_core
+
+# ══ KATMAN 5: Arayüz ══
 from chat_engine import ChatEngine
+
+# ══ KATMAN 1: Veri Giriş ══
 from scout_agent import ScoutAgent
+
+# ══ KATMAN 4: Aksiyon ══
 from strategist_agent import StrategistAgent
 from ghost_simulator_agent import GhostSimulatorAgent
 from auditor_agent import AuditorAgent
+
+# ══ KATMAN 2: Pattern Eşleşme ══
 from pattern_matcher_agent import PatternMatcherAgent
+
 from state_tracker import StateTracker
 from risk_manager import RiskManager
 from rca_engine import RCAEngine
@@ -42,9 +56,21 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 class AgentOrchestrator:
+    """
+    5-Katmanlı Gemma-Merkezli Mimari Orkestratörü
+    ══════════════════════════════════════════════
+    Katman 1 (Giriş)   : ScoutAgent — veri toplama, indikatörler
+    Katman 2 (Biliş)   : PatternMatcher + Brain + IntelligenceCore
+    Katman 3 (Karar)   : GemmaDecisionCore — Gemma 4 nihai karar
+    Katman 4 (Aksiyon) : Strategist + GhostSimulator + RiskManager
+    Katman 5 (Arayüz)  : ChatEngine — Gemma doğal dil konuşma
+
+    Ajanlar ÖNERİ sunar, Gemma NİHAİ KARAR verir.
+    """
     def __init__(self):
         self.db = Database()
         self.brain = None
+        self.decision_core = None  # Katman 3: Gemma karar merkezi
         self.chat_engine = None
         self.scout = None
         self.strategist = None
@@ -76,7 +102,13 @@ class AgentOrchestrator:
     async def initialize(self):
         """Initialize all components with startup status report"""
         logger.info("=" * 80)
-        logger.info("🤖 QUENBOT - AI-Powered Multi-Agent Market Intelligence System")
+        logger.info("🤖 QUENBOT — Gemma-Merkezli 5-Katmanlı Otonom Trading Zekası")
+        logger.info("=" * 80)
+        logger.info("  Katman 1: Veri Giriş    → ScoutAgent")
+        logger.info("  Katman 2: Biliş/Hafıza  → PatternMatcher + Brain")
+        logger.info("  Katman 3: Karar Çekirdeği → GemmaDecisionCore (Gemma 4)")
+        logger.info("  Katman 4: Aksiyon       → Strategist + Ghost + Risk")
+        logger.info("  Katman 5: Arayüz        → ChatEngine (Gemma doğal dil)")
         logger.info("=" * 80)
 
         startup_report = {
@@ -111,6 +143,17 @@ class AgentOrchestrator:
 
         # 5. RCA Engine
         self.rca_engine = RCAEngine(self.db)
+        logger.info("🔍 RCA Engine initialized")
+        startup_report["components"]["rca_engine"] = {"status": "ok"}
+
+        # 5.5 GemmaDecisionCore — Katman 3: Merkezi karar motoru
+        self.decision_core = get_decision_core(
+            brain=self.brain,
+            risk_manager=self.risk_manager,
+            state_tracker=self.state_tracker,
+        )
+        logger.info("⚡ GemmaDecisionCore initialized (Katman 3 — Gemma nihai karar)")
+        startup_report["components"]["decision_core"] = {"status": "ok"}
         logger.info("🔍 RCA Engine initialized")
         startup_report["components"]["rca_engine"] = {"status": "ok"}
 
@@ -203,15 +246,21 @@ class AgentOrchestrator:
 
         # Print startup status report
         logger.info("=" * 80)
-        logger.info("📋 BAŞLANGIÇ DURUM RAPORU")
-        logger.info(f"  Mod: {self._system_mode.upper()}")
-        logger.info(f"  LLM: {'✓ ' + (self.llm_client.model if self._llm_available else 'Yok') + (' (AKTİF)' if self._llm_available else ' (KURAL TABANLI)')}")
-        logger.info(f"  Brain: {brain_info['total_patterns']} pattern")
-        logger.info(f"  State: mode={mode} | trades={trades}")
-        logger.info(f"  RAM: {snap.ram_used_mb:.0f}/{snap.ram_total_mb:.0f} MB (%{snap.ram_percent:.0f})")
-        logger.info(f"  CPU: %{snap.cpu_percent:.0f} | Load: {snap.load_avg_1m:.1f}")
-        logger.info(f"  Disk: %{snap.disk_percent:.0f}")
-        logger.info(f"  Semboller: {len(Config.WATCHLIST)} adet")
+        logger.info("📋 QUENBOT — SİSTEM BAŞLANGIÇ RAPORU")
+        logger.info("-" * 80)
+        logger.info(f"  ⚙️  Mod          : {self._system_mode.upper()}")
+        logger.info(f"  🧠 Gemma        : {'✓ ' + self.llm_client.model + ' (AKTİF — NİHAİ KARAR OTORİTESİ)' if self._llm_available else '✗ Yok (KURAL TABANLI)'}")
+        logger.info(f"  🎯 DecisionCore : Gemma-merkezli karar motoru aktif")
+        logger.info(f"  📚 Brain        : {brain_info['total_patterns']} pattern | %{brain_info['accuracy']*100:.1f} doğruluk")
+        logger.info(f"  📊 State        : mode={mode} | trades={trades}")
+        logger.info(f"  🛡  Risk         : max_daily={self.risk_manager.MAX_DAILY_TRADES}")
+        logger.info(f"  💻 RAM          : {snap.ram_used_mb:.0f}/{snap.ram_total_mb:.0f} MB (%{snap.ram_percent:.0f})")
+        logger.info(f"  💻 CPU          : %{snap.cpu_percent:.0f} | Load: {snap.load_avg_1m:.1f}")
+        logger.info(f"  💻 Disk         : %{snap.disk_percent:.0f}")
+        logger.info(f"  📡 Semboller    : {len(Config.WATCHLIST)} adet — {', '.join(Config.WATCHLIST[:5])}...")
+        logger.info("-" * 80)
+        logger.info("  Akış: Scout→PatternMatcher→Brain→GemmaDecisionCore→Strategist→Ghost")
+        logger.info("  Chat: Kullanıcı→Gemma (doğrudan, aracısız)")
         logger.info("=" * 80)
 
     def _setup_event_subscriptions(self):

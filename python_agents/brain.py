@@ -128,7 +128,14 @@ class PatternRecord:
 
 
 class BrainModule:
-    """Merkezi AI Zeka Modülü"""
+    """
+    Merkezi AI Zeka Modülü — Katman 2+3 Köprüsü
+    ==============================================
+    Katman 2 (Cognition/Memory): Pattern hafızası, öğrenme, kalibrasyon
+    Katman 3 Entegrasyonu: GemmaDecisionCore üzerinden nihai karar
+
+    FELSEFE: Brain verileri toplar ve sentezler, GEMMA karar verir.
+    """
 
     MAX_PATTERN_MEMORY = 500
     AUTO_CALIBRATE_INTERVAL = 50  # Her 50 öğrenme sonrasında otomatik kalibrasyon
@@ -423,31 +430,27 @@ class BrainModule:
             return 0.0
         return self.prediction_accuracy['correct'] / self.prediction_accuracy['total']
 
-    # ─── Pattern Match (Euclidean Distance) Integration ───
+    # ─── Pattern Match (Euclidean Distance) Integration — GEMMA DECISION CORE ───
 
     async def evaluate_pattern_match(self, match_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         PatternMatcherAgent'tan gelen Euclidean distance eşleşmesini değerlendir.
-        Brain merkezi karar otoritesi olarak:
-          1. Eşleşme kalitesini kontrol et
-          2. Mevcut öğrenme verileriyle çapraz doğrula
-          3. LLM (Gemma) ile sentezle (varsa)
-          4. Sinyal üretilmeli mi karar ver
+
+        ★ GEMMA-CENTRIC KARAR MEKANİZMASI ★
+        Brain artık nihai kararı kendisi vermez; GemmaDecisionCore'a delege eder.
+        Brain'in rolü:
+          1. Eşleşme kalitesini ön-filtre et (min similarity)
+          2. Öğrenme verileriyle ön kontrol yap
+          3. GemmaDecisionCore'a tüm verileri sentezlesin diye gönder
+          4. Gemma'nın nihai kararını döndür
         """
+        from gemma_decision_core import get_decision_core
+
         symbol = match_data.get('symbol', '')
         similarity = match_data.get('similarity', 0)
         direction = match_data.get('predicted_direction', 'neutral')
         magnitude = match_data.get('predicted_magnitude', 0)
         confidence = match_data.get('confidence', 0)
-
-        decision = {
-            'symbol': symbol,
-            'approved': False,
-            'direction': direction,
-            'magnitude': magnitude,
-            'confidence': confidence,
-            'reasoning': '',
-        }
 
         self._pattern_match_stats['total_evaluated'] += 1
         self._pattern_match_stats['last_match'] = {
@@ -457,94 +460,63 @@ class BrainModule:
             'timestamp': datetime.utcnow().isoformat(),
         }
 
-        # 1. Minimum kalite kontrolü
+        # ─── Ön filtre: minimum kalite ───
         if similarity < 0.90:
-            decision['reasoning'] = f"Benzerlik eşik altı: {similarity:.4f} < 0.90"
             self._pattern_match_stats['total_vetoed'] += 1
-            return decision
+            return {
+                'symbol': symbol, 'approved': False,
+                'direction': direction, 'magnitude': magnitude,
+                'confidence': confidence,
+                'reasoning': f"Ön-filtre: Benzerlik eşik altı {similarity:.4f} < 0.90",
+            }
 
-        # 2. Brain'in sinyal geçmişiyle çapraz kontrol
-        sig_type = f"pattern_match_{direction}"
+        # ─── Ön filtre: Brain öğrenme verisi ───
         should_signal = self.should_generate_signal(symbol, direction, confidence)
-
         if not should_signal:
-            decision['reasoning'] = (
-                f"Brain öğrenme verileri bu yönde ({direction}) sinyal bastırıyor. "
-                f"Geçmiş doğruluk düşük."
-            )
             self._pattern_match_stats['total_vetoed'] += 1
-            return decision
+            return {
+                'symbol': symbol, 'approved': False,
+                'direction': direction, 'magnitude': magnitude,
+                'confidence': confidence,
+                'reasoning': f"Brain öğrenme verileri ({direction}) yönünde sinyal bastırıyor",
+            }
 
-        # 3. LLM (Gemma) ile sentez (varsa)
-        llm_reasoning = None
-        bridge = _get_llm_bridge()
-        if bridge:
-            try:
-                llm_reasoning = await self._llm_evaluate_pattern_match(
-                    bridge, match_data)
-            except Exception as e:
-                logger.debug(f"LLM pattern eval error: {e}")
+        # ─── ★ GEMMA DECISION CORE — NİHAİ KARAR ★ ───
+        decision_core = get_decision_core(
+            brain=self,
+            risk_manager=None,  # Orchestrator tarafından inject edilecek
+            state_tracker=None,
+        )
 
-        # 4. Karar ver
-        decision['approved'] = True
-        reasoning_parts = [
-            f"Euclidean eşleşme onaylandı: {symbol} {direction}",
-            f"Benzerlik: {similarity:.4f}, Güven: {confidence:.2%}",
-            f"Beklenen hareket: {magnitude:+.2%}",
-        ]
+        gemma_decision = await decision_core.evaluate(
+            pattern_data=match_data,
+            scout_data=match_data.get('scout_context'),
+            strategist_data=match_data.get('strategist_context'),
+        )
 
-        if llm_reasoning:
-            decision['llm_analysis'] = llm_reasoning
-            reasoning_parts.append(f"Gemma: {llm_reasoning.get('summary', '')}")
-            # Gemma veto edebilir
-            if llm_reasoning.get('veto', False):
-                decision['approved'] = False
-                reasoning_parts.append("⚠ Gemma bu sinyali veto etti")
+        # Öğrenme kaydı
+        self._record_pattern_match_prediction(symbol, direction, confidence)
 
-        decision['reasoning'] = " | ".join(reasoning_parts)
-
-        if decision['approved']:
+        if gemma_decision.approved:
             self._pattern_match_stats['total_approved'] += 1
         else:
             self._pattern_match_stats['total_vetoed'] += 1
 
-        # 5. Öğrenme kaydı
-        self._record_pattern_match_prediction(symbol, direction, confidence)
+        return {
+            'symbol': symbol,
+            'approved': gemma_decision.approved,
+            'direction': gemma_decision.direction,
+            'magnitude': gemma_decision.magnitude,
+            'confidence': gemma_decision.confidence,
+            'reasoning': gemma_decision.reasoning,
+            'risk_level': gemma_decision.risk_level,
+            'action': gemma_decision.action,
+            'llm_analysis': gemma_decision.raw_response[:300] if gemma_decision.raw_response else None,
+            'gemma_latency_ms': gemma_decision.latency_ms,
+        }
 
-        return decision
-
-    async def _llm_evaluate_pattern_match(self, bridge, match_data: Dict) -> Optional[Dict]:
-        """Gemma ile pattern match değerlendirmesi"""
-        prompt = (
-            f"Pattern Match Analizi:\n"
-            f"Sembol: {match_data.get('symbol')}\n"
-            f"Zaman dilimi: {match_data.get('timeframe')}\n"
-            f"Euclidean benzerlik: {match_data.get('similarity', 0):.4f}\n"
-            f"Tahmin yönü: {match_data.get('predicted_direction')}\n"
-            f"Tahmin büyüklüğü: {match_data.get('predicted_magnitude', 0):+.2%}\n"
-            f"Eşleşen geçmiş hareket: {match_data.get('matched_change_pct', 0):+.2%} "
-            f"({match_data.get('matched_direction')})\n"
-            f"Eşleşme sayısı: {match_data.get('match_count', 0)}\n"
-            f"İndikatörler: {json.dumps(match_data.get('indicators', {}))}\n"
-            f"Hacim profili: {json.dumps(match_data.get('volume_profile', {}))}\n\n"
-            f"Bu pattern eşleşmesini değerlendir. JSON yanıt:\n"
-            f'{{"approve": true/false, "veto": true/false, '
-            f'"risk_level": "low/medium/high", '
-            f'"summary": "kısa değerlendirme"}}'
-        )
-        try:
-            result = await bridge.brain_predict_with_context(
-                prompt, context_type="pattern_match")
-            if isinstance(result, str):
-                # Try to parse JSON from response
-                import re
-                json_match = re.search(r'\{[^}]+\}', result)
-                if json_match:
-                    return json.loads(json_match.group())
-            return {'summary': str(result)[:200]} if result else None
-        except Exception as e:
-            logger.debug(f"LLM pattern eval failed: {e}")
-            return None
+    # Not: _llm_evaluate_pattern_match artık GemmaDecisionCore tarafından yönetilmektedir.
+    # Brain sadece ön-filtreleme yapıp GemmaDecisionCore.evaluate()'e delege eder.
 
     def _record_pattern_match_prediction(self, symbol: str, direction: str,
                                           confidence: float):
