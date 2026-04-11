@@ -835,19 +835,9 @@ class ChatEngine:
             from llm_client import get_llm_client
             client = get_llm_client()
             
-            # Force use gemma4-trading for natural chat (not quenbot-brain which is JSON-focused)
-            chat_model = None
-            try:
-                models = await client.list_models()
-                for preferred in ["gemma4-trading", "gemma:7b", "gemma3"]:
-                    for m in models:
-                        if m == preferred or m.startswith(preferred + ":"):
-                            chat_model = m
-                            break
-                    if chat_model:
-                        break
-            except Exception:
-                pass
+            # Force gemma4-trading for natural chat — don't rely on model discovery
+            # quenbot-brain is JSON-focused and returns structured data, not conversation
+            chat_model = "gemma4-trading:latest"
             
             response = await client.generate(
                 prompt=prompt,

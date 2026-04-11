@@ -83,8 +83,9 @@ class ScoutAgent:
         tasks = [
             self._monitor_binance_market('spot'),
             self._monitor_binance_market('futures'),
-            self._monitor_bybit_market('spot'),
-            self._monitor_bybit_market('futures'),
+            # Bybit WS disabled — server IP blocked (403 on both REST and WS)
+            # self._monitor_bybit_market('spot'),
+            # self._monitor_bybit_market('futures'),
             self._rest_fallback_fetcher(),
             self._price_movement_detector(),
             self._watchlist_refresher(),
