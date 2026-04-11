@@ -93,9 +93,12 @@ class ResourceMonitor:
 
         return snap
 
-    def check_warnings(self, snap: ResourceSnapshot) -> list[dict]:
+    def check_warnings(self, snap: ResourceSnapshot,
+                       component_breakdown: Optional[dict] = None) -> list[dict]:
         """Generate smart warnings based on resource thresholds."""
         warnings = []
+
+        component_note = self._format_component_breakdown(component_breakdown)
 
         if snap.ram_percent >= self.RAM_CRITICAL_PCT:
             warnings.append({
@@ -105,7 +108,7 @@ class ResourceMonitor:
                            f"({snap.ram_used_mb:.0f}/{snap.ram_total_mb:.0f} MB). "
                            f"Python process: {snap.process_rss_mb:.0f} MB. "
                            f"Ollama modeli RAM'in büyük bölümünü kullanıyor olabilir. "
-                           f"Daha küçük model (qwen3:1.7b) düşünün.",
+                           f"Daha küçük model (qwen3:1.7b) düşünün." + component_note,
                 "value": snap.ram_percent,
             })
         elif snap.ram_percent >= self.RAM_WARNING_PCT:
@@ -114,7 +117,7 @@ class ResourceMonitor:
                 "component": "RAM",
                 "message": f"Yüksek RAM kullanımı: %{snap.ram_percent:.0f} "
                            f"({snap.ram_used_mb:.0f}/{snap.ram_total_mb:.0f} MB). "
-                           f"Python ajanlar: {snap.process_rss_mb:.0f} MB kullanıyor.",
+                           f"Python ajanlar: {snap.process_rss_mb:.0f} MB kullanıyor." + component_note,
                 "value": snap.ram_percent,
             })
 
@@ -124,7 +127,7 @@ class ResourceMonitor:
                 "component": "CPU",
                 "message": f"Yüksek CPU kullanımı: %{snap.cpu_percent:.0f}. "
                            f"Load avg: {snap.load_avg_1m:.1f}/{snap.load_avg_5m:.1f}. "
-                           f"LLM inference veya Strategist analizi yoğun olabilir.",
+                           f"LLM inference veya Strategist analizi yoğun olabilir." + component_note,
                 "value": snap.cpu_percent,
             })
 
@@ -139,6 +142,27 @@ class ResourceMonitor:
             })
 
         return warnings
+
+    def _format_component_breakdown(self, component_breakdown: Optional[dict]) -> str:
+        """Render compact component breakdown for warning messages."""
+        if not component_breakdown:
+            return ""
+        try:
+            scored = []
+            for name, data in component_breakdown.items():
+                if not isinstance(data, dict):
+                    continue
+                score = float(data.get('activity_score', 0))
+                if score <= 0:
+                    continue
+                scored.append((name, score))
+            if not scored:
+                return ""
+            scored.sort(key=lambda x: x[1], reverse=True)
+            top = ", ".join(f"{n}:{s:.1f}" for n, s in scored[:3])
+            return f" | Bileşen yük skoru: {top}"
+        except Exception:
+            return ""
 
     def get_history(self) -> list[dict]:
         return self._history[-30:]  # last ~15 min

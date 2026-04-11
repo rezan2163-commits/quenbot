@@ -183,6 +183,7 @@ class ChatEngine:
             "watchlist": r"watchlist|izleme|liste|coin|takip|ekle|kaldır|sil",
             "agent": r"agent|bot|sağlık|health|scout|strategist|auditor",
             "perf": r"performans|başarı|kazanç|kayıp|win|loss|kar|zarar|pnl",
+            "pattern_match": r"pattern\s*match|eşleş|benzerlik|euclidean|similarity|kalıp\s*eşleş",
             "help": r"yardım|help|ne yapabil|komut|command",
             "market": r"piyasa|market|trend|yüksel|düş|boğa|ayı|bull|bear",
             "data": r"veri|data|trade.*sayı|kaç.*trade|istatistik|stat",
@@ -227,6 +228,7 @@ class ChatEngine:
             "watchlist": self._handle_watchlist,
             "agent": self._handle_agent,
             "perf": self._handle_perf,
+            "pattern_match": self._handle_pattern_match,
             "help": self._handle_help,
             "market": self._handle_market,
             "data": self._handle_data,
@@ -532,6 +534,69 @@ class ChatEngine:
         except Exception as e:
             return f"⚠ Performans verisi alınamadı: {e}"
 
+    async def _handle_pattern_match(self, msg, msg_lower, ctx) -> str:
+        """Pattern match (Euclidean distance) durumunu göster"""
+        try:
+            lines = ["🎯 **Pattern Match Durumu**\n"]
+
+            # PatternMatcher agent health
+            pm_agent = self.agents.get('PatternMatcher')
+            if pm_agent:
+                health = await pm_agent.health_check()
+                lines.append(f"**Agent**: {'✅ Çalışıyor' if health.get('healthy') else '❌ Sorunlu'}")
+                lines.append(f"**Toplam Tarama**: {health.get('scan_count', 0)}")
+                lines.append(f"**Toplam Eşleşme**: {health.get('match_count', 0)}")
+                lines.append(f"**En İyi Benzerlik**: {health.get('best_similarity', 0):.4f}")
+                lines.append(f"**Toplam Karşılaştırma**: {health.get('total_comparisons', 0)}")
+                lines.append(f"**Aktif Cooldown**: {health.get('active_cooldowns', 0)} sembol")
+                lines.append(f"**Cache Signature**: {health.get('cached_signatures', 0)}")
+
+                # Son eşleşmeler
+                last_matches = health.get('last_matches', [])
+                if last_matches:
+                    lines.append("\n**Son Eşleşmeler:**")
+                    for m in last_matches[-5:]:
+                        emoji = "🟢" if m.get('direction') == 'up' else "🔴"
+                        lines.append(
+                            f"  {emoji} {m['symbol']} [{m['timeframe']}] "
+                            f"sim={m['similarity']:.4f} → {m['direction']} "
+                            f"{m.get('magnitude', 0):+.2%}"
+                        )
+                else:
+                    lines.append("\nHenüz eşleşme yok — signature birikimi bekleniyor.")
+
+            # Sembol bazlı deep analiz
+            symbols = self._extract_symbols(msg_lower)
+            if symbols and pm_agent:
+                for sym in symbols[:2]:
+                    analysis = await pm_agent.deep_analyze_symbol(sym)
+                    overall = analysis.get('overall_signal', {})
+                    if overall.get('matched_timeframes', 0) > 0:
+                        lines.append(f"\n**{sym} Detaylı Analiz:**")
+                        lines.append(f"  Genel Yön: {overall.get('direction', '?')}")
+                        lines.append(f"  Güven: %{overall.get('confidence', 0)*100:.1f}")
+                        lines.append(f"  Eşleşen TF: {overall.get('matched_timeframes', 0)}")
+                        for tf, data in analysis.get('timeframes', {}).items():
+                            if data.get('status') == 'matched':
+                                lines.append(
+                                    f"    {tf}: sim={data['best_similarity']:.4f} "
+                                    f"→ {data['predicted_direction']} "
+                                    f"{data.get('predicted_magnitude', 0):+.4f}"
+                                )
+
+            # Brain pattern match stats
+            b = ctx.get("brain", {})
+            pm_stats = b.get('pattern_match', {})
+            if pm_stats:
+                lines.append(f"\n**Brain Değerlendirmesi:**")
+                lines.append(f"  Toplam değerlendirilen: {pm_stats.get('total_evaluated', 0)}")
+                lines.append(f"  Onaylanan: {pm_stats.get('total_approved', 0)}")
+                lines.append(f"  Veto edilen: {pm_stats.get('total_vetoed', 0)}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            return f"⚠ Pattern match bilgisi alınamadı: {e}"
+
     async def _handle_help(self, msg, msg_lower, ctx) -> str:
         return (
             "🤖 **QuenBot AI - Yardım**\n\n"
@@ -543,6 +608,7 @@ class ChatEngine:
             "🧠 **AI**: \"beyin nasıl?\", \"öğrenme durumu\", \"pattern sayısı\"\n"
             "⚡ **Order Flow**: \"BTC alış satış baskısı\", \"order flow\"\n"
             "📈 **Performans**: \"win rate ne?\", \"bot performansı\"\n"
+            "🎯 **Pattern Match**: \"pattern eşleşme\", \"benzerlik durumu\"\n"
             "🤖 **Agent**: \"bot durumları\", \"scout sağlık\"\n"
             "📋 **Watchlist**: \"izleme listesi\", \"ekle AVAXUSDT\", \"kaldır ADA\"\n"
             "📊 **Veri**: \"kaç trade var?\", \"istatistikler\"\n"
@@ -1003,6 +1069,24 @@ class ChatEngine:
             for s in sym_sims:
                 entry = float(s.get('entry_price', 0))
                 parts.append(f"👻 Açık Sim: {s['side'].upper()} @ ${entry:,.2f}")
+
+        # PatternMatcher derin analizi
+        pm_agent = self.agents.get("PatternMatcher")
+        if pm_agent:
+            try:
+                pm = await pm_agent.deep_analyze_symbol(symbol)
+                overall = pm.get("overall_signal", {})
+                if overall.get("matched_timeframes", 0) > 0:
+                    parts.append(
+                        f"🎯 PatternMatcher: {overall.get('direction', '?').upper()} "
+                        f"(güven %{overall.get('confidence', 0) * 100:.1f}, "
+                        f"avg sim={overall.get('avg_similarity', 0):.4f}, "
+                        f"TF={overall.get('matched_timeframes', 0)})"
+                    )
+                else:
+                    parts.append("🎯 PatternMatcher: Eşik üstü eşleşme yok")
+            except Exception as e:
+                logger.debug(f"PatternMatcher deep analyze error: {e}")
 
         # Brain pattern eşleşmesi
         b = ctx.get("brain", {})

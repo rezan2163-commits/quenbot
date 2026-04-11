@@ -16,6 +16,7 @@ from scout_agent import ScoutAgent
 from strategist_agent import StrategistAgent
 from ghost_simulator_agent import GhostSimulatorAgent
 from auditor_agent import AuditorAgent
+from pattern_matcher_agent import PatternMatcherAgent
 from state_tracker import StateTracker
 from risk_manager import RiskManager
 from rca_engine import RCAEngine
@@ -49,6 +50,7 @@ class AgentOrchestrator:
         self.strategist = None
         self.ghost_simulator = None
         self.auditor = None
+        self.pattern_matcher = None
         self.state_tracker = None
         self.risk_manager = None
         self.rca_engine = None
@@ -162,6 +164,7 @@ class AgentOrchestrator:
                                                      state_tracker=self.state_tracker,
                                                      risk_manager=self.risk_manager)
         self.auditor = AuditorAgent(self.db, brain=self.brain, rca_engine=self.rca_engine)
+        self.pattern_matcher = PatternMatcherAgent(self.db, brain=self.brain)
 
         # Parallel agent initialization — utilize multiple cores
         await asyncio.gather(
@@ -169,6 +172,7 @@ class AgentOrchestrator:
             self.strategist.initialize(),
             self.ghost_simulator.initialize(),
             self.auditor.initialize(),
+            self.pattern_matcher.initialize(),
         )
 
         # Chat engine
@@ -177,6 +181,7 @@ class AgentOrchestrator:
         self.chat_engine.register_agent('Strategist', self.strategist)
         self.chat_engine.register_agent('Ghost', self.ghost_simulator)
         self.chat_engine.register_agent('Auditor', self.auditor)
+        self.chat_engine.register_agent('PatternMatcher', self.pattern_matcher)
         self.chat_engine.state_tracker = self.state_tracker
         self.chat_engine.risk_manager = self.risk_manager
         self.chat_engine.rca_engine = self.rca_engine
@@ -230,6 +235,9 @@ class AgentOrchestrator:
 
         # LLM status changes
         bus.subscribe(EventType.LLM_STATUS_CHANGE, self._on_llm_status_change)
+
+        # Pattern match → Brain evaluation → Signal generation
+        bus.subscribe(EventType.PATTERN_MATCH, self._on_pattern_match)
 
         logger.info("✓ Event bus subscriptions wired")
 
@@ -303,6 +311,103 @@ class AgentOrchestrator:
             self._system_mode = "healthy"
             logger.info(f"✓ LLM back online — switching to HEALTHY mode (model: {event.data.get('model', '?')})")
 
+    async def _on_pattern_match(self, event: Event):
+        """PatternMatcher found high-similarity match → Brain evaluates → Signal pipeline."""
+        match_data = event.data
+        symbol = match_data.get('symbol', '')
+        similarity = match_data.get('similarity', 0)
+        match_id = match_data.get('match_id')
+
+        logger.info(f"🎯 Pattern Match event: {symbol} similarity={similarity:.4f}")
+
+        # Brain (Gemma) merkezi karar otoritesi olarak değerlendirir
+        if self.brain:
+            try:
+                decision = await self.brain.evaluate_pattern_match(match_data)
+
+                # DB'ye Brain kararını kaydet
+                if match_id or symbol:
+                    try:
+                        async with self.db.pool.acquire() as conn:
+                            if match_id:
+                                await conn.execute("""
+                                    UPDATE pattern_match_results
+                                    SET brain_decision = $1, brain_reasoning = $2
+                                    WHERE id = $3
+                                """, 'approved' if decision['approved'] else 'rejected',
+                                    decision.get('reasoning', '')[:500],
+                                    match_id)
+                            else:
+                                await conn.execute("""
+                                    UPDATE pattern_match_results
+                                    SET brain_decision = $1, brain_reasoning = $2
+                                    WHERE id = (
+                                        SELECT id FROM pattern_match_results
+                                        WHERE symbol = $3
+                                        ORDER BY created_at DESC
+                                        LIMIT 1
+                                    )
+                                """, 'approved' if decision['approved'] else 'rejected',
+                                    decision.get('reasoning', '')[:500],
+                                    symbol)
+                    except Exception:
+                        pass
+
+                if decision.get('approved'):
+                    raw_direction = decision.get('direction', 'neutral')
+                    trade_direction = 'long' if raw_direction in ('up', 'long') else 'short'
+
+                    # Brain onayladı → Sinyal üret ve pipeline'a gönder
+                    signal_data = {
+                        'symbol': symbol,
+                        'direction': trade_direction,
+                        'signal_type': f"pattern_match_{trade_direction}",
+                        'confidence': decision['confidence'],
+                        'price': float(match_data.get('current_price') or 0),
+                        'source': 'pattern_matcher',
+                        'metadata': {
+                            'raw_direction': raw_direction,
+                            'similarity': similarity,
+                            'euclidean_distance': match_data.get('euclidean_distance'),
+                            'predicted_magnitude': decision['magnitude'],
+                            'match_count': match_data.get('match_count', 0),
+                            'brain_reasoning': decision.get('reasoning', ''),
+                            'llm_analysis': decision.get('llm_analysis'),
+                        },
+                    }
+
+                    # Insert signal to DB
+                    try:
+                        await self.db.insert_signal({
+                            'market_type': 'spot',
+                            'symbol': symbol,
+                            'signal_type': signal_data['signal_type'],
+                            'direction': signal_data['direction'],
+                            'confidence': signal_data['confidence'],
+                            'price': signal_data.get('price', 0),
+                            'timestamp': datetime.utcnow(),
+                            'metadata': signal_data['metadata'],
+                        })
+                    except Exception as e:
+                        logger.debug(f"Signal insert error: {e}")
+
+                    # Signal → RiskManager gate
+                    await self.event_bus.publish(Event(
+                        type=EventType.SIGNAL_GENERATED,
+                        source="pattern_matcher",
+                        data=signal_data,
+                    ))
+
+                    logger.info(f"✅ Brain approved pattern match signal: "
+                                f"{symbol} {decision['direction']} "
+                                f"(confidence={decision['confidence']:.2%})")
+                else:
+                    logger.info(f"🚫 Brain rejected pattern match: {symbol} — "
+                                f"{decision.get('reasoning', '')[:100]}")
+
+            except Exception as e:
+                logger.error(f"Pattern match brain evaluation error: {e}")
+
     async def start(self):
         """Start all agents with crash resilience — one agent failing does NOT kill the system"""
         self.running = True
@@ -313,6 +418,7 @@ class AgentOrchestrator:
             self._resilient_task("Strategist", self.strategist.start),
             self._resilient_task("GhostSimulator", self.ghost_simulator.start),
             self._resilient_task("Auditor", self.auditor.start),
+            self._resilient_task("PatternMatcher", self.pattern_matcher.start),
             self._resilient_task("HealthMonitor", self._health_monitor),
             self._resilient_task("ChatProcessor", self._chat_processor),
             self._resilient_task("DirectiveAPI", self._directive_api_server),
@@ -364,6 +470,7 @@ class AgentOrchestrator:
             await self.strategist.stop()
             await self.ghost_simulator.stop()
             await self.auditor.stop()
+            await self.pattern_matcher.stop()
             if self.task_queue:
                 await self.task_queue.stop()
             if self.llm_client:
@@ -398,11 +505,12 @@ class AgentOrchestrator:
                 await asyncio.sleep(30)
 
                 # ─── Agent health checks (parallel) ───
-                scout_health, strategist_health, ghost_health, auditor_health = await asyncio.gather(
+                scout_health, strategist_health, ghost_health, auditor_health, pm_health = await asyncio.gather(
                     self.scout.health_check(),
                     self.strategist.health_check(),
                     self.ghost_simulator.health_check(),
                     self.auditor.health_check(),
+                    self.pattern_matcher.health_check(),
                 )
                 brain_status = self.brain.get_brain_status()
 
@@ -415,6 +523,8 @@ class AgentOrchestrator:
                         'running' if ghost_health.get('healthy') else 'error', ghost_health),
                     self.db.update_heartbeat('auditor',
                         'running' if auditor_health.get('healthy') else 'error', auditor_health),
+                    self.db.update_heartbeat('pattern_matcher',
+                        'running' if pm_health.get('healthy') else 'error', pm_health),
                     self.db.update_heartbeat('brain', 'running', brain_status),
                     self.db.update_heartbeat('chat_engine', 'running', {
                         'registered_agents': list(self.chat_engine.agents.keys())
@@ -450,7 +560,40 @@ class AgentOrchestrator:
                 # ─── Resource monitoring ───
                 snap = self.resource_monitor.snapshot()
                 self._last_resource_snapshot = snap
-                warnings = self.resource_monitor.check_warnings(snap)
+
+                component_breakdown = {
+                    "scout": {
+                        "healthy": scout_health.get("healthy", False),
+                        "activity_score": float(scout_health.get("trade_counter", 0)) / 5000.0,
+                        "active_connections": scout_health.get("active_connections", 0),
+                    },
+                    "strategist": {
+                        "healthy": strategist_health.get("healthy", False),
+                        "activity_score": float(strategist_health.get("analysis_count", 0)) / 300.0,
+                        "signals_generated": strategist_health.get("signals_generated", 0),
+                    },
+                    "ghost": {
+                        "healthy": ghost_health.get("healthy", False),
+                        "activity_score": float(ghost_health.get("active_simulations", 0)) / 20.0,
+                        "active_simulations": ghost_health.get("active_simulations", 0),
+                    },
+                    "auditor": {
+                        "healthy": auditor_health.get("healthy", False),
+                        "activity_score": float(auditor_health.get("audit_count", 0)) / 100.0,
+                        "audit_count": auditor_health.get("audit_count", 0),
+                    },
+                    "pattern_matcher": {
+                        "healthy": pm_health.get("healthy", False),
+                        "activity_score": float(pm_health.get("scan_count", 0)) / 500.0 +
+                                         float(pm_health.get("match_count", 0)) / 100.0,
+                        "scan_count": pm_health.get("scan_count", 0),
+                        "match_count": pm_health.get("match_count", 0),
+                        "best_similarity": pm_health.get("best_similarity", 0),
+                    },
+                }
+
+                warnings = self.resource_monitor.check_warnings(
+                    snap, component_breakdown=component_breakdown)
                 self._resource_warnings = warnings
 
                 resource_data = snap.to_dict()
@@ -459,6 +602,7 @@ class AgentOrchestrator:
                 resource_data["uptime_seconds"] = int(time.time() - self._start_time)
                 resource_data["event_bus"] = self.event_bus.get_stats()
                 resource_data["agent_restarts"] = dict(self._agent_restart_counts)
+                resource_data["agent_breakdown"] = component_breakdown
                 await self.db.update_heartbeat('system_resources', 'running', resource_data)
 
                 if warnings:
@@ -489,6 +633,7 @@ class AgentOrchestrator:
                             "strategist": strategist_health.get("healthy", False),
                             "ghost": ghost_health.get("healthy", False),
                             "auditor": auditor_health.get("healthy", False),
+                            "pattern_matcher": pm_health.get("healthy", False),
                         },
                         "ram_percent": snap.ram_percent,
                         "cpu_percent": snap.cpu_percent,
@@ -510,6 +655,10 @@ class AgentOrchestrator:
                                  f"Win: {ghost_health.get('win_rate', 0):.0f}%)")
                     logger.info(f"  Auditor: {'✓' if auditor_health.get('healthy') else '✗'} "
                                  f"(#{auditor_health.get('audit_count', 0)})")
+                    logger.info(f"  PatternMatcher: {'✓' if pm_health.get('healthy') else '✗'} "
+                                 f"(scans={pm_health.get('scan_count', 0)} | "
+                                 f"matches={pm_health.get('match_count', 0)} | "
+                                 f"best={pm_health.get('best_similarity', 0):.4f})")
                     logger.info(f"  LLM: {'✓ ' + self.llm_client.model if self._llm_available else '✗ Kapalı (Degraded)'}")
                     logger.info(f"  💻 CPU={snap.cpu_percent:.0f}% RAM={snap.ram_percent:.0f}% "
                                  f"({snap.ram_used_mb:.0f}/{snap.ram_total_mb:.0f}MB) "
@@ -603,7 +752,51 @@ class AgentOrchestrator:
             """System resource snapshot + warnings — mobile-friendly compact JSON."""
             snap = self.resource_monitor.snapshot()
             self._last_resource_snapshot = snap
-            warnings = self.resource_monitor.check_warnings(snap)
+
+            agent_breakdown = {}
+            try:
+                scout_h, strategist_h, ghost_h, auditor_h, pm_h = await asyncio.gather(
+                    self.scout.health_check(),
+                    self.strategist.health_check(),
+                    self.ghost_simulator.health_check(),
+                    self.auditor.health_check(),
+                    self.pattern_matcher.health_check(),
+                )
+                agent_breakdown = {
+                    "scout": {
+                        "healthy": scout_h.get("healthy", False),
+                        "activity_score": float(scout_h.get("trade_counter", 0)) / 5000.0,
+                        "active_connections": scout_h.get("active_connections", 0),
+                    },
+                    "strategist": {
+                        "healthy": strategist_h.get("healthy", False),
+                        "activity_score": float(strategist_h.get("analysis_count", 0)) / 300.0,
+                        "signals_generated": strategist_h.get("signals_generated", 0),
+                    },
+                    "ghost": {
+                        "healthy": ghost_h.get("healthy", False),
+                        "activity_score": float(ghost_h.get("active_simulations", 0)) / 20.0,
+                        "active_simulations": ghost_h.get("active_simulations", 0),
+                    },
+                    "auditor": {
+                        "healthy": auditor_h.get("healthy", False),
+                        "activity_score": float(auditor_h.get("audit_count", 0)) / 100.0,
+                        "audit_count": auditor_h.get("audit_count", 0),
+                    },
+                    "pattern_matcher": {
+                        "healthy": pm_h.get("healthy", False),
+                        "activity_score": float(pm_h.get("scan_count", 0)) / 500.0 +
+                                         float(pm_h.get("match_count", 0)) / 100.0,
+                        "scan_count": pm_h.get("scan_count", 0),
+                        "match_count": pm_h.get("match_count", 0),
+                        "best_similarity": pm_h.get("best_similarity", 0),
+                    },
+                }
+            except Exception:
+                agent_breakdown = {}
+
+            warnings = self.resource_monitor.check_warnings(
+                snap, component_breakdown=agent_breakdown)
             self._resource_warnings = warnings
 
             # Compact response for mobile
@@ -629,6 +822,7 @@ class AgentOrchestrator:
                 "uptime_seconds": int(time.time() - self._start_time),
                 "agent_restarts": dict(self._agent_restart_counts),
                 "event_bus": self.event_bus.get_stats(),
+                "agent_breakdown": agent_breakdown,
                 "resource_history": self.resource_monitor.get_history(),
             })
 
@@ -642,6 +836,11 @@ class AgentOrchestrator:
             llm_healthy = self._llm_available
             st = self.state_tracker.state if self.state_tracker else {}
             brain = self.brain.get_brain_status() if self.brain else {}
+            pm = {}
+            try:
+                pm = await self.pattern_matcher.health_check()
+            except Exception:
+                pm = {}
 
             return web.json_response({
                 "mode": self._system_mode,
@@ -663,6 +862,13 @@ class AgentOrchestrator:
                 "brain": {
                     "patterns": brain.get("total_patterns", 0),
                     "accuracy": round(brain.get("accuracy", 0) * 100, 1),
+                    "pattern_match": brain.get("pattern_match", {}),
+                },
+                "pattern_matcher": {
+                    "ok": pm.get("healthy", False),
+                    "scans": pm.get("scan_count", 0),
+                    "matches": pm.get("match_count", 0),
+                    "best_similarity": pm.get("best_similarity", 0),
                 },
                 "warnings": [{"level": w["level"], "comp": w["component"],
                               "msg": w["message"][:120]} for w in warnings],
@@ -673,6 +879,23 @@ class AgentOrchestrator:
             """Recent event bus activity."""
             stats = self.event_bus.get_stats()
             return web.json_response(stats)
+
+        async def get_pattern_matches(request):
+            """Recent pattern match results for dashboard and mobile clients."""
+            try:
+                symbol = request.query.get("symbol")
+                limit = int(request.query.get("limit", "50"))
+                limit = max(1, min(limit, 200))
+
+                rows = await self.db.get_recent_pattern_matches(symbol=symbol, limit=limit)
+
+                return web.json_response({
+                    "count": len(rows),
+                    "symbol": symbol,
+                    "items": rows,
+                })
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=400)
 
         # Kill stale port binding before starting
         import socket
@@ -689,6 +912,7 @@ class AgentOrchestrator:
         app.router.add_get("/api/system/resources", get_system_resources)
         app.router.add_get("/api/system/summary", get_system_summary)
         app.router.add_get("/api/system/events", get_event_log)
+        app.router.add_get("/api/pattern/matches", get_pattern_matches)
 
         runner = web.AppRunner(app)
         await runner.setup()

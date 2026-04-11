@@ -48,6 +48,10 @@ class EventType(str, Enum):
     LLM_STATUS_CHANGE = "system.llm_status"
     HEALTH_REPORT = "system.health_report"
 
+    # Pattern Matcher events
+    PATTERN_MATCH = "pattern.match"
+    PATTERN_NO_MATCH = "pattern.no_match"
+
     # Directive events
     DIRECTIVE_UPDATED = "directive.updated"
 

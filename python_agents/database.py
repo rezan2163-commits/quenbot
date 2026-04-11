@@ -353,6 +353,28 @@ class Database:
                 )
             """)
 
+            # Pattern match results table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS pattern_match_results (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(20) NOT NULL,
+                    timeframe VARCHAR(10) NOT NULL,
+                    matched_signature_id INTEGER,
+                    similarity DECIMAL(6, 4) NOT NULL,
+                    euclidean_distance DECIMAL(12, 6) NOT NULL,
+                    matched_direction VARCHAR(10),
+                    matched_change_pct DECIMAL(10, 6),
+                    predicted_direction VARCHAR(10),
+                    predicted_magnitude DECIMAL(10, 6),
+                    current_vector JSONB,
+                    confidence DECIMAL(5, 4) DEFAULT 0,
+                    brain_decision VARCHAR(20),
+                    brain_reasoning TEXT,
+                    outcome_pct DECIMAL(10, 6),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Create indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_timestamp ON trades(symbol, timestamp)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_price_movements_symbol_time ON price_movements(symbol, start_time)")
@@ -363,6 +385,7 @@ class Database:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_watchlist_active ON user_watchlist(active)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_correction_notes_type ON correction_notes(signal_type, applied)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_historical_signatures_symbol ON historical_signatures(symbol, timeframe)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_pattern_match_results_symbol ON pattern_match_results(symbol, created_at)")
 
             # ── Migrations: widen VARCHAR columns that were too narrow ──
             await conn.execute("""
@@ -1089,3 +1112,65 @@ class Database:
                     ORDER BY timestamp ASC LIMIT 300
                 """, symbol, start_time, end_time)
             return [dict(row) for row in rows]
+
+    # Pattern match result operations
+    async def insert_pattern_match_result(self, data: Dict[str, Any]) -> int:
+        """Pattern eşleşme sonucunu kaydet"""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval("""
+                INSERT INTO pattern_match_results
+                (symbol, timeframe, matched_signature_id, similarity,
+                 euclidean_distance, matched_direction, matched_change_pct,
+                 predicted_direction, predicted_magnitude, current_vector,
+                 confidence, brain_decision, brain_reasoning)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                RETURNING id
+            """, data['symbol'], data['timeframe'],
+                data.get('matched_signature_id'),
+                data['similarity'], data['euclidean_distance'],
+                data.get('matched_direction'), data.get('matched_change_pct'),
+                data.get('predicted_direction'), data.get('predicted_magnitude'),
+                _dumps(data.get('current_vector', [])),
+                data.get('confidence', 0),
+                data.get('brain_decision'), data.get('brain_reasoning'))
+
+    async def get_recent_pattern_matches(self, symbol: str = None,
+                                          limit: int = 50) -> List[Dict[str, Any]]:
+        """Son pattern eşleşme sonuçlarını getir"""
+        async with self.pool.acquire() as conn:
+            if symbol:
+                rows = await conn.fetch("""
+                    SELECT pmr.*, hs.change_pct as hist_change_pct,
+                           hs.direction as hist_direction
+                    FROM pattern_match_results pmr
+                    LEFT JOIN historical_signatures hs ON pmr.matched_signature_id = hs.id
+                    WHERE pmr.symbol = $1
+                    ORDER BY pmr.created_at DESC LIMIT $2
+                """, symbol, limit)
+            else:
+                rows = await conn.fetch("""
+                    SELECT pmr.*, hs.change_pct as hist_change_pct,
+                           hs.direction as hist_direction
+                    FROM pattern_match_results pmr
+                    LEFT JOIN historical_signatures hs ON pmr.matched_signature_id = hs.id
+                    ORDER BY pmr.created_at DESC LIMIT $1
+                """, limit)
+            result = []
+            for row in rows:
+                d = dict(row)
+                if isinstance(d.get('current_vector'), str):
+                    try:
+                        d['current_vector'] = json.loads(d['current_vector'])
+                    except Exception:
+                        pass
+                # Normalize Decimal/datetime/etc. for JSON endpoints.
+                result.append(json.loads(_dumps(d)))
+            return result
+
+    async def update_pattern_match_outcome(self, match_id: int, outcome_pct: float):
+        """Pattern eşleşme sonucunun gerçek sonucunu güncelle"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE pattern_match_results SET outcome_pct = $1
+                WHERE id = $2
+            """, outcome_pct, match_id)

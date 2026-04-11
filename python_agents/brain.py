@@ -151,6 +151,13 @@ class BrainModule:
         # Otomatik kalibrasyon
         self._calibration_counter = 0
         self._calibration_log: List[Dict] = []
+        # Pattern matcher değerlendirme istatistikleri
+        self._pattern_match_stats = {
+            'total_evaluated': 0,
+            'total_approved': 0,
+            'total_vetoed': 0,
+            'last_match': None,
+        }
 
     async def initialize(self):
         """Geçmiş pattern'ları yükle"""
@@ -416,6 +423,145 @@ class BrainModule:
             return 0.0
         return self.prediction_accuracy['correct'] / self.prediction_accuracy['total']
 
+    # ─── Pattern Match (Euclidean Distance) Integration ───
+
+    async def evaluate_pattern_match(self, match_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        PatternMatcherAgent'tan gelen Euclidean distance eşleşmesini değerlendir.
+        Brain merkezi karar otoritesi olarak:
+          1. Eşleşme kalitesini kontrol et
+          2. Mevcut öğrenme verileriyle çapraz doğrula
+          3. LLM (Gemma) ile sentezle (varsa)
+          4. Sinyal üretilmeli mi karar ver
+        """
+        symbol = match_data.get('symbol', '')
+        similarity = match_data.get('similarity', 0)
+        direction = match_data.get('predicted_direction', 'neutral')
+        magnitude = match_data.get('predicted_magnitude', 0)
+        confidence = match_data.get('confidence', 0)
+
+        decision = {
+            'symbol': symbol,
+            'approved': False,
+            'direction': direction,
+            'magnitude': magnitude,
+            'confidence': confidence,
+            'reasoning': '',
+        }
+
+        self._pattern_match_stats['total_evaluated'] += 1
+        self._pattern_match_stats['last_match'] = {
+            'symbol': symbol,
+            'timeframe': match_data.get('timeframe'),
+            'similarity': similarity,
+            'timestamp': datetime.utcnow().isoformat(),
+        }
+
+        # 1. Minimum kalite kontrolü
+        if similarity < 0.90:
+            decision['reasoning'] = f"Benzerlik eşik altı: {similarity:.4f} < 0.90"
+            self._pattern_match_stats['total_vetoed'] += 1
+            return decision
+
+        # 2. Brain'in sinyal geçmişiyle çapraz kontrol
+        sig_type = f"pattern_match_{direction}"
+        should_signal = self.should_generate_signal(symbol, direction, confidence)
+
+        if not should_signal:
+            decision['reasoning'] = (
+                f"Brain öğrenme verileri bu yönde ({direction}) sinyal bastırıyor. "
+                f"Geçmiş doğruluk düşük."
+            )
+            self._pattern_match_stats['total_vetoed'] += 1
+            return decision
+
+        # 3. LLM (Gemma) ile sentez (varsa)
+        llm_reasoning = None
+        bridge = _get_llm_bridge()
+        if bridge:
+            try:
+                llm_reasoning = await self._llm_evaluate_pattern_match(
+                    bridge, match_data)
+            except Exception as e:
+                logger.debug(f"LLM pattern eval error: {e}")
+
+        # 4. Karar ver
+        decision['approved'] = True
+        reasoning_parts = [
+            f"Euclidean eşleşme onaylandı: {symbol} {direction}",
+            f"Benzerlik: {similarity:.4f}, Güven: {confidence:.2%}",
+            f"Beklenen hareket: {magnitude:+.2%}",
+        ]
+
+        if llm_reasoning:
+            decision['llm_analysis'] = llm_reasoning
+            reasoning_parts.append(f"Gemma: {llm_reasoning.get('summary', '')}")
+            # Gemma veto edebilir
+            if llm_reasoning.get('veto', False):
+                decision['approved'] = False
+                reasoning_parts.append("⚠ Gemma bu sinyali veto etti")
+
+        decision['reasoning'] = " | ".join(reasoning_parts)
+
+        if decision['approved']:
+            self._pattern_match_stats['total_approved'] += 1
+        else:
+            self._pattern_match_stats['total_vetoed'] += 1
+
+        # 5. Öğrenme kaydı
+        self._record_pattern_match_prediction(symbol, direction, confidence)
+
+        return decision
+
+    async def _llm_evaluate_pattern_match(self, bridge, match_data: Dict) -> Optional[Dict]:
+        """Gemma ile pattern match değerlendirmesi"""
+        prompt = (
+            f"Pattern Match Analizi:\n"
+            f"Sembol: {match_data.get('symbol')}\n"
+            f"Zaman dilimi: {match_data.get('timeframe')}\n"
+            f"Euclidean benzerlik: {match_data.get('similarity', 0):.4f}\n"
+            f"Tahmin yönü: {match_data.get('predicted_direction')}\n"
+            f"Tahmin büyüklüğü: {match_data.get('predicted_magnitude', 0):+.2%}\n"
+            f"Eşleşen geçmiş hareket: {match_data.get('matched_change_pct', 0):+.2%} "
+            f"({match_data.get('matched_direction')})\n"
+            f"Eşleşme sayısı: {match_data.get('match_count', 0)}\n"
+            f"İndikatörler: {json.dumps(match_data.get('indicators', {}))}\n"
+            f"Hacim profili: {json.dumps(match_data.get('volume_profile', {}))}\n\n"
+            f"Bu pattern eşleşmesini değerlendir. JSON yanıt:\n"
+            f'{{"approve": true/false, "veto": true/false, '
+            f'"risk_level": "low/medium/high", '
+            f'"summary": "kısa değerlendirme"}}'
+        )
+        try:
+            result = await bridge.brain_predict_with_context(
+                prompt, context_type="pattern_match")
+            if isinstance(result, str):
+                # Try to parse JSON from response
+                import re
+                json_match = re.search(r'\{[^}]+\}', result)
+                if json_match:
+                    return json.loads(json_match.group())
+            return {'summary': str(result)[:200]} if result else None
+        except Exception as e:
+            logger.debug(f"LLM pattern eval failed: {e}")
+            return None
+
+    def _record_pattern_match_prediction(self, symbol: str, direction: str,
+                                          confidence: float):
+        """Pattern match tahminini öğrenme sistemine kaydet"""
+        sig_type = f"pattern_match_{direction}"
+        if sig_type not in self.signal_type_scores:
+            self.signal_type_scores[sig_type] = {
+                'correct': 0, 'total': 0, 'total_pnl': 0
+            }
+        # Tahmin kaydı (sonuç henüz bilinmiyor)
+        self.signal_type_scores[sig_type]['total'] += 1
+        self.last_learning_update = datetime.utcnow()
+
+    def get_pattern_match_stats(self) -> Dict[str, Any]:
+        """Pattern match istatistiklerini döndür"""
+        return dict(self._pattern_match_stats)
+
     def should_generate_signal(self, symbol: str, direction: str,
                                 confidence: float, min_return: float = 0.02) -> bool:
         """Sinyal üretilmeli mi? Öğrenme verileriyle karar ver"""
@@ -453,6 +599,8 @@ class BrainModule:
         status['calibration_count'] = len(self._calibration_log)
         if self._calibration_log:
             status['last_calibration'] = self._calibration_log[-1].get('timestamp')
+        # Pattern match stats
+        status['pattern_match'] = self.get_pattern_match_stats()
         return status
 
     def enhanced_analyze(self, snapshot, indicators: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
