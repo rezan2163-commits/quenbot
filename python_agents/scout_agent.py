@@ -616,11 +616,10 @@ class ScoutAgent:
         except Exception as e:
             logger.debug(f"Watchlist DB save: {e}")
 
-        # Anında REST API'den veri çek
+        # Anında REST API'den veri çek (Binance only; Bybit uses WebSocket)
         logger.info(f"🆕 Fetching data for new symbol: {symbol}")
         for market_type in ['spot', 'futures']:
             await self._fetch_binance_rest(market_type, symbol)
-            await self._fetch_bybit_rest(market_type, symbol)
 
         logger.info(f"🆕 Live tracking started: {symbol}")
 
@@ -656,7 +655,6 @@ class ScoutAgent:
                         self.price_cache[symbol] = 0.0
                         for market_type in ['spot', 'futures']:
                             await self._fetch_binance_rest(market_type, symbol)
-                            await self._fetch_bybit_rest(market_type, symbol)
 
                     # WebSocket yeniden bağlan
                     await self._reconnect_websockets()

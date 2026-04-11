@@ -126,18 +126,22 @@ class LLMClient:
                 available = [m.get("name", "") for m in data.get("models", [])]
                 if available:
                     logger.info(f"Ollama models available: {available}")
-                    # If current model is not available, find best match
-                    if not any(self.model in m for m in available):
-                        for candidate in MODEL_CANDIDATES:
-                            if any(candidate in m for m in available):
-                                old_model = self.model
-                                self.model = candidate
-                                logger.info(f"Model switched: {old_model} → {self.model}")
+                    # Find best model from candidates list
+                    matched = False
+                    for candidate in MODEL_CANDIDATES:
+                        for avail in available:
+                            # Match both exact and prefix (e.g. "gemma4-trading" matches "gemma4-trading:latest")
+                            if avail == candidate or avail.startswith(candidate + ":"):
+                                if self.model != avail:
+                                    logger.info(f"Model selected: {avail}")
+                                self.model = avail
+                                matched = True
                                 break
-                        else:
-                            # Use whatever is available
-                            self.model = available[0]
-                            logger.info(f"Using first available model: {self.model}")
+                        if matched:
+                            break
+                    if not matched:
+                        self.model = available[0]
+                        logger.info(f"Using first available model: {self.model}")
                     return True
                 else:
                     logger.warning("Ollama running but no models installed")
@@ -163,15 +167,18 @@ class LLMClient:
         """Ensure a working model is loaded. Pull one if needed."""
         models = await self.list_models()
         if models:
-            # Check if our model exists
-            if any(self.model in m for m in models):
-                return True
+            # Check if our model exists (exact or prefix match)
+            for m in models:
+                if m == self.model or m.startswith(self.model + ":"):
+                    self.model = m
+                    return True
             # Try to find a candidate
             for candidate in MODEL_CANDIDATES:
-                if any(candidate in m for m in models):
-                    self.model = candidate
-                    logger.info(f"Using existing model: {self.model}")
-                    return True
+                for m in models:
+                    if m == candidate or m.startswith(candidate + ":"):
+                        self.model = m
+                        logger.info(f"Using existing model: {self.model}")
+                        return True
 
         # No suitable model found — try to pull Gemma
         logger.info("No suitable model found. Attempting to pull gemma3:4b-it-q4_K_M...")
@@ -239,6 +246,7 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
         temperature: float = 0.3,
         json_mode: bool = False,
         timeout_override: Optional[int] = None,
+        model_override: Optional[str] = None,
     ) -> LLMResponse:
         """
         Generate a response from the local LLM.
@@ -246,7 +254,7 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
         """
         async with self._semaphore:
             return await self._generate_inner(
-                prompt, system, temperature, json_mode, timeout_override
+                prompt, system, temperature, json_mode, timeout_override, model_override
             )
 
     async def _generate_inner(
@@ -256,13 +264,16 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
         temperature: float,
         json_mode: bool,
         timeout_override: Optional[int],
+        model_override: Optional[str] = None,
     ) -> LLMResponse:
         prompt = self._trim_prompt(prompt)
         if system:
             system = self._trim_prompt(system)
 
+        use_model = model_override or self.model
+
         payload = {
-            "model": self.model,
+            "model": use_model,
             "prompt": prompt,
             "stream": False,
             "options": {
