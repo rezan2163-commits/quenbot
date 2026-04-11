@@ -933,6 +933,51 @@ app.get("/api/llm/queue", async (req, res) => {
   } catch { res.json({ queue_size: 0, error: "Queue API unavailable" }); }
 });
 
+/* ═══ DATA AUDIT / VALIDATION ═══ */
+app.get("/api/audit/validate", async (req, res) => {
+  try {
+    const issues: { field: string; issue: string; severity: string; count: number }[] = [];
+
+    // Check confidence values outside valid range
+    const [badConf] = await sql`SELECT COUNT(*)::int AS count FROM signals WHERE confidence IS NOT NULL AND (confidence < 0 OR confidence > 1)`;
+    if (badConf.count > 0) issues.push({ field: "signals.confidence", issue: `${badConf.count} sinyal güven değeri 0-1 aralığı dışında`, severity: "warning", count: badConf.count });
+
+    // Check simulations with invalid PnL
+    const [badPnl] = await sql`SELECT COUNT(*)::int AS count FROM simulations WHERE status = 'closed' AND pnl IS NULL`;
+    if (badPnl.count > 0) issues.push({ field: "simulations.pnl", issue: `${badPnl.count} kapalı simülasyonda PnL değeri yok`, severity: "error", count: badPnl.count });
+
+    // Check simulations missing exit data
+    const [noExit] = await sql`SELECT COUNT(*)::int AS count FROM simulations WHERE status = 'closed' AND (exit_price IS NULL OR exit_time IS NULL)`;
+    if (noExit.count > 0) issues.push({ field: "simulations.exit", issue: `${noExit.count} kapalı simülasyonda çıkış bilgisi eksik`, severity: "error", count: noExit.count });
+
+    // Check stale open simulations (>24h)
+    const [staleSim] = await sql`SELECT COUNT(*)::int AS count FROM simulations WHERE status = 'open' AND entry_time < NOW() - INTERVAL '24 hours'`;
+    if (staleSim.count > 0) issues.push({ field: "simulations.stale", issue: `${staleSim.count} simülasyon 24 saatten uzun süredir açık`, severity: "warning", count: staleSim.count });
+
+    // Check signals with zero/null prices
+    const [noPrice] = await sql`SELECT COUNT(*)::int AS count FROM signals WHERE price IS NULL OR price = 0`;
+    if (noPrice.count > 0) issues.push({ field: "signals.price", issue: `${noPrice.count} sinyalde fiyat bilgisi yok`, severity: "warning", count: noPrice.count });
+
+    // Data freshness
+    const [latestTrade] = await sql`SELECT MAX(timestamp) AS ts FROM trades`;
+    const tradeAge = latestTrade?.ts ? Math.floor((Date.now() - new Date(latestTrade.ts).getTime()) / 60000) : -1;
+    if (tradeAge > 5) issues.push({ field: "trades.freshness", issue: `Son trade ${tradeAge} dakika önce - veri akışı durmuş olabilir`, severity: tradeAge > 30 ? "error" : "warning", count: 1 });
+
+    const [latestSignal] = await sql`SELECT MAX(created_at) AS ts FROM signals`;
+    const sigAge = latestSignal?.ts ? Math.floor((Date.now() - new Date(latestSignal.ts).getTime()) / 60000) : -1;
+    if (sigAge > 30) issues.push({ field: "signals.freshness", issue: `Son sinyal ${sigAge} dakika önce`, severity: "warning", count: 1 });
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      total_issues: issues.length,
+      issues,
+      status: issues.some(i => i.severity === "error") ? "error" : issues.length > 0 ? "warning" : "ok"
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 app.listen(port, async () => {
   await connectDatabase();
   await createTables();

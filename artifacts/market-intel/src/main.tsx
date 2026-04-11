@@ -18,11 +18,13 @@ type BrainStatus = { pattern_count: number; learning: { total: number; correct: 
 type Tab = "overview" | "terminal" | "signals" | "simulations" | "brain" | "mastercontrol" | "system";
 
 /* ─── Helpers ─── */
-const fmt = (v: any, d = 2) => { const n = Number(v); return isNaN(n) ? "0" : new Intl.NumberFormat("en-US", { maximumFractionDigits: d }).format(n); };
-const fmtUsd = (v: any) => `$${fmt(v)}`;
+const fmt = (v: any, d = 2) => { const n = Number(v); return isNaN(n) ? "0" : new Intl.NumberFormat("en-US", { maximumFractionDigits: d, minimumFractionDigits: d }).format(n); };
+const smartDecimals = (v: any): number => { const n = Math.abs(Number(v)); if (isNaN(n) || n === 0) return 2; if (n >= 100) return 2; if (n >= 1) return 4; if (n >= 0.01) return 6; return 8; };
+const fmtUsd = (v: any) => { const n = Number(v); return isNaN(n) ? '$0.00' : `$${fmt(v, smartDecimals(v))}`; };
 const fmtPct = (v: any) => { const n = Number(v); return `${isNaN(n) ? 0 : n >= 0 ? "+" : ""}${(isNaN(n) ? 0 : n).toFixed(2)}%`; };
 const fmtTime = (s: string) => { try { return new Date(s).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }); } catch { return "—"; } };
-const fmtDT = (s: string) => { try { const d = new Date(s); return `${d.toLocaleDateString("tr-TR", { day: "2-digit", month: "short" })} ${d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}`; } catch { return "—"; } };
+const fmtDT = (s: string) => { try { const d = new Date(s); return `${d.toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric" })} ${d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`; } catch { return "—"; } };
+const safeConf = (v: any): number => { const n = Number(v); if (isNaN(n)) return 0; return n > 1 ? Math.min(n, 100) : Math.min(n * 100, 100); };
 const cls = (...c: (string | false | undefined | null)[]) => c.filter(Boolean).join(" ");
 const sn = (v: any, d = 0): number => { const n = Number(v); return isNaN(n) ? d : n; };
 const ago = (m: number) => { if (m < 60) return `${m}dk`; if (m < 1440) return `${Math.floor(m / 60)}sa ${m % 60}dk`; return `${Math.floor(m / 1440)}g`; };
@@ -32,6 +34,12 @@ const sigLabel = (t: string): string => { if (!t) return '—'; const m: R = { e
 const stInfo = (st: string) => { if (st === 'pending') return { l: 'Bekliyor', c: 'badge-w' }; if (st === 'processed') return { l: 'İşlendi', c: 'badge-g' }; if (st?.startsWith('risk_')) return { l: 'Risk Red', c: 'badge-r' }; if (st?.startsWith('filtered')) return { l: 'Filtrelendi', c: 'badge-w' }; return { l: st || '—', c: '' }; };
 
 const apiFetch = async (url: string) => { try { const r = await fetch(url); return r.ok ? r.json() : null; } catch { return null; } };
+
+/* ─── Skeleton Loader ─── */
+function Skeleton({ w = '100%', h = 20 }: { w?: string | number; h?: number }) {
+  return <div className="skeleton" style={{ width: w, height: h }} />;
+}
+function KPISkeleton() { return <div className="kpi"><Skeleton w={60} h={28} /><Skeleton w={80} h={14} /></div>; }
 
 /* ─── Sparkline ─── */
 function Spark({ data, color = "var(--c)", h = 32, w = 120 }: { data: number[]; color?: string; h?: number; w?: number }) {
@@ -138,12 +146,14 @@ function App() {
   // Master Control
   const [masterDir, setMasterDir] = useState(""); const [dirSaving, setDirSaving] = useState(false); const [dirStatus, setDirStatus] = useState<string | null>(null);
   const [llmSt, setLlmSt] = useState<R | null>(null); const [queueSt, setQueueSt] = useState<R | null>(null);
+  const [auditValidation, setAuditValidation] = useState<R | null>(null);
   // Signal filters
   const [sigFilter, setSigFilter] = useState<'all' | 'pending' | 'processed' | 'rejected'>('all');
   const [sigDir, setSigDir] = useState<'all' | 'long' | 'short'>('all');
   const [sigMkt, setSigMkt] = useState<'all' | 'spot' | 'futures'>('all');
   // Position calculator
   const [calcEntry, setCalcEntry] = useState(""); const [calcSL, setCalcSL] = useState(""); const [calcRisk, setCalcRisk] = useState("100");
+  const [initialLoading, setInitialLoading] = useState(true);
 
   const prevPrices = useRef<Record<string, number>>({});
 
@@ -219,21 +229,25 @@ function App() {
     if (cor) setCorrections(Array.isArray(cor) ? cor : []);
     if (sig2) setSignatures(Array.isArray(sig2) ? sig2 : []);
     try {
-      const [dr, lr, qr] = await Promise.all([
-        apiFetch("/api/directives"), apiFetch("/api/llm/status"), apiFetch("/api/llm/queue"),
+      const [dr, lr, qr, av] = await Promise.all([
+        apiFetch("/api/directives"), apiFetch("/api/llm/status"), apiFetch("/api/llm/queue"), apiFetch("/api/audit/validate"),
       ]);
       if (dr?.master_directive !== undefined && !dirSaving) setMasterDir(dr.master_directive);
       if (lr) setLlmSt(lr);
       if (qr) setQueueSt(qr);
+      if (av) setAuditValidation(av);
     } catch {}
   }, [dirSaving]);
 
   useEffect(() => {
-    fetchFast(); fetchMed(); fetchSlow();
+    // Stagger initial loads: fast first, then medium, then slow
+    fetchFast().then(() => setInitialLoading(false));
+    const t1 = setTimeout(() => fetchMed(), 300);
+    const t2 = setTimeout(() => fetchSlow(), 800);
     const f1 = setInterval(fetchFast, 3000);
     const f2 = setInterval(fetchMed, 10000);
     const f3 = setInterval(fetchSlow, 30000);
-    return () => { clearInterval(f1); clearInterval(f2); clearInterval(f3); };
+    return () => { clearInterval(f1); clearInterval(f2); clearInterval(f3); clearTimeout(t1); clearTimeout(t2); };
   }, [selSym]);
 
   /* ── Derived ── */
@@ -285,6 +299,7 @@ function App() {
 
   return (
     <div className="app">
+      {initialLoading && <div className="loading-overlay"><div className="loading-spinner" /><div className="loading-text">QuenBot PRO yükleniyor...</div></div>}
       {/* ═══ TOP NAV ═══ */}
       <header className="topnav">
         <div className="topnav-left">
@@ -490,7 +505,7 @@ function App() {
               <thead><tr><th>Coin</th><th>Yön</th><th>Fiyat</th><th>Strateji</th><th>Güven</th><th>Hedef</th><th>Piyasa</th><th>Durum</th><th>Zaman</th></tr></thead>
               <tbody>
                 {filteredSignals.slice(0, 40).map((s, i) => {
-                  const m = safeMeta(s.metadata), dir = getDir(s), conf = sn(s.confidence) * 100, price = sn(s.price);
+                  const m = safeMeta(s.metadata), dir = getDir(s), conf = safeConf(s.confidence), price = sn(s.price);
                   const target = m.target_pct != null ? sn(m.target_pct) : null;
                   const mkt = (m.market_type || s.market_type || 'spot').toUpperCase();
                   const si = stInfo(s.status);
@@ -568,10 +583,21 @@ function App() {
                 const entry = sn(s.entry_price), lp = prices.find(p => p.symbol === s.symbol), cur = lp ? lp.price : entry;
                 const pnl = entry > 0 ? ((s.side === 'long' ? (cur - entry) : (entry - cur)) / entry * 100) : 0;
                 const dur = s.entry_time ? Math.floor((Date.now() - new Date(s.entry_time).getTime()) / 60000) : 0;
+                const tp = sn(s.take_profit_price || s.target_price);
+                const sl = sn(s.stop_loss_price);
+                const conf = safeConf(s.confidence);
                 return (
                   <div key={s.id || i} className={cls("sim-card", pnl >= 0 ? "sim-win" : "sim-loss")}>
                     <div className="sim-top"><div className="sim-coin"><strong>{(s.symbol || '').replace('USDT', '')}</strong><span className={cls("dir-sm", s.side === 'long' ? "dir-l" : "dir-s")}>{s.side === 'long' ? '↑ LONG' : '↓ SHORT'}</span></div><div className={cls("sim-pnl", pnl >= 0 ? "t-g" : "t-r")}>{pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}%</div></div>
-                    <div className="sim-body"><div><span className="t-m">Giriş:</span> <span className="mono">{fmtUsd(entry)}</span></div><div><span className="t-m">Güncel:</span> <span className="mono">{fmtUsd(cur)}</span></div><div><span className="t-m">Süre:</span> {ago(dur)}</div></div>
+                    <div className="sim-body">
+                      <div><span className="t-m">Giriş:</span> <span className="mono">{fmtUsd(entry)}</span></div>
+                      <div><span className="t-m">Güncel:</span> <span className="mono">{fmtUsd(cur)}</span></div>
+                      {tp > 0 && <div><span className="t-m">Hedef:</span> <span className="mono t-g">{fmtUsd(tp)}</span></div>}
+                      {sl > 0 && <div><span className="t-m">Stop:</span> <span className="mono t-r">{fmtUsd(sl)}</span></div>}
+                      {conf > 0 && <div><span className="t-m">Güven:</span> <span className="mono">{conf.toFixed(0)}%</span></div>}
+                      <div><span className="t-m">Açılış:</span> <span className="mono">{s.entry_time ? fmtDT(s.entry_time) : '—'}</span></div>
+                      <div><span className="t-m">Süre:</span> {ago(dur)}</div>
+                    </div>
                   </div>
                 );
               })}
@@ -579,10 +605,10 @@ function App() {
           </div>}
 
           <div className="card"><div className="card-h"><h3>Simülasyon Geçmişi</h3><span className="badge">{sims.length}</span></div>
-            <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Coin</th><th>Yön</th><th>Giriş</th><th>Çıkış</th><th>PnL</th><th>PnL %</th><th>Giriş Zamanı</th><th>Çıkış Zamanı</th><th>Durum</th></tr></thead><tbody>
+            <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Coin</th><th>Yön</th><th>Giriş</th><th>Hedef</th><th>Çıkış</th><th>PnL</th><th>PnL %</th><th>Güven</th><th>Giriş Zamanı</th><th>Çıkış Zamanı</th><th>Durum</th></tr></thead><tbody>
               {sims.slice(0, 25).map((s, i) => {
-                const pnl = sn(s.pnl), pnlP = sn(s.pnl_pct);
-                return <tr key={s.id || i}><td><strong>{(s.symbol || '').replace('USDT', '')}</strong></td><td><span className={cls("dir-sm", s.side === 'long' ? "dir-l" : "dir-s")}>{s.side === 'long' ? 'LONG' : 'SHORT'}</span></td><td className="mono">{fmtUsd(sn(s.entry_price))}</td><td className="mono">{s.exit_price ? fmtUsd(sn(s.exit_price)) : '—'}</td><td className={pnl >= 0 ? "t-g" : "t-r"} style={{ fontWeight: 700 }}>{s.pnl != null ? `${pnl >= 0 ? '+' : ''}${fmtUsd(pnl)}` : '—'}</td><td className={pnlP >= 0 ? "t-g" : "t-r"} style={{ fontWeight: 700 }}>{s.pnl_pct != null ? `${pnlP >= 0 ? '+' : ''}${pnlP.toFixed(2)}%` : '—'}</td><td className="t-m">{s.entry_time ? fmtDT(s.entry_time) : '—'}</td><td className="t-m">{s.exit_time ? fmtDT(s.exit_time) : '—'}</td><td><span className={cls("badge badge-sm", s.status === 'open' ? 'badge-g' : s.status === 'closed' ? 'badge-b' : '')}>{s.status}</span></td></tr>;
+                const pnl = sn(s.pnl), pnlP = sn(s.pnl_pct), tp = sn(s.take_profit_price || s.target_price), conf = safeConf(s.confidence);
+                return <tr key={s.id || i}><td><strong>{(s.symbol || '').replace('USDT', '')}</strong></td><td><span className={cls("dir-sm", s.side === 'long' ? "dir-l" : "dir-s")}>{s.side === 'long' ? 'LONG' : 'SHORT'}</span></td><td className="mono">{fmtUsd(sn(s.entry_price))}</td><td className="mono">{tp > 0 ? fmtUsd(tp) : '—'}</td><td className="mono">{s.exit_price ? fmtUsd(sn(s.exit_price)) : '—'}</td><td className={pnl >= 0 ? "t-g" : "t-r"} style={{ fontWeight: 700 }}>{s.pnl != null ? `${pnl >= 0 ? '+' : ''}${fmtUsd(pnl)}` : '—'}</td><td className={pnlP >= 0 ? "t-g" : "t-r"} style={{ fontWeight: 700 }}>{s.pnl_pct != null ? `${pnlP >= 0 ? '+' : ''}${pnlP.toFixed(2)}%` : '—'}</td><td className="mono">{conf > 0 ? `${conf.toFixed(0)}%` : '—'}</td><td className="t-m">{s.entry_time ? fmtDT(s.entry_time) : '—'}</td><td className="t-m">{s.exit_time ? fmtDT(s.exit_time) : '—'}</td><td><span className={cls("badge badge-sm", s.status === 'open' ? 'badge-g' : s.status === 'closed' ? 'badge-b' : '')}>{s.status}</span></td></tr>;
               })}</tbody></table>
               {sims.length === 0 && <div className="empty">Henüz simülasyon yok</div>}
             </div>
@@ -590,7 +616,7 @@ function App() {
 
           {rcaResults.length > 0 && <div className="card"><div className="card-h"><h3>Kök Neden Analizi (RCA)</h3><span className="badge badge-r">{rcaResults.length}</span></div>
             <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Coin</th><th>Başarısızlık</th><th>Güven</th><th>Tahmin Vol.</th><th>Gerçek Vol.</th><th>Zaman</th></tr></thead><tbody>
-              {rcaResults.slice(0, 15).map((r, i) => <tr key={i}><td><strong>{(r.symbol || '').replace('USDT', '')}</strong></td><td><span className="badge badge-sm badge-r">{r.failure_type || '—'}</span></td><td>{r.confidence != null ? `${(sn(r.confidence) * 100).toFixed(0)}%` : '—'}</td><td className="mono">{sn(r.predicted_volatility).toFixed(4)}</td><td className="mono">{sn(r.actual_volatility).toFixed(4)}</td><td className="t-m">{r.created_at ? fmtDT(r.created_at) : '—'}</td></tr>)}
+              {rcaResults.slice(0, 15).map((r, i) => <tr key={i}><td><strong>{(r.symbol || '').replace('USDT', '')}</strong></td><td><span className="badge badge-sm badge-r">{r.failure_type || '—'}</span></td><td>{r.confidence != null ? `${safeConf(r.confidence).toFixed(0)}%` : '—'}</td><td className="mono">{sn(r.predicted_volatility).toFixed(4)}</td><td className="mono">{sn(r.actual_volatility).toFixed(4)}</td><td className="t-m">{r.created_at ? fmtDT(r.created_at) : '—'}</td></tr>)}
             </tbody></table></div>
           </div>}
 
@@ -747,6 +773,13 @@ function App() {
             </div>
           </div>}
 
+          {auditValidation && <div className="card"><div className="card-h"><h3>Veri Denetimi</h3><span className={cls("badge", auditValidation.status === 'ok' ? 'badge-g' : auditValidation.status === 'error' ? 'badge-r' : 'badge-w')}>{auditValidation.status === 'ok' ? '✓ Sorun Yok' : `${auditValidation.total_issues} Sorun`}</span></div>
+            {auditValidation.issues?.length > 0 ? <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Alan</th><th>Sorun</th><th>Önem</th><th>Adet</th></tr></thead><tbody>
+              {auditValidation.issues.map((iss: R, i: number) => <tr key={i}><td className="mono" style={{ fontSize: 11 }}>{iss.field}</td><td>{iss.issue}</td><td><span className={cls("audit-badge", iss.severity === 'error' ? 'audit-err' : 'audit-warn')}>{iss.severity === 'error' ? 'Hata' : 'Uyarı'}</span></td><td>{iss.count}</td></tr>)}
+            </tbody></table></div> : <div className="empty" style={{ padding: 16 }}>✅ Tüm veriler tutarlı</div>}
+            <div className="t-m" style={{ padding: '8px 16px', fontSize: 11 }}>Son kontrol: {auditValidation.timestamp ? fmtDT(auditValidation.timestamp) : '—'}</div>
+          </div>}
+
           <div className="card"><div className="card-h"><h3>İzleme Listesi</h3><span className="badge badge-b">{watchlist.length}</span></div>
             <div className="wl-form">
               <input placeholder="Sembol (BTCUSDT)" value={wlSym} onChange={e => setWlSym(e.target.value)} onKeyDown={e => e.key === 'Enter' && addWL()} />
@@ -767,7 +800,7 @@ function App() {
 
           {auditRec.length > 0 && <div className="card"><div className="card-h"><h3>Denetim Kayıtları</h3></div>
             <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Zaman</th><th>Toplam</th><th>Başarılı</th><th>Başarısız</th><th>Başarı %</th></tr></thead><tbody>
-              {auditRec.map((r, i) => <tr key={i}><td>{r.timestamp ? fmtTime(r.timestamp) : '—'}</td><td>{r.total_simulations ?? '—'}</td><td className="t-g">{r.successful_simulations ?? '—'}</td><td className="t-r">{r.failed_simulations ?? '—'}</td><td className={Number(r.success_rate || 0) >= 0.5 ? "t-g" : "t-r"}>{r.success_rate != null ? `${(Number(r.success_rate) * 100).toFixed(1)}%` : '—'}</td></tr>)}
+              {auditRec.map((r, i) => <tr key={i}><td>{r.timestamp ? fmtDT(r.timestamp) : '—'}</td><td>{r.total_simulations ?? '—'}</td><td className="t-g">{r.successful_simulations ?? '—'}</td><td className="t-r">{r.failed_simulations ?? '—'}</td><td className={safeConf(r.success_rate) >= 50 ? "t-g" : "t-r"}>{r.success_rate != null ? `${safeConf(r.success_rate).toFixed(1)}%` : '—'}</td></tr>)}
             </tbody></table></div>
           </div>}
         </>}

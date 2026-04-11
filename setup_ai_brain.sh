@@ -19,8 +19,8 @@ info() { echo -e "${CYAN}[i]${NC} $*"; }
 
 SWAP_SIZE_GB=4
 OLLAMA_PORT=11434
-MODEL_PRIMARY="qwen3:1.7b"
-MODEL_FALLBACK="gemma3:4b-it-q4_K_M"
+MODEL_PRIMARY="gemma3:4b-it-q4_K_M"
+MODEL_FALLBACK="qwen3:1.7b"
 
 ###############################################################################
 # 1. System Requirements Check
