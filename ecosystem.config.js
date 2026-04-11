@@ -12,7 +12,7 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         PORT: 3001,
-        DATABASE_URL: "postgres://user:password@localhost:5432/trade_intel",
+        DATABASE_URL: process.env.DATABASE_URL || "postgres://user:password@localhost:5433/trade_intel",
         ADMIN_PIN: process.env.ADMIN_PIN || "BABA",
         UV_THREADPOOL_SIZE: "8",
         NODE_OPTIONS: "--max-old-space-size=2048",
@@ -35,8 +35,9 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: "1",
         PYTHONOPTIMIZE: "1",
+        DATABASE_URL: process.env.DATABASE_URL || "postgresql://user:password@localhost:5433/trade_intel",
         DB_HOST: "localhost",
-        DB_PORT: 5432,
+        DB_PORT: 5433,
         DB_USER: "user",
         DB_PASSWORD: "password",
         DB_NAME: "trade_intel",

@@ -33,11 +33,14 @@ const getDir = (s: R): 'long' | 'short' | null => { const m = safeMeta(s.metadat
 const sigLabel = (t: string): string => { if (!t) return '—'; const m: R = { evolutionary_similarity: 'Evrimsel', momentum: 'Momentum', brain_pattern: 'Brain', price_action: 'Price Action', signature: 'İmza', historical_signature: 'Tarihsel İmza' }; for (const [k, v] of Object.entries(m)) { if (t.includes(k)) return v as string; } return t.replace(/_/g, ' '); };
 const stInfo = (st: string) => { if (st === 'pending') return { l: 'Bekliyor', c: 'badge-w' }; if (st === 'processed') return { l: 'İşlendi', c: 'badge-g' }; if (st?.startsWith('risk_')) return { l: 'Risk Red', c: 'badge-r' }; if (st?.startsWith('filtered')) return { l: 'Filtrelendi', c: 'badge-w' }; return { l: st || '—', c: '' }; };
 
+const API_BASE = (import.meta as any).env?.VITE_API_BASE_URL || `${window.location.protocol}//${window.location.hostname}:3001`;
+
 const apiFetch = async (url: string, timeoutMs = 2500) => {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { signal: ctrl.signal });
+    const fullUrl = url.startsWith("http") ? url : `${API_BASE}${url}`;
+    const r = await fetch(fullUrl, { signal: ctrl.signal });
     return r.ok ? r.json() : null;
   } catch {
     return null;
