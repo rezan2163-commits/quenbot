@@ -6,6 +6,76 @@ import { connectDatabase, createTables, sql } from "./db";
 const app = express();
 const port = Number(process.env.PORT || 3001);
 
+type SummaryCache = {
+  total_trades: number;
+  total_movements: number;
+  active_signals: number;
+  open_simulations: number;
+  total_pnl: number;
+  win_rate: number;
+  closed_simulations: number;
+  winning_simulations: number;
+  losing_simulations: number;
+};
+
+const summaryCache: { data: SummaryCache; updatedAt: number; refreshing: boolean } = {
+  data: {
+    total_trades: 0,
+    total_movements: 0,
+    active_signals: 0,
+    open_simulations: 0,
+    total_pnl: 0,
+    win_rate: 0,
+    closed_simulations: 0,
+    winning_simulations: 0,
+    losing_simulations: 0,
+  },
+  updatedAt: 0,
+  refreshing: false,
+};
+
+async function refreshSummaryCache() {
+  if (summaryCache.refreshing) return;
+  summaryCache.refreshing = true;
+  try {
+    const [tableStats, activeSignals, openSimulations, totalPnl, wonSimulations, lostSimulations] = await Promise.all([
+      sql`
+        SELECT relname, COALESCE(n_live_tup, 0)::bigint AS est_rows
+        FROM pg_stat_user_tables
+        WHERE relname IN ('trades', 'price_movements')
+      `,
+      sql`SELECT COUNT(*)::int AS count FROM signals WHERE status = 'pending'`,
+      sql`SELECT COUNT(*)::int AS count FROM simulations WHERE status = 'open'`,
+      sql`SELECT COALESCE(SUM(pnl), 0)::double precision AS value FROM simulations WHERE status = 'closed'`,
+      sql`SELECT COUNT(*)::int AS count FROM simulations WHERE status = 'closed' AND pnl > 0`,
+      sql`SELECT COUNT(*)::int AS count FROM simulations WHERE status = 'closed' AND pnl <= 0`,
+    ]);
+
+    const est = Object.fromEntries(tableStats.map((r: any) => [r.relname, Number(r.est_rows) || 0]));
+    const wins = Number(wonSimulations[0]?.count || 0);
+    const losses = Number(lostSimulations[0]?.count || 0);
+    const closed = wins + losses;
+    const winRate = closed > 0 ? Number(((wins / closed) * 100).toFixed(2)) : 0;
+
+    summaryCache.data = {
+      total_trades: est.trades || 0,
+      total_movements: est.price_movements || 0,
+      active_signals: Number(activeSignals[0]?.count || 0),
+      open_simulations: Number(openSimulations[0]?.count || 0),
+      total_pnl: Number(totalPnl[0]?.value || 0),
+      win_rate: winRate,
+      closed_simulations: closed,
+      winning_simulations: wins,
+      losing_simulations: losses,
+    };
+    summaryCache.updatedAt = Date.now();
+  } catch (error) {
+    console.error("Summary cache refresh failed:", error);
+  } finally {
+    summaryCache.refreshing = false;
+  }
+}
+
 // Performance: gzip compression for all responses
 app.use(compression());
 app.use(cors());
@@ -22,29 +92,10 @@ app.get("/api/health", async (req, res) => {
 
 app.get("/api/dashboard/summary", async (req, res) => {
   try {
-    const [totalTrades] = await sql`SELECT COUNT(*)::int AS count FROM trades`;
-    const [totalMovements] = await sql`SELECT COUNT(*)::int AS count FROM price_movements`;
-    const [activeSignals] = await sql`SELECT COUNT(*)::int AS count FROM signals WHERE status = 'pending'`;
-    const [openSimulations] = await sql`SELECT COUNT(*)::int AS count FROM simulations WHERE status = 'open'`;
-    const [totalPnl] = await sql`SELECT COALESCE(SUM(pnl), 0)::double precision AS value FROM simulations WHERE status = 'closed'`;
-    const [wonSimulations] = await sql`SELECT COUNT(*)::int AS count FROM simulations WHERE status = 'closed' AND pnl > 0`;
-    const [lostSimulations] = await sql`SELECT COUNT(*)::int AS count FROM simulations WHERE status = 'closed' AND pnl <= 0`;
-
-    const winRate = wonSimulations.count + lostSimulations.count > 0
-      ? Number((wonSimulations.count / (wonSimulations.count + lostSimulations.count)) * 100).toFixed(2)
-      : "0.00";
-
-    res.json({
-      total_trades: totalTrades.count,
-      total_movements: totalMovements.count,
-      active_signals: activeSignals.count,
-      open_simulations: openSimulations.count,
-      total_pnl: totalPnl.value,
-      win_rate: Number(winRate),
-      closed_simulations: wonSimulations.count + lostSimulations.count,
-      winning_simulations: wonSimulations.count,
-      losing_simulations: lostSimulations.count
-    });
+    if (Date.now() - summaryCache.updatedAt > 3000) {
+      void refreshSummaryCache();
+    }
+    res.json(summaryCache.data);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -213,24 +264,15 @@ app.get("/api/analytics/volume-by-exchange", async (req, res) => {
 app.get("/api/analytics/top-movers", async (req, res) => {
   try {
     const rows = await sql`
-      WITH latest AS (
-        SELECT DISTINCT ON (symbol) symbol, price::double precision AS price, timestamp
-        FROM trades ORDER BY symbol, timestamp DESC
-      ),
-      oldest AS (
-        SELECT DISTINCT ON (symbol) symbol, price::double precision AS price
-        FROM trades
-        WHERE timestamp >= NOW() - INTERVAL '1 hour'
-        ORDER BY symbol, timestamp ASC
-      )
-      SELECT l.symbol,
-             o.price AS open_price,
-             l.price AS current_price,
-             CASE WHEN o.price > 0 THEN ((l.price - o.price) / o.price * 100)::double precision ELSE 0 END AS change_pct,
-             l.timestamp
-      FROM latest l
-      JOIN oldest o ON l.symbol = o.symbol
-      ORDER BY ABS((l.price - o.price) / NULLIF(o.price, 0)) DESC
+      SELECT symbol,
+             start_price::double precision AS open_price,
+             end_price::double precision AS current_price,
+             (change_pct * 100)::double precision AS change_pct,
+             end_time AS timestamp
+      FROM price_movements
+      WHERE end_time >= NOW() - INTERVAL '3 hours'
+      ORDER BY ABS(change_pct) DESC
+      LIMIT 20
     `;
     res.json(rows);
   } catch (error) {
@@ -1018,5 +1060,9 @@ app.get("/api/audit/validate", async (req, res) => {
 app.listen(port, async () => {
   await connectDatabase();
   await createTables();
+  await refreshSummaryCache();
+  setInterval(() => {
+    void refreshSummaryCache();
+  }, 5000);
   console.log(`API Server running on port ${port}`);
 }).keepAliveTimeout = 65_000;  // Keep-alive > ALB default (60s) for connection reuse
