@@ -21,10 +21,11 @@ logger = logging.getLogger("quenbot.llm_client")
 
 # -------------------------------------------------------------------
 # Defaults tuned for 12 vCPU / 24 GB RAM
+# Gemma 4 Trading model with 5 strategic enhancements
 # -------------------------------------------------------------------
 DEFAULT_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "quenbot-brain"
-MODEL_CANDIDATES = ["quenbot-brain", "gemma3:4b-it-q4_K_M", "gemma3", "gemma2", "qwen3:1.7b", "qwen3"]
+DEFAULT_MODEL = "gemma4-trading"
+MODEL_CANDIDATES = ["gemma4-trading", "quenbot-brain", "gemma:7b", "gemma3:4b-it-q4_K_M", "gemma3", "qwen3:1.7b"]
 DEFAULT_TIMEOUT = 90           # faster CPU = shorter timeout
 DEFAULT_MAX_TOKENS = 1024      # longer responses with more RAM
 DEFAULT_MAX_PROMPT_CHARS = 8000  # 3x more context fits in 24GB
