@@ -732,10 +732,12 @@ function App() {
 
           {llmSt && <div className="card"><div className="card-h"><h3>Model Bilgisi</h3><span className={cls("badge", llmSt.healthy ? "badge-g" : "badge-r")}>{llmSt.healthy ? 'Bağlı' : 'Yok'}</span></div>
             <div className="stat-grid">
-              <div className="stat-card"><div className="stat-name">Model</div><div className="stat-val" style={{ fontSize: 16 }}>{llmSt.llm_stats?.model ?? '—'}</div></div>
+              <div className="stat-card"><div className="stat-name">Aktif Model</div><div className="stat-val" style={{ fontSize: 14 }}>{llmSt.active_model ?? llmSt.llm_stats?.model ?? '—'}</div></div>
+              <div className="stat-card"><div className="stat-name">Mevcut Modeller</div><div className="stat-val" style={{ fontSize: 12 }}>{llmSt.available_models?.length > 0 ? llmSt.available_models.join(', ') : '—'}</div></div>
               <div className="stat-card"><div className="stat-name">Endpoint</div><div className="stat-val" style={{ fontSize: 12 }}>{llmSt.llm_stats?.base_url ?? '—'}</div></div>
-              <div className="stat-card"><div className="stat-name">Çağrı</div><div className="stat-val">{fmt(llmSt.llm_stats?.total_calls ?? 0, 0)}</div></div>
+              <div className="stat-card"><div className="stat-name">Çağrı</div><div className="stat-val">{fmt(llmSt.llm_stats?.total_calls ?? llmSt.call_count ?? 0, 0)}</div></div>
               <div className="stat-card"><div className="stat-name">Hata</div><div className="stat-val">{fmt(llmSt.llm_stats?.total_errors ?? 0, 0)}</div></div>
+              <div className="stat-card"><div className="stat-name">Ort. Gecikme</div><div className="stat-val">{llmSt.llm_stats?.avg_latency_ms != null ? `${fmt(llmSt.llm_stats.avg_latency_ms, 0)}ms` : '—'}</div></div>
             </div>
           </div>}
         </>}

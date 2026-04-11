@@ -3,12 +3,15 @@ QuenBot V2 — LLM Client Module
 Centralized async client for Ollama API (localhost:11434).
 Handles connection pooling, retries, prompt trimming, and timeout management
 for CPU-only 8GB RAM environments.
+Auto-detects available models and falls back gracefully.
 """
 
 import asyncio
 import json
 import logging
 import time
+import subprocess
+import shutil
 from typing import Optional
 from dataclasses import dataclass, field
 
@@ -21,6 +24,7 @@ logger = logging.getLogger("quenbot.llm_client")
 # -------------------------------------------------------------------
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "quenbot-brain"
+MODEL_CANDIDATES = ["quenbot-brain", "gemma3:4b-it-q4_K_M", "gemma3", "gemma2", "qwen3:1.7b", "qwen3"]
 DEFAULT_TIMEOUT = 120          # seconds — CPU inference is slow
 DEFAULT_MAX_TOKENS = 512       # keep responses short
 DEFAULT_MAX_PROMPT_CHARS = 3000  # trim prompts to avoid OOM
@@ -109,15 +113,122 @@ class LLMClient:
         return trimmed
 
     async def health_check(self) -> bool:
-        """Check if Ollama is reachable."""
+        """Check if Ollama is reachable and ensure a model is available."""
         try:
             session = await self._get_session()
             async with session.get(
                 f"{self.base_url}/api/tags", timeout=aiohttp.ClientTimeout(total=5)
             ) as resp:
-                return resp.status == 200
+                if resp.status != 200:
+                    return False
+                data = await resp.json()
+                available = [m.get("name", "") for m in data.get("models", [])]
+                if available:
+                    logger.info(f"Ollama models available: {available}")
+                    # If current model is not available, find best match
+                    if not any(self.model in m for m in available):
+                        for candidate in MODEL_CANDIDATES:
+                            if any(candidate in m for m in available):
+                                old_model = self.model
+                                self.model = candidate
+                                logger.info(f"Model switched: {old_model} → {self.model}")
+                                break
+                        else:
+                            # Use whatever is available
+                            self.model = available[0]
+                            logger.info(f"Using first available model: {self.model}")
+                    return True
+                else:
+                    logger.warning("Ollama running but no models installed")
+                    return False
         except Exception:
             return False
+
+    async def list_models(self) -> list[str]:
+        """List all available models from Ollama."""
+        try:
+            session = await self._get_session()
+            async with session.get(
+                f"{self.base_url}/api/tags", timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return [m.get("name", "") for m in data.get("models", [])]
+        except Exception:
+            pass
+        return []
+
+    async def ensure_model(self) -> bool:
+        """Ensure a working model is loaded. Pull one if needed."""
+        models = await self.list_models()
+        if models:
+            # Check if our model exists
+            if any(self.model in m for m in models):
+                return True
+            # Try to find a candidate
+            for candidate in MODEL_CANDIDATES:
+                if any(candidate in m for m in models):
+                    self.model = candidate
+                    logger.info(f"Using existing model: {self.model}")
+                    return True
+
+        # No suitable model found — try to pull Gemma
+        logger.info("No suitable model found. Attempting to pull gemma3:4b-it-q4_K_M...")
+        try:
+            session = await self._get_session()
+            async with session.post(
+                f"{self.base_url}/api/pull",
+                json={"name": "gemma3:4b-it-q4_K_M", "stream": False},
+                timeout=aiohttp.ClientTimeout(total=600),  # 10 min for download
+            ) as resp:
+                if resp.status == 200:
+                    self.model = "gemma3:4b-it-q4_K_M"
+                    logger.info("✓ Gemma 3 4B model pulled successfully")
+                    # Now create custom quenbot-brain from it
+                    await self._create_custom_model()
+                    return True
+                else:
+                    logger.error(f"Model pull failed: HTTP {resp.status}")
+        except Exception as e:
+            logger.error(f"Model pull error: {e}")
+        return False
+
+    async def _create_custom_model(self):
+        """Create the quenbot-brain custom model from the active base model."""
+        modelfile = f"""FROM {self.model}
+
+PARAMETER temperature 0.3
+PARAMETER top_p 0.85
+PARAMETER top_k 30
+PARAMETER repeat_penalty 1.15
+PARAMETER num_ctx 2048
+PARAMETER num_predict 512
+
+SYSTEM \"\"\"You are QuenBot Central Intelligence, a specialized cryptocurrency trading analysis AI.
+You operate as part of a multi-agent trading system with the following agents:
+- Scout: Market data collection and anomaly detection
+- Strategist: Signal generation and pattern analysis
+- Ghost Simulator: Paper trading and backtesting
+- Auditor: Quality control and root cause analysis
+- Brain: Pattern learning and prediction
+
+You provide structured, data-driven analysis. Always respond in valid JSON when requested.
+Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
+"""
+        try:
+            session = await self._get_session()
+            async with session.post(
+                f"{self.base_url}/api/create",
+                json={"name": "quenbot-brain", "modelfile": modelfile, "stream": False},
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                if resp.status == 200:
+                    self.model = "quenbot-brain"
+                    logger.info("✓ Custom quenbot-brain model created from " + self.model)
+                else:
+                    logger.warning(f"Custom model creation failed (HTTP {resp.status}), using base model")
+        except Exception as e:
+            logger.warning(f"Custom model creation error: {e}, using base model")
 
     async def generate(
         self,

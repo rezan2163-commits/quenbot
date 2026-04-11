@@ -95,9 +95,15 @@ class AgentOrchestrator:
 
             llm_healthy = await self.llm_client.health_check()
             if llm_healthy:
-                logger.info("🧠 LLM Central Intelligence initialized (Ollama connected)")
+                logger.info(f"🧠 LLM connected (model: {self.llm_client.model})")
             else:
-                logger.warning("⚠ LLM backend not available — agents will use rule-based logic")
+                # Ollama reachable but no model — try to pull one
+                logger.info("🧠 LLM backend reachable, checking for models...")
+                model_ok = await self.llm_client.ensure_model()
+                if model_ok:
+                    logger.info(f"🧠 LLM model ready: {self.llm_client.model}")
+                else:
+                    logger.warning("⚠ No LLM model available — agents will use rule-based logic")
         except Exception as e:
             logger.warning(f"⚠ LLM initialization failed (degraded mode): {e}")
             self.llm_bridge = None
@@ -317,12 +323,21 @@ class AgentOrchestrator:
             return web.json_response({"status": "cleared"})
 
         async def get_llm_status(request):
-            if self.llm_bridge:
-                stats = self.llm_bridge.get_stats()
+            try:
                 healthy = await self.llm_client.health_check()
-                stats["healthy"] = healthy
-                return web.json_response(stats)
-            return web.json_response({"healthy": False, "error": "LLM not initialized"})
+                models = await self.llm_client.list_models()
+                client_stats = self.llm_client.get_stats()
+                bridge_stats = self.llm_bridge.get_stats() if self.llm_bridge else {}
+                return web.json_response({
+                    "healthy": healthy,
+                    "active_model": self.llm_client.model,
+                    "available_models": models,
+                    "call_count": client_stats.get("total_calls", 0),
+                    "llm_stats": client_stats,
+                    **bridge_stats,
+                })
+            except Exception as e:
+                return web.json_response({"healthy": False, "error": str(e)})
 
         async def get_queue_status(request):
             if self.task_queue:
