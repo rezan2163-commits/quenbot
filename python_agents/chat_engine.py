@@ -137,7 +137,7 @@ class ChatEngine:
         return prices
 
     async def respond(self, message: str) -> str:
-        """Ana yanıt metodu - doğal dil girişi, akıllı yanıt"""
+        """Ana yanıt metodu - doğal dil girişi, Gemma yanıt"""
         msg = message.strip()
         if not msg:
             return "Mesaj boş. Ne sormak istiyorsun?"
@@ -145,30 +145,15 @@ class ChatEngine:
         # Context'i güncelle (cache ile hızlı)
         await self._refresh_context()
         ctx = self._context_cache
-        msg_lower = msg.lower()
 
         try:
-            # İntent analizi - birden fazla intent destekle
-            intents = self._detect_intents(msg_lower)
-
-            if not intents:
-                # Genel soru - tüm sistemi özetle
-                return await self._general_response(msg, ctx)
-
-            parts = []
-            for intent in intents:
-                part = await self._handle_intent(intent, msg, msg_lower, ctx)
-                if part:
-                    parts.append(part)
-
-            if parts:
-                return "\n\n".join(parts)
-
-            return await self._general_response(msg, ctx)
+            # ✨ DIRECT GEMMA RESPONSE - skip intent parsing
+            # Gemma Director ile tüm komutları natural language handle et
+            return await self._gemma_director(msg, ctx)
 
         except Exception as e:
             logger.error(f"Chat respond error: {e}")
-            return f"Bir hata oluştu: {str(e)[:200]}"
+            return f"❌ Hata: {str(e)[:100]}"
 
     def _detect_intents(self, msg: str) -> List[str]:
         """Mesajdan intent'leri çıkar"""
