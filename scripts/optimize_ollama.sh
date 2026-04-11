@@ -51,7 +51,8 @@ echo ""
 echo "🧠 Recreating quenbot-brain model with 8K context..."
 sleep 3  # Wait for Ollama to start
 
-ollama create quenbot-brain -f - <<'MODELFILE'
+MODELFILE_PATH="/tmp/quenbot-modelfile"
+cat > "$MODELFILE_PATH" <<'EOF'
 FROM gemma3:4b-it-q4_K_M
 
 PARAMETER temperature 0.3
@@ -72,7 +73,10 @@ You operate as part of a multi-agent trading system with the following agents:
 
 You provide structured, data-driven analysis. Always respond in valid JSON when requested.
 Be concise. Focus on actionable insights. Never hallucinate data."""
-MODELFILE
+EOF
+
+ollama create quenbot-brain -f "$MODELFILE_PATH"
+rm -f "$MODELFILE_PATH"
 
 echo "✓ quenbot-brain model recreated with 8K context window"
 echo ""
