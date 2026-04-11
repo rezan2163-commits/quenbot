@@ -1174,3 +1174,29 @@ class Database:
                 UPDATE pattern_match_results SET outcome_pct = $1
                 WHERE id = $2
             """, outcome_pct, match_id)
+
+    # Generic query helpers for chat interface and other uses
+    async def execute(self, query: str, *args) -> None:
+        """Execute a query without returning results"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(query, *args)
+
+    async def fetch(self, query: str, *args) -> List[Dict[str, Any]]:
+        """Fetch all rows as dictionaries"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *args)
+            result = []
+            for row in rows:
+                d = dict(row)
+                # Normalize special types for JSON
+                result.append(json.loads(_dumps(d)))
+            return result
+
+    async def fetchone(self, query: str, *args) -> Optional[Dict[str, Any]]:
+        """Fetch single row as dictionary"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, *args)
+            if row:
+                d = dict(row)
+                return json.loads(_dumps(d))
+            return None

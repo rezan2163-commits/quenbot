@@ -374,6 +374,40 @@ class AgentLLMBridge:
     # Chat / General Methods
     # -----------------------------------------------------------------
 
+    async def call_llm(
+        self,
+        task: str,
+        system: str,
+        prompt: str,
+        json_mode: bool = False,
+        temperature: float = 0.3,
+    ) -> Optional[dict]:
+        """
+        Public method for general LLM calls (e.g., from chat interface).
+        
+        Returns: {"success": bool, "text": str} or {"success": False, "error": str}
+        """
+        if not self._enabled:
+            return {"success": False, "error": "LLM not available"}
+
+        try:
+            response = await self._client.generate(
+                prompt=prompt,
+                system=system,
+                temperature=temperature,
+                json_mode=json_mode,
+            )
+
+            return {
+                "success": response.success,
+                "text": response.text,
+                "error": response.error if not response.success else None,
+                "latency_ms": response.total_duration_ms,
+            }
+        except Exception as e:
+            logger.error(f"LLM call failed for {task}: {e}")
+            return {"success": False, "error": str(e)}
+
     async def chat_respond(
         self,
         user_message: str,
