@@ -92,18 +92,24 @@ async function refreshPricesCache() {
   if (pricesCache.refreshing) return;
   pricesCache.refreshing = true;
   try {
-    // Get latest prices from trades table (1.9M trades available)
+    // Get latest price for each symbol from trades
     const rows = await sql`
-      SELECT DISTINCT ON (symbol)
-             symbol,
-             'binance'::text AS exchange,
-             price::double precision AS price,
-             timestamp
+      SELECT symbol, MAX(price)::double precision AS price, MAX(timestamp) AS timestamp
       FROM trades
-      ORDER BY symbol, timestamp DESC
-      LIMIT 20
+      WHERE timestamp > NOW() - INTERVAL '1 day'
+      GROUP BY symbol
+      ORDER BY symbol
+      LIMIT 50
     `;
-    pricesCache.data = rows.length > 0 ? rows : []; // Fallback to empty if no trades
+    
+    const formatted = rows.map((row: any) => ({
+      symbol: row.symbol,
+      exchange: "binance",
+      price: Number(row.price) || 0,
+      timestamp: row.timestamp,
+    }));
+    
+    pricesCache.data = formatted.length > 0 ? formatted : [];
     pricesCache.updatedAt = Date.now();
   } catch (error) {
     console.error("Prices cache refresh failed:", error);
