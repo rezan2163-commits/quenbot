@@ -33,7 +33,18 @@ const getDir = (s: R): 'long' | 'short' | null => { const m = safeMeta(s.metadat
 const sigLabel = (t: string): string => { if (!t) return '—'; const m: R = { evolutionary_similarity: 'Evrimsel', momentum: 'Momentum', brain_pattern: 'Brain', price_action: 'Price Action', signature: 'İmza', historical_signature: 'Tarihsel İmza' }; for (const [k, v] of Object.entries(m)) { if (t.includes(k)) return v as string; } return t.replace(/_/g, ' '); };
 const stInfo = (st: string) => { if (st === 'pending') return { l: 'Bekliyor', c: 'badge-w' }; if (st === 'processed') return { l: 'İşlendi', c: 'badge-g' }; if (st?.startsWith('risk_')) return { l: 'Risk Red', c: 'badge-r' }; if (st?.startsWith('filtered')) return { l: 'Filtrelendi', c: 'badge-w' }; return { l: st || '—', c: '' }; };
 
-const apiFetch = async (url: string) => { try { const r = await fetch(url); return r.ok ? r.json() : null; } catch { return null; } };
+const apiFetch = async (url: string, timeoutMs = 2500) => {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    return r.ok ? r.json() : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 /* ─── Skeleton Loader ─── */
 function Skeleton({ w = '100%', h = 20 }: { w?: string | number; h?: number }) {
@@ -161,9 +172,9 @@ function App() {
   /* ── Tiered Fetching ── */
   const fetchFast = useCallback(async () => {
     const [s, p, tm] = await Promise.all([
-      apiFetch("/api/dashboard/summary"),
-      apiFetch("/api/live/prices"),
-      apiFetch("/api/analytics/top-movers"),
+      apiFetch("/api/dashboard/summary", 1800),
+      apiFetch("/api/live/prices", 1800),
+      apiFetch("/api/analytics/top-movers", 1800),
     ]);
     if (s) setSummary(s);
     if (p) { prevPrices.current = Object.fromEntries(prices.map(x => [x.symbol, x.price])); setPrices(p); }
@@ -172,85 +183,150 @@ function App() {
   }, [prices]);
 
   const fetchMed = useCallback(async () => {
-    const [b, of, tl, vd, sig, sim, tr, mv, ch, ls, agS, wl, pt, sigSum] = await Promise.all([
-      apiFetch("/api/bot/summary"),
-      apiFetch("/api/analytics/order-flow"),
-      apiFetch("/api/analytics/trade-timeline"),
-      apiFetch("/api/analytics/volume-by-exchange"),
-      apiFetch("/api/signals"),
-      apiFetch("/api/simulations"),
-      apiFetch("/api/scout/trades?limit=30"),
-      apiFetch("/api/scout/movements?limit=20"),
-      apiFetch(`/api/analytics/price-history/${selSym}`),
-      apiFetch("/api/live/data-stream"),
-      apiFetch("/api/agents/status"),
-      apiFetch("/api/watchlist"),
-      apiFetch("/api/analytics/pnl-timeline"),
-      apiFetch("/api/signals/summary"),
-    ]);
-    if (b) setBotSum(b);
-    if (of) setOrderFlow(of);
-    if (tl) setTimeline(tl);
-    if (vd) setVolumes(vd);
-    if (sig) setSignals(sig);
-    if (sim) setSims(sim);
-    if (tr) setTrades(tr);
-    if (mv) setMovements(mv);
-    if (ch) setCandles(ch);
-    if (ls) setLiveStream(ls);
-    if (agS?.agents) setAgentSt(agS.agents);
-    if (wl) setWatchlist(wl);
-    if (pt) setPnlTL(pt);
-    if (sigSum) setSigSummary(Array.isArray(sigSum) ? sigSum : (sigSum?.by_type ?? []));
-  }, [selSym]);
+    if (tab === "overview") {
+      const [b, of, tl, vd, sigSum] = await Promise.all([
+        apiFetch("/api/bot/summary", 2200),
+        apiFetch("/api/analytics/order-flow", 2200),
+        apiFetch("/api/analytics/trade-timeline", 2200),
+        apiFetch("/api/analytics/volume-by-exchange", 2200),
+        apiFetch("/api/signals/summary", 2200),
+      ]);
+      if (b) setBotSum(b);
+      if (of) setOrderFlow(of);
+      if (tl) setTimeline(tl);
+      if (vd) setVolumes(vd);
+      if (sigSum) setSigSummary(Array.isArray(sigSum) ? sigSum : (sigSum?.by_type ?? []));
+      return;
+    }
+
+    if (tab === "terminal") {
+      const [tr, mv, ch, ls, agS] = await Promise.all([
+        apiFetch("/api/scout/trades?limit=30", 2200),
+        apiFetch("/api/scout/movements?limit=20", 2200),
+        apiFetch(`/api/analytics/price-history/${selSym}`, 2200),
+        apiFetch("/api/live/data-stream", 2200),
+        apiFetch("/api/agents/status", 2200),
+      ]);
+      if (tr) setTrades(tr);
+      if (mv) setMovements(mv);
+      if (ch) setCandles(ch);
+      if (ls) setLiveStream(ls);
+      if (agS?.agents) setAgentSt(agS.agents);
+      return;
+    }
+
+    if (tab === "signals") {
+      const [sig, sigSum] = await Promise.all([
+        apiFetch("/api/signals", 2200),
+        apiFetch("/api/signals/summary", 2200),
+      ]);
+      if (sig) setSignals(sig);
+      if (sigSum) setSigSummary(Array.isArray(sigSum) ? sigSum : (sigSum?.by_type ?? []));
+      return;
+    }
+
+    if (tab === "simulations") {
+      const [sim, pt] = await Promise.all([
+        apiFetch("/api/simulations", 2200),
+        apiFetch("/api/analytics/pnl-timeline", 2200),
+      ]);
+      if (sim) setSims(sim);
+      if (pt) setPnlTL(pt);
+      return;
+    }
+
+    if (tab === "system") {
+      const [agS, wl] = await Promise.all([
+        apiFetch("/api/agents/status", 2200),
+        apiFetch("/api/watchlist", 2200),
+      ]);
+      if (agS?.agents) setAgentSt(agS.agents);
+      if (wl) setWatchlist(wl);
+      return;
+    }
+  }, [selSym, tab]);
 
   const fetchSlow = useCallback(async () => {
-    const [ss, bs, bp, lst, ts, ar, fa, rr, rs, cor, sig2] = await Promise.all([
-      apiFetch("/api/analytics/system-stats"),
-      apiFetch("/api/brain/status"),
-      apiFetch("/api/brain/patterns?limit=30"),
-      apiFetch("/api/brain/learning-stats"),
-      apiFetch("/api/admin/table-stats"),
-      apiFetch("/api/admin/audit-records?limit=20"),
-      apiFetch("/api/admin/failure-analysis?limit=20"),
-      apiFetch("/api/rca/results"),
-      apiFetch("/api/rca/stats"),
-      apiFetch("/api/corrections"),
-      apiFetch("/api/signatures?limit=20"),
-    ]);
-    if (ss) setSysStats(ss);
-    if (bs) setBrainSt(bs);
-    if (bp) setBrainPat(bp);
-    if (lst) setLearnSt(lst);
-    if (ts) setTableStats(ts);
-    if (ar) setAuditRec(ar);
-    if (fa) setFailAn(fa);
-    if (rr) setRcaResults(Array.isArray(rr) ? rr : []);
-    if (rs) setRcaStats(Array.isArray(rs) ? rs : (rs?.distribution ?? []));
-    if (cor) setCorrections(Array.isArray(cor) ? cor : []);
-    if (sig2) setSignatures(Array.isArray(sig2) ? sig2 : []);
-    try {
+    if (tab === "overview") {
+      const ss = await apiFetch("/api/analytics/system-stats", 2800);
+      if (ss) setSysStats(ss);
+      return;
+    }
+
+    if (tab === "brain") {
+      const [bs, bp, lst, sig2] = await Promise.all([
+        apiFetch("/api/brain/status", 2800),
+        apiFetch("/api/brain/patterns?limit=30", 2800),
+        apiFetch("/api/brain/learning-stats", 2800),
+        apiFetch("/api/signatures?limit=20", 2800),
+      ]);
+      if (bs) setBrainSt(bs);
+      if (bp) setBrainPat(bp);
+      if (lst) setLearnSt(lst);
+      if (sig2) setSignatures(Array.isArray(sig2) ? sig2 : []);
+      return;
+    }
+
+    if (tab === "mastercontrol") {
       const [dr, lr, qr, av, sr] = await Promise.all([
-        apiFetch("/api/directives"), apiFetch("/api/llm/status"), apiFetch("/api/llm/queue"), apiFetch("/api/audit/validate"), apiFetch("/api/system/resources"),
+        apiFetch("/api/directives", 2800),
+        apiFetch("/api/llm/status", 2800),
+        apiFetch("/api/llm/queue", 2800),
+        apiFetch("/api/audit/validate", 2800),
+        apiFetch("/api/system/resources", 2800),
       ]);
       if (dr?.master_directive !== undefined && !dirSaving) setMasterDir(dr.master_directive);
       if (lr) setLlmSt(lr);
       if (qr) setQueueSt(qr);
       if (av) setAuditValidation(av);
       if (sr && !sr.error) setSysResources(sr);
-    } catch {}
-  }, [dirSaving]);
+      return;
+    }
+
+    if (tab === "system") {
+      const [ts, ar, fa, rr, rs, cor, sr] = await Promise.all([
+        apiFetch("/api/admin/table-stats", 2800),
+        apiFetch("/api/admin/audit-records?limit=20", 2800),
+        apiFetch("/api/admin/failure-analysis?limit=20", 2800),
+        apiFetch("/api/rca/results", 2800),
+        apiFetch("/api/rca/stats", 2800),
+        apiFetch("/api/corrections", 2800),
+        apiFetch("/api/system/resources", 2800),
+      ]);
+      if (ts) setTableStats(ts);
+      if (ar) setAuditRec(ar);
+      if (fa) setFailAn(fa);
+      if (rr) setRcaResults(Array.isArray(rr) ? rr : []);
+      if (rs) setRcaStats(Array.isArray(rs) ? rs : (rs?.distribution ?? []));
+      if (cor) setCorrections(Array.isArray(cor) ? cor : []);
+      if (sr && !sr.error) setSysResources(sr);
+      return;
+    }
+  }, [dirSaving, tab]);
 
   useEffect(() => {
-    // Stagger initial loads: fast first, then medium, then slow
-    fetchFast().then(() => setInitialLoading(false));
-    const t1 = setTimeout(() => fetchMed(), 300);
-    const t2 = setTimeout(() => fetchSlow(), 800);
-    const f1 = setInterval(fetchFast, 3000);
-    const f2 = setInterval(fetchMed, 10000);
-    const f3 = setInterval(fetchSlow, 30000);
-    return () => { clearInterval(f1); clearInterval(f2); clearInterval(f3); clearTimeout(t1); clearTimeout(t2); };
-  }, [selSym]);
+    // First paint should not wait too long even if API is slow.
+    const loadingTimeout = setTimeout(() => setInitialLoading(false), 1200);
+
+    // Stagger initial loads: fast first, then medium, then slow.
+    fetchFast().finally(() => setInitialLoading(false));
+    const t1 = setTimeout(() => fetchMed(), 250);
+    const t2 = setTimeout(() => fetchSlow(), 900);
+
+    // Poll less aggressively to reduce UI and network pressure.
+    const f1 = setInterval(fetchFast, 5000);
+    const f2 = setInterval(fetchMed, 15000);
+    const f3 = setInterval(fetchSlow, 60000);
+
+    return () => {
+      clearTimeout(loadingTimeout);
+      clearInterval(f1);
+      clearInterval(f2);
+      clearInterval(f3);
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [selSym, tab]);
 
   /* ── Derived ── */
   const totalVol = useMemo(() => volumes.reduce((s, v) => s + (v.total_volume || 0), 0), [volumes]);
@@ -310,8 +386,8 @@ function App() {
             {TABS.map(t => (
               <button key={t.key} className={cls("tab-btn", tab === t.key && "tab-active")} onClick={() => setTab(t.key)}>
                 <span className="tab-icon">{t.icon}</span>{t.label}
-                {t.key === 'signals' && signals.filter(s => s.status === 'pending').length > 0 && <span className="tab-badge">{signals.filter(s => s.status === 'pending').length}</span>}
-                {t.key === 'simulations' && openSims.length > 0 && <span className="tab-badge">{openSims.length}</span>}
+                {t.key === 'signals' && Number(summary?.active_signals || 0) > 0 && <span className="tab-badge">{Number(summary?.active_signals || 0)}</span>}
+                {t.key === 'simulations' && Number(summary?.open_simulations || 0) > 0 && <span className="tab-badge">{Number(summary?.open_simulations || 0)}</span>}
               </button>
             ))}
           </nav>
@@ -352,7 +428,7 @@ function App() {
             <KPI label="Trade/dk" value={sysStats ? fmt(sysStats.trades_per_minute, 0) : "—"} icon="⚡" accent="b" />
             <KPI label="Hacim (1sa)" value={`$${fmt(totalVol, 0)}`} icon="📊" accent="p" />
             <KPI label="Aktif Sinyal" value={summary ? String(summary.active_signals) : "0"} icon="📡" accent={summary && summary.active_signals > 0 ? "w" : undefined} />
-            <KPI label="Açık Sim." value={String(openSims.length)} icon="👻" accent={openSims.length > 0 ? "g" : undefined} />
+            <KPI label="Açık Sim." value={String(Number(summary?.open_simulations ?? openSims.length))} icon="👻" accent={Number(summary?.open_simulations ?? openSims.length) > 0 ? "g" : undefined} />
             <KPI label="Win Rate" value={botSum ? `${fmt(botSum.win_rate, 1)}%` : "0%"} icon="🏆" accent={botSum && botSum.win_rate >= 50 ? "g" : "r"} />
             <KPI label="Toplam PnL" value={summary ? fmtUsd(summary.total_pnl) : "$0"} icon="💰" accent={summary && summary.total_pnl > 0 ? "g" : summary && summary.total_pnl < 0 ? "r" : undefined} />
           </div>
