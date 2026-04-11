@@ -196,22 +196,22 @@ class ScoutAgent:
         """Periodically fetch recent trades via REST API as fallback."""
         scout_config = Config.get_agent_config('scout')
         fetch_interval = scout_config.get('rest_fetch_interval_seconds', 30)
+        self._bybit_rest_disabled = False  # Track Bybit REST disable state
         
         while self.running:
             try:
                 await asyncio.sleep(fetch_interval)
                 
-                # Fetch from both Binance and Bybit for both spot and futures
+                # Fetch from Binance only (WebSocket handles Bybit; REST fallback for emergency)
                 active_symbols = self.get_watchlist()
                 tasks = []
                 for symbol in active_symbols:
                     tasks.append(self._fetch_binance_rest('spot', symbol))
                     tasks.append(self._fetch_binance_rest('futures', symbol))
-                    tasks.append(self._fetch_bybit_rest('spot', symbol))
-                    tasks.append(self._fetch_bybit_rest('futures', symbol))
+                    # Note: Bybit REST API returns 403; using WebSocket only for Bybit
                 
                 await asyncio.gather(*tasks, return_exceptions=True)
-                logger.info(f"REST API fallback fetch completed for {len(active_symbols)} symbols ({self.trade_counter} total trades)")
+                logger.debug(f"REST API fallback fetch completed for {len(active_symbols)} symbols ({self.trade_counter} total trades)")
                 
             except Exception as e:
                 logger.error(f"REST fallback fetcher error: {e}")
