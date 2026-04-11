@@ -154,7 +154,8 @@ class ScoutAgent:
                 await asyncio.sleep(Config.get_agent_config('scout')['reconnect_delay'])
 
     async def _monitor_bybit_market(self, market_type: str):
-        """Monitor the Bybit trade stream using V5 API format."""
+        """Monitor the Bybit trade stream using V5 API format. DISABLED — IP blocked (403)."""
+        return  # Bybit WS disabled — server IP blocked
         # V5 API uses different URL patterns
         if market_type == 'spot':
             ws_url = Config.BYBIT_SPOT_WS_URL
@@ -254,7 +255,8 @@ class ScoutAgent:
             logger.debug(f"Binance REST fetch error for {symbol} ({market_type}): {e}")
 
     async def _fetch_bybit_rest(self, market_type: str, symbol: str):
-        """Fetch recent trades from Bybit REST API (V5 format)."""
+        """Fetch recent trades from Bybit REST API (V5 format). DISABLED — IP blocked (403)."""
+        return  # Bybit REST disabled — server IP blocked
         try:
             endpoint = f"{Config.BYBIT_REST_API}/v5/market/recent-trade"
             category = "spot" if market_type == "spot" else "linear"
