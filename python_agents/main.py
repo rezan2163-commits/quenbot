@@ -880,6 +880,33 @@ class AgentOrchestrator:
             stats = self.event_bus.get_stats()
             return web.json_response(stats)
 
+        async def post_chat(request):
+            """Gemma AI Chat - Natural language commands with Gemma response"""
+            try:
+                data = await request.json()
+                message = data.get("message", "").strip()
+                if not message:
+                    return web.json_response({"error": "Message required"}, status=400)
+                
+                if not self.chat_engine:
+                    return web.json_response({"error": "Chat engine not initialized"}, status=500)
+                
+                # Get Gemma response
+                response = await self.chat_engine.respond(message)
+                
+                # Store in database
+                await self.db.insert_chat_message('user', message, 'user')
+                await self.db.insert_chat_message('assistant', response, 'Gemma')
+                
+                return web.json_response({
+                    "success": True,
+                    "message": response,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+            except Exception as e:
+                logger.error(f"Chat error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
         async def get_pattern_matches(request):
             """Recent pattern match results for dashboard and mobile clients."""
             try:
@@ -907,6 +934,7 @@ class AgentOrchestrator:
         app.router.add_get("/api/directives", get_directives)
         app.router.add_post("/api/directives", set_directive)
         app.router.add_delete("/api/directives", clear_directives)
+        app.router.add_post("/api/chat", post_chat)
         app.router.add_get("/api/llm/status", get_llm_status)
         app.router.add_get("/api/llm/queue", get_queue_status)
         app.router.add_get("/api/system/resources", get_system_resources)

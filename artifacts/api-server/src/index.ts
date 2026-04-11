@@ -92,17 +92,18 @@ async function refreshPricesCache() {
   if (pricesCache.refreshing) return;
   pricesCache.refreshing = true;
   try {
-    // Lightweight source: latest movement end prices per symbol.
+    // Get latest prices from trades table (1.9M trades available)
     const rows = await sql`
       SELECT DISTINCT ON (symbol)
              symbol,
-             'derived'::text AS exchange,
-             end_price::double precision AS price,
-             end_time AS timestamp
-      FROM price_movements
-      ORDER BY symbol, end_time DESC
+             'binance'::text AS exchange,
+             price::double precision AS price,
+             timestamp
+      FROM trades
+      ORDER BY symbol, timestamp DESC
+      LIMIT 20
     `;
-    pricesCache.data = rows;
+    pricesCache.data = rows.length > 0 ? rows : []; // Fallback to empty if no trades
     pricesCache.updatedAt = Date.now();
   } catch (error) {
     console.error("Prices cache refresh failed:", error);
@@ -1121,22 +1122,30 @@ app.post("/api/chat", express.json(), async (req, res) => {
   }
 
   try {
-    // Get current system context
-    const [summary] = await sql`
-      SELECT total_trades, total_pnl, win_rate, active_signals, open_simulations
-      FROM dashboard_summary LIMIT 1
-    `;
+    // Forward to Python agents on port 3002
+    const agentResponse = await fetch("http://localhost:3002/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    });
+
+    if (!agentResponse.ok) {
+      throw new Error(`Agents error: ${agentResponse.status}`);
+    }
+
+    const data = await agentResponse.json();
 
     res.json({
       success: true,
-      message: `✓ Komut alındı: "${message.substring(0, 60)}..."`,
-      context: summary || {},
-      status: "processing",
-      timestamp: new Date().toISOString(),
-      note: "Chat sistemi Python agents'a yönlendirilecek"
+      message: data.message || "Gemma did not respond",
+      timestamp: data.timestamp || new Date().toISOString(),
     });
   } catch (error) {
-    res.status(500).json({ error: String(error) });
+    logger.error("Chat forward error:", error);
+    res.status(500).json({
+      error: String(error),
+      message: "Chat sistemi geçici olarak kullanılamıyor",
+    });
   }
 });
 
