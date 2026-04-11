@@ -1113,6 +1113,33 @@ app.get("/api/audit/validate", async (req, res) => {
   }
 });
 
+/* ═══ CHAT / STRATEGY ═══ */
+app.post("/api/chat", express.json(), async (req, res) => {
+  const { message } = req.body;
+  if (!message) {
+    return res.status(400).json({ error: "Message required" });
+  }
+
+  try {
+    // Get current system context
+    const [summary] = await sql`
+      SELECT total_trades, total_pnl, win_rate, active_signals, open_simulations
+      FROM dashboard_summary LIMIT 1
+    `;
+
+    res.json({
+      success: true,
+      message: `✓ Komut alındı: "${message.substring(0, 60)}..."`,
+      context: summary || {},
+      status: "processing",
+      timestamp: new Date().toISOString(),
+      note: "Chat sistemi Python agents'a yönlendirilecek"
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 app.listen(port, async () => {
   await connectDatabase();
   await createTables();

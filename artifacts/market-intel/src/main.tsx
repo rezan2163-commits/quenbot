@@ -15,7 +15,7 @@ type SystemStats = { db_size_mb: number; trades_per_minute: number; total_trades
 type Candle = { minute: string; open: number; high: number; low: number; close: number; volume: number };
 type LiveStream = { latest_trades: R[]; exchange_freshness: R[]; five_min_breakdown: R[] };
 type BrainStatus = { pattern_count: number; learning: { total: number; correct: number; accuracy: number; avg_pnl: number }; recent_patterns: R[]; signal_type_stats: R[] };
-type Tab = "overview" | "terminal" | "signals" | "simulations" | "brain" | "mastercontrol" | "system";
+type Tab = "overview" | "terminal" | "signals" | "simulations" | "brain" | "mastercontrol" | "system" | "chat";
 
 /* ─── Helpers ─── */
 const fmt = (v: any, d = 2) => { const n = Number(v); return isNaN(n) ? "0" : new Intl.NumberFormat("en-US", { maximumFractionDigits: d, minimumFractionDigits: d }).format(n); };
@@ -168,6 +168,8 @@ function App() {
   const [sigMkt, setSigMkt] = useState<'all' | 'spot' | 'futures'>('all');
   // Position calculator
   const [calcEntry, setCalcEntry] = useState(""); const [calcSL, setCalcSL] = useState(""); const [calcRisk, setCalcRisk] = useState("100");
+  // Chat
+  const [chatMsg, setChatMsg] = useState(""); const [chatHistory, setChatHistory] = useState<Array<{role: string, message: string}>>([]); const [chatLoading, setChatLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
 
   const prevPrices = useRef<Record<string, number>>({});
@@ -365,6 +367,28 @@ function App() {
     fetchMed();
   };
 
+  const handleChat = async () => {
+    if (!chatMsg.trim()) return;
+    setChatLoading(true);
+    const userMsg = chatMsg;
+    setChatHistory(prev => [...prev, { role: 'user', message: userMsg }]);
+    setChatMsg("");
+    
+    try {
+      const res = await fetch(`${API_BASE}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: userMsg })
+      });
+      const data = await res.json();
+      setChatHistory(prev => [...prev, { role: 'gemma', message: data.message || "Gemma yanıt veremedi" }]);
+    } catch (e) {
+      setChatHistory(prev => [...prev, { role: 'system', message: "❌ Chat bağlantısı hatası" }]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
   const activeAgents = Object.values(agentSt).filter((a: any) => a.status === 'running').length;
   const totalAgents = Math.max(Object.keys(agentSt).length, 5);
 
@@ -376,6 +400,7 @@ function App() {
     { key: "brain", label: "AI Beyin", icon: "🧠" },
     { key: "mastercontrol", label: "Kontrol", icon: "🎯" },
     { key: "system", label: "Sistem", icon: "⚙️" },
+    { key: "chat", label: "Gemma Chat", icon: "💬" },
   ];
 
   return (
@@ -947,6 +972,35 @@ function App() {
               {auditRec.map((r, i) => <tr key={i}><td>{r.timestamp ? fmtDT(r.timestamp) : '—'}</td><td>{r.total_simulations ?? '—'}</td><td className="t-g">{r.successful_simulations ?? '—'}</td><td className="t-r">{r.failed_simulations ?? '—'}</td><td className={safeConf(r.success_rate) >= 50 ? "t-g" : "t-r"}>{r.success_rate != null ? `${safeConf(r.success_rate).toFixed(1)}%` : '—'}</td></tr>)}
             </tbody></table></div>
           </div>}
+        </>}
+
+        {/* ══════ CHAT ══════ */}
+        {tab === "chat" && <>
+          <div className="card"><div className="card-h"><h3>💬 Gemma 4 Chat - Strateji Yönetimi</h3><span className="badge badge-p">Beta</span></div>
+            <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px', height: 'calc(100vh - 300px)' }}>
+              <div style={{ flex: 1, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius2)', padding: '12px', background: 'var(--bg3)' }}>
+                {chatHistory.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: 'var(--text3)' }}>
+                    <p>💬 Strateji komutlarını doğal dilde yazın</p>
+                    <p style={{ fontSize: 11, marginTop: 8 }}>Örnek: "stratejimi aggressive yap", "risk limitini düşür", "BTCUSDT analiz et"</p>
+                  </div>
+                ) : (
+                  chatHistory.map((msg, i) => (
+                    <div key={i} style={{ marginBottom: '8px', display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                      <div style={{ background: msg.role === 'user' ? 'var(--c)' : 'var(--bg2)', color: msg.role === 'user' ? 'var(--bg)' : 'var(--text)', padding: '8px 12px', borderRadius: 'var(--radius2)', maxWidth: '70%', fontSize: 12 }}>
+                        {msg.message}
+                      </div>
+                    </div>
+                  ))
+                )}
+                {chatLoading && <div style={{ textAlign: 'center', color: 'var(--text3)' }}>⏳ Gemma işleniyor...</div>}
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input type="text" value={chatMsg} onChange={e => setChatMsg(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleChat()} placeholder="Komutunuzu yazın..." style={{ flex: 1, padding: '8px 12px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--radius2)', color: 'var(--text)', fontFamily: 'var(--font)' }} />
+                <button onClick={handleChat} disabled={chatLoading || !chatMsg} style={{ padding: '8px 16px', background: 'var(--c)', color: 'var(--bg)', border: 'none', borderRadius: 'var(--radius2)', cursor: 'pointer', fontWeight: 600 }}>Gönder</button>
+              </div>
+            </div>
+          </div>
         </>}
       </main>
     </div>
