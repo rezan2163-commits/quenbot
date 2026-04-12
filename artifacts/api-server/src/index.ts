@@ -130,14 +130,32 @@ async function refreshMoversCache() {
   moversCache.refreshing = true;
   try {
     const rows = await sql`
+      WITH latest_per_symbol AS (
+        SELECT DISTINCT ON (symbol)
+          symbol,
+          start_price::double precision AS open_price,
+          end_price::double precision AS current_price,
+          (
+            CASE WHEN COALESCE(direction, 'long') = 'short'
+              THEN -ABS(change_pct::double precision)
+              ELSE ABS(change_pct::double precision)
+            END
+          ) AS signed_change,
+          end_time AS timestamp
+        FROM price_movements
+        WHERE end_time >= NOW() - INTERVAL '3 hours'
+          AND start_price > 0
+          AND end_price > 0
+          AND ABS(change_pct::double precision) <= 0.25
+        ORDER BY symbol, end_time DESC
+      )
       SELECT symbol,
-             start_price::double precision AS open_price,
-             end_price::double precision AS current_price,
-             (change_pct * 100)::double precision AS change_pct,
-             end_time AS timestamp
-      FROM price_movements
-      WHERE end_time >= NOW() - INTERVAL '3 hours'
-      ORDER BY ABS(change_pct) DESC
+             open_price,
+             current_price,
+             (signed_change * 100)::double precision AS change_pct,
+             timestamp
+      FROM latest_per_symbol
+      ORDER BY ABS(signed_change) DESC
       LIMIT 20
     `;
     moversCache.data = rows;
@@ -467,15 +485,31 @@ app.get("/api/analytics/order-flow", async (req, res) => {
 app.get("/api/analytics/price-history/:symbol", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
+    const tfRaw = String(req.query.tf || "5m").toLowerCase();
+
+    const tfMap: Record<string, { seconds: number; lookback: string }> = {
+      "1m": { seconds: 60, lookback: "6 hours" },
+      "5m": { seconds: 300, lookback: "24 hours" },
+      "15m": { seconds: 900, lookback: "3 days" },
+      "1h": { seconds: 3600, lookback: "7 days" },
+      "4h": { seconds: 14400, lookback: "30 days" },
+      "8h": { seconds: 28800, lookback: "60 days" },
+      "1d": { seconds: 86400, lookback: "180 days" },
+    };
+
+    const tfCfg = tfMap[tfRaw] || tfMap["5m"];
+    const bucketSeconds = tfCfg.seconds;
+    const lookbackLiteral = tfCfg.lookback;
+
     const rows = await sql`
-      SELECT date_trunc('minute', timestamp) AS minute,
+      SELECT to_timestamp(FLOOR(EXTRACT(EPOCH FROM timestamp) / ${bucketSeconds}) * ${bucketSeconds}) AS minute,
              (ARRAY_AGG(price::double precision ORDER BY timestamp ASC))[1] AS open,
              MAX(price::double precision) AS high,
              MIN(price::double precision) AS low,
              (ARRAY_AGG(price::double precision ORDER BY timestamp DESC))[1] AS close,
              SUM(quantity::double precision)::double precision AS volume
       FROM trades
-      WHERE symbol = ${symbol} AND timestamp >= NOW() - INTERVAL '60 minutes'
+      WHERE symbol = ${symbol} AND timestamp >= NOW() - (${lookbackLiteral}::interval)
       GROUP BY minute
       ORDER BY minute ASC
     `;

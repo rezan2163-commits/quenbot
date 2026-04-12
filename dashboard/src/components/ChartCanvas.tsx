@@ -5,10 +5,21 @@ import { createChart, IChartApi, CandlestickData, Time, CandlestickSeries, creat
 import { usePriceHistory, useSignals, useLivePrices, Signal } from "@/lib/api";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+const TIMEFRAMES = ["5m", "15m", "1h", "4h", "8h", "1d"] as const;
+
+const TF_SECONDS: Record<string, number> = {
+  "5m": 300,
+  "15m": 900,
+  "1h": 3600,
+  "4h": 14400,
+  "8h": 28800,
+  "1d": 86400,
+};
 
 export default function ChartCanvas() {
   const [activeSymbol, setActiveSymbol] = useState(SYMBOLS[0]);
-  const { data: candles } = usePriceHistory(activeSymbol);
+  const [activeTf, setActiveTf] = useState<(typeof TIMEFRAMES)[number]>("5m");
+  const { data: candles } = usePriceHistory(activeSymbol, activeTf);
   const { data: signals } = useSignals();
   const { data: prices } = useLivePrices();
 
@@ -19,6 +30,17 @@ export default function ChartCanvas() {
   const toNumber = (value: unknown, fallback = 0) => {
     const n = Number(value);
     return Number.isFinite(n) ? n : fallback;
+  };
+
+  const toTargetPct = (signal: Signal) => {
+    const raw = toNumber(signal.target_pct ?? signal.metadata?.target_pct ?? 0);
+    if (raw <= 0) return 0;
+    return raw > 0.5 ? raw / 100 : raw;
+  };
+
+  const alignToTf = (unixSec: number, tf: string) => {
+    const step = TF_SECONDS[tf] || 300;
+    return Math.floor(unixSec / step) * step;
   };
 
   // Initialize chart
@@ -97,24 +119,29 @@ export default function ChartCanvas() {
     seriesRef.current.setData(mapped);
 
     // Add signal markers
-    const symbolSignals = (signals || []).filter(
-      (s) => s.symbol === activeSymbol && (s.status === "pending" || s.status === "processed")
-    );
+    const symbolSignals = (signals || []).filter((s) => {
+      if (s.symbol !== activeSymbol) return false;
+      if (!(s.status === "pending" || s.status === "processed" || s.status === "active")) return false;
+      return toTargetPct(s) >= 0.02;
+    });
 
     if (symbolSignals.length > 0 && chartRef.current) {
       const markers = symbolSignals.slice(0, 20).map((s) => ({
-        time: (new Date(s.timestamp).getTime() / 1000) as Time,
+        time: alignToTf(
+          Math.floor(new Date(s.signal_time || s.timestamp).getTime() / 1000),
+          activeTf
+        ) as Time,
         position: s.direction === "long" ? ("belowBar" as const) : ("aboveBar" as const),
         color: s.direction === "long" ? "#22c55e" : "#ef4444",
         shape: s.direction === "long" ? ("arrowUp" as const) : ("arrowDown" as const),
-        text: s.direction === "long" ? "AL" : "SAT",
+        text: s.direction === "long" ? "AL %2+" : "SAT %2+",
       }));
 
       createSeriesMarkers(seriesRef.current, markers);
     }
 
     chartRef.current?.timeScale().fitContent();
-  }, [candles, signals, activeSymbol]);
+  }, [candles, signals, activeSymbol, activeTf]);
 
   // Current price from live data
   const currentPrice = prices?.find((p) => p.symbol === activeSymbol);
@@ -128,7 +155,7 @@ export default function ChartCanvas() {
     <div className="flex flex-col h-full">
       {/* Symbol tabs + price */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-surface-border bg-surface-card/40">
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-3">
           {SYMBOLS.map((sym) => (
             <button
               key={sym}
@@ -142,6 +169,21 @@ export default function ChartCanvas() {
               {sym.replace("USDT", "")}
             </button>
           ))}
+          <div className="flex items-center gap-1 ml-2">
+            {TIMEFRAMES.map((tf) => (
+              <button
+                key={tf}
+                onClick={() => setActiveTf(tf)}
+                className={`px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+                  activeTf === tf
+                    ? "bg-accent/20 text-accent"
+                    : "text-gray-500 hover:text-gray-300 hover:bg-surface-hover"
+                }`}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
         </div>
 
         {currentPrice && (

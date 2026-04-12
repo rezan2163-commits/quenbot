@@ -168,9 +168,9 @@ export function useSimulations() {
   });
 }
 
-export function usePriceHistory(symbol: string) {
+export function usePriceHistory(symbol: string, tf: string = "5m") {
   return useSWR<PriceCandle[]>(
-    symbol ? `${API}/api/analytics/price-history/${symbol}` : null,
+    symbol ? `${API}/api/analytics/price-history/${symbol}?tf=${encodeURIComponent(tf)}` : null,
     fetcher,
     { refreshInterval: 15000 }
   );
