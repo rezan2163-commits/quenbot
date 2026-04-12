@@ -9,8 +9,8 @@ class Config:
     DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/trade_intel")
 
     # Exchanges - 2026 Updated URLs
-    # Binance WebSocket
-    BINANCE_SPOT_WS_URL = "wss://stream.binance.com:9443/ws"
+    # Binance WebSocket (port 443 — port 9443 blocked on EU servers)
+    BINANCE_SPOT_WS_URL = "wss://stream.binance.com:443/ws"
     # Binance Futures WebSocket (fapi stream)
     BINANCE_FUTURES_WS_URL = "wss://fstream.binance.com/ws"
     # Bybit WebSocket (V5 API)

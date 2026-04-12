@@ -83,9 +83,8 @@ class ScoutAgent:
         tasks = [
             self._monitor_binance_market('spot'),
             self._monitor_binance_market('futures'),
-            # Bybit WS disabled — server IP blocked (403 on both REST and WS)
-            # self._monitor_bybit_market('spot'),
-            # self._monitor_bybit_market('futures'),
+            self._monitor_bybit_market('spot'),
+            self._monitor_bybit_market('futures'),
             self._rest_fallback_fetcher(),
             self._price_movement_detector(),
             self._watchlist_refresher(),
@@ -154,9 +153,7 @@ class ScoutAgent:
                 await asyncio.sleep(Config.get_agent_config('scout')['reconnect_delay'])
 
     async def _monitor_bybit_market(self, market_type: str):
-        """Monitor the Bybit trade stream using V5 API format. DISABLED — IP blocked (403)."""
-        return  # Bybit WS disabled — server IP blocked
-        # V5 API uses different URL patterns
+        """Monitor the Bybit trade stream using V5 API format."""
         if market_type == 'spot':
             ws_url = Config.BYBIT_SPOT_WS_URL
         else:
@@ -210,7 +207,8 @@ class ScoutAgent:
                 for symbol in active_symbols:
                     tasks.append(self._fetch_binance_rest('spot', symbol))
                     tasks.append(self._fetch_binance_rest('futures', symbol))
-                    # Note: Bybit REST API returns 403; using WebSocket only for Bybit
+                    tasks.append(self._fetch_bybit_rest('spot', symbol))
+                    tasks.append(self._fetch_bybit_rest('futures', symbol))
                 
                 await asyncio.gather(*tasks, return_exceptions=True)
                 logger.debug(f"REST API fallback fetch completed for {len(active_symbols)} symbols ({self.trade_counter} total trades)")
@@ -255,8 +253,7 @@ class ScoutAgent:
             logger.debug(f"Binance REST fetch error for {symbol} ({market_type}): {e}")
 
     async def _fetch_bybit_rest(self, market_type: str, symbol: str):
-        """Fetch recent trades from Bybit REST API (V5 format). DISABLED — IP blocked (403)."""
-        return  # Bybit REST disabled — server IP blocked
+        """Fetch recent trades from Bybit REST API (V5 format)."""
         try:
             endpoint = f"{Config.BYBIT_REST_API}/v5/market/recent-trade"
             category = "spot" if market_type == "spot" else "linear"

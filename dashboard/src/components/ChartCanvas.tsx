@@ -19,7 +19,8 @@ export default function ChartCanvas() {
   // Initialize chart
   useEffect(() => {
     if (!containerRef.current) return;
-    const chart = createChart(containerRef.current, {
+    try {
+      const chart = createChart(containerRef.current, {
       layout: {
         background: { color: "#0f172a" },
         textColor: "#94a3b8",
@@ -71,6 +72,9 @@ export default function ChartCanvas() {
       chartRef.current = null;
       seriesRef.current = null;
     };
+    } catch (err) {
+      console.error("Chart init error:", err);
+    }
   }, []);
 
   // Update data

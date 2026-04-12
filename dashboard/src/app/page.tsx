@@ -1,15 +1,13 @@
 "use client";
 
 import { SWRConfig } from "swr";
-import { Component, ReactNode, useState } from "react";
+import { Component, ReactNode, useState, Suspense, lazy } from "react";
+import dynamic from "next/dynamic";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
-import ChartCanvas from "@/components/ChartCanvas";
 import BottomTerminal from "@/components/BottomTerminal";
 import StrategyControl from "@/components/StrategyControl";
 import ChatPanel from "@/components/ChatPanel";
-import BacktestPanel from "@/components/BacktestPanel";
-import AgentFlow from "@/components/AgentFlow";
 import StrategyAlert from "@/components/StrategyAlert";
 import LiveMarketFeed from "@/components/LiveMarketFeed";
 import ActiveSignals from "@/components/ActiveSignals";
@@ -19,8 +17,13 @@ import LearningLog from "@/components/LearningLog";
 import { swrConfig } from "@/lib/api";
 import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain } from "lucide-react";
 
-class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: string }> {
-  constructor(props: { children: ReactNode }) {
+// Heavy components with lightweight-charts — lazy load
+const ChartCanvas = dynamic(() => import("@/components/ChartCanvas"), { ssr: false, loading: () => <div className="flex-1 bg-surface animate-pulse" /> });
+const BacktestPanel = dynamic(() => import("@/components/BacktestPanel"), { ssr: false, loading: () => <div className="p-4 text-gray-600 text-xs">Yükleniyor...</div> });
+const AgentFlow = dynamic(() => import("@/components/AgentFlow"), { ssr: false, loading: () => <div className="p-4 text-gray-600 text-xs">Yükleniyor...</div> });
+
+class ErrorBoundary extends Component<{ children: ReactNode; fallback?: string }, { hasError: boolean; error: string }> {
+  constructor(props: { children: ReactNode; fallback?: string }) {
     super(props);
     this.state = { hasError: false, error: "" };
   }
@@ -30,11 +33,11 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boole
   render() {
     if (this.state.hasError) {
       return (
-        <div className="flex items-center justify-center h-screen bg-surface text-gray-300">
-          <div className="text-center space-y-4">
-            <p className="text-xl font-bold text-red-400">Dashboard Hatası</p>
-            <p className="text-sm text-gray-500">{this.state.error}</p>
-            <button onClick={() => this.setState({ hasError: false, error: "" })} className="px-4 py-2 bg-accent rounded text-white text-sm">
+        <div className="flex items-center justify-center h-full bg-surface text-gray-300 p-4">
+          <div className="text-center space-y-2">
+            <p className="text-sm font-bold text-red-400">{this.props.fallback || "Hata"}</p>
+            <p className="text-[10px] text-gray-500 max-w-xs break-all">{this.state.error}</p>
+            <button onClick={() => this.setState({ hasError: false, error: "" })} className="px-3 py-1 bg-accent rounded text-white text-xs">
               Tekrar Dene
             </button>
           </div>
@@ -91,30 +94,42 @@ function RightPanel() {
 
 export default function Home() {
   return (
-    <ErrorBoundary>
+    <ErrorBoundary fallback="Dashboard Hatası">
       <SWRConfig value={swrConfig}>
         <div className="flex flex-col h-screen overflow-hidden">
           <div className="flex flex-1 min-h-0">
             {/* Left sidebar — Agent health */}
-            <Sidebar />
+            <ErrorBoundary fallback="Sidebar Hatası">
+              <Sidebar />
+            </ErrorBoundary>
 
             {/* Center — Main trading area */}
             <div className="flex-1 flex flex-col min-w-0">
-              <TopBar />
+              <ErrorBoundary fallback="TopBar Hatası">
+                <TopBar />
+              </ErrorBoundary>
               <div className="flex-[3] min-h-0">
-                <ChartCanvas />
+                <ErrorBoundary fallback="Grafik Hatası">
+                  <ChartCanvas />
+                </ErrorBoundary>
               </div>
               <div className="flex-[2] min-h-0">
-                <BottomTerminal />
+                <ErrorBoundary fallback="Terminal Hatası">
+                  <BottomTerminal />
+                </ErrorBoundary>
               </div>
             </div>
 
             {/* Right panel — Backtest + Flow */}
-            <RightPanel />
+            <ErrorBoundary fallback="Panel Hatası">
+              <RightPanel />
+            </ErrorBoundary>
           </div>
 
           {/* Bottom strategy alert bar */}
-          <StrategyAlert />
+          <ErrorBoundary fallback="Alert Hatası">
+            <StrategyAlert />
+          </ErrorBoundary>
 
           {/* Floating controls */}
           <StrategyControl />
