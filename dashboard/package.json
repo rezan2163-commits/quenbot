@@ -14,7 +14,7 @@
   "packageManager": "pnpm@10.23.0",
   "dependencies": {
     "lightweight-charts": "^5.1.0",
-    "lucide-react": "^0.344.0",
+    "lucide-react": "^1.8.0",
     "next": "^16.2.3",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",

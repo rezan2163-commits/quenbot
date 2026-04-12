@@ -8,6 +8,14 @@ async function fetcher<T>(url: string): Promise<T> {
   return res.json();
 }
 
+export const swrConfig = {
+  onErrorRetry: (error: Error, _key: string, _config: any, revalidate: any, { retryCount }: { retryCount: number }) => {
+    if (retryCount >= 3) return;
+    setTimeout(() => revalidate({ retryOnFocus: false }), 5000);
+  },
+  shouldRetryOnError: true,
+};
+
 /* ─── Types ─── */
 
 export interface AgentInfo {
@@ -194,4 +202,199 @@ export async function setDirective(master_directive: string) {
 export async function getDirectives() {
   const res = await fetch(`${API}/api/directives`);
   return res.json();
+}
+
+/* ─── Backtest Types & Hooks ─── */
+
+export interface BacktestScore {
+  symbol: string;
+  signal_type: string;
+  total: number;
+  wins: number;
+  losses: number;
+  avg_pnl_pct: number;
+  success_rate: number;
+}
+
+export interface BacktestRecent {
+  id: number;
+  symbol: string;
+  side: string;
+  entry_price: number;
+  exit_price: number;
+  pnl: number;
+  pnl_pct: number;
+  entry_time: string;
+  exit_time: string;
+  signal_type: string;
+  confidence: number;
+  success: boolean;
+}
+
+export interface SelfCorrectionStatus {
+  recent_performance: {
+    recent_trades: number;
+    recent_wins: number;
+    recent_win_rate: number;
+    avg_pnl_pct: number;
+  };
+  needs_correction: boolean;
+  corrections: Array<{
+    id: number;
+    signal_type: string;
+    failure_type: string;
+    adjustment_key: string;
+    adjustment_value: string;
+    reason: string;
+    applied: boolean;
+  }>;
+  strategy_state: Array<{ state_key: string; state_value: any; updated_at: string }>;
+  rca_summary: Array<{ failure_type: string; count: number; avg_confidence: number }>;
+}
+
+export interface StrategyEvent {
+  state: Array<{ state_key: string; state_value: any; updated_at: string }>;
+  audits: Array<{
+    id: number;
+    timestamp: string;
+    total_simulations: number;
+    successful: number;
+    failed: number;
+    success_rate: number;
+    avg_win_pct: number;
+    avg_loss_pct: number;
+  }>;
+}
+
+export interface AgentFlowData {
+  agents: Record<string, any>;
+  pipeline: Record<string, {
+    status: string;
+    lastBeat: string;
+    recent?: any[];
+    recent_signals?: any[];
+    recent_sims?: any[];
+  }>;
+}
+
+export interface EquityPoint {
+  time: string;
+  pnl: number;
+  cumulative_pnl: number;
+}
+
+export function useBacktestScores() {
+  return useSWR<BacktestScore[]>(`${API}/api/backtest/scores`, fetcher, {
+    refreshInterval: 15000,
+  });
+}
+
+export function useBacktestRecent() {
+  return useSWR<BacktestRecent[]>(`${API}/api/backtest/recent`, fetcher, {
+    refreshInterval: 10000,
+  });
+}
+
+export function useSelfCorrection() {
+  return useSWR<SelfCorrectionStatus>(`${API}/api/selfcorrection/status`, fetcher, {
+    refreshInterval: 10000,
+  });
+}
+
+export function useStrategyEvents() {
+  return useSWR<StrategyEvent>(`${API}/api/strategy/events`, fetcher, {
+    refreshInterval: 10000,
+  });
+}
+
+export function useAgentFlow() {
+  return useSWR<AgentFlowData>(`${API}/api/agents/flow`, fetcher, {
+    refreshInterval: 5000,
+  });
+}
+
+export function useEquityCurve() {
+  return useSWR<EquityPoint[]>(`${API}/api/analytics/equity-curve`, fetcher, {
+    refreshInterval: 15000,
+  });
+}
+
+/* ─── Pattern Library Types & Hooks ─── */
+
+export interface PatternRecord {
+  id: number;
+  symbol: string;
+  exchange: string;
+  market_type: string;
+  snapshot_data: any;
+  outcome_15m: number | null;
+  outcome_1h: number | null;
+  outcome_4h: number | null;
+  outcome_1d: number | null;
+  created_at: string;
+}
+
+export function usePatterns(symbol?: string) {
+  const key = symbol
+    ? `${API}/api/brain/patterns?symbol=${symbol}`
+    : `${API}/api/brain/patterns`;
+  return useSWR<PatternRecord[]>(key, fetcher, { refreshInterval: 15000 });
+}
+
+/* ─── Signal History ─── */
+
+export interface SignalHistoryItem {
+  id: number;
+  symbol: string;
+  signal_type: string;
+  direction: string;
+  confidence: number;
+  price: number;
+  status: string;
+  timestamp: string;
+  metadata: Record<string, any>;
+}
+
+export function useSignalHistory(symbol?: string, status?: string) {
+  const params = new URLSearchParams();
+  if (symbol) params.set("symbol", symbol);
+  if (status) params.set("status", status);
+  const qs = params.toString();
+  return useSWR<SignalHistoryItem[]>(
+    `${API}/api/signals/history${qs ? `?${qs}` : ""}`,
+    fetcher,
+    { refreshInterval: 10000 }
+  );
+}
+
+/* ─── Learning Log ─── */
+
+export interface LearningLogEntry {
+  id: number;
+  signal_type: string;
+  was_correct: boolean;
+  pnl_pct: number;
+  context: any;
+  created_at: string;
+}
+
+export interface LearningStats {
+  total: number;
+  correct: number;
+  accuracy: number;
+  avg_pnl: number;
+  daily_accuracy: Array<{ day: string; total: number; correct: number }>;
+  by_type: Array<{ signal_type: string; total: number; correct: number; avg_pnl: number; total_pnl: number }>;
+}
+
+export function useLearningLog() {
+  return useSWR<LearningLogEntry[]>(`${API}/api/brain/learning-log`, fetcher, {
+    refreshInterval: 10000,
+  });
+}
+
+export function useLearningStats() {
+  return useSWR<LearningStats>(`${API}/api/brain/learning-stats`, fetcher, {
+    refreshInterval: 15000,
+  });
 }

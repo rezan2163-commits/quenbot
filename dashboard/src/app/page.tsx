@@ -1,37 +1,126 @@
 "use client";
 
+import { SWRConfig } from "swr";
+import { Component, ReactNode, useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
 import ChartCanvas from "@/components/ChartCanvas";
 import BottomTerminal from "@/components/BottomTerminal";
 import StrategyControl from "@/components/StrategyControl";
 import ChatPanel from "@/components/ChatPanel";
+import BacktestPanel from "@/components/BacktestPanel";
+import AgentFlow from "@/components/AgentFlow";
+import StrategyAlert from "@/components/StrategyAlert";
+import LiveMarketFeed from "@/components/LiveMarketFeed";
+import ActiveSignals from "@/components/ActiveSignals";
+import PatternLibrary from "@/components/PatternLibrary";
+import SignalHistory from "@/components/SignalHistory";
+import LearningLog from "@/components/LearningLog";
+import { swrConfig } from "@/lib/api";
+import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain } from "lucide-react";
+
+class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: string }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: "" };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error: error.message };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex items-center justify-center h-screen bg-surface text-gray-300">
+          <div className="text-center space-y-4">
+            <p className="text-xl font-bold text-red-400">Dashboard Hatası</p>
+            <p className="text-sm text-gray-500">{this.state.error}</p>
+            <button onClick={() => this.setState({ hasError: false, error: "" })} className="px-4 py-2 bg-accent rounded text-white text-sm">
+              Tekrar Dene
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function RightPanel() {
+  const [tab, setTab] = useState<"market" | "signals" | "backtest" | "flow" | "patterns" | "history" | "learning">("market");
+
+  const tabs = [
+    { key: "market" as const, icon: Radio, label: "Piyasa" },
+    { key: "signals" as const, icon: Crosshair, label: "Sinyaller" },
+    { key: "backtest" as const, icon: BarChart3, label: "Backtest" },
+    { key: "flow" as const, icon: GitBranch, label: "Flow" },
+    { key: "patterns" as const, icon: Database, label: "Paternler" },
+    { key: "history" as const, icon: History, label: "Geçmiş" },
+    { key: "learning" as const, icon: Brain, label: "Öğrenme" },
+  ];
+
+  return (
+    <div className="w-80 flex-shrink-0 h-full flex flex-col border-l border-surface-border">
+      {/* Tab selector — scrollable */}
+      <div className="flex overflow-x-auto border-b border-surface-border bg-surface-card/30 custom-scrollbar">
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`flex items-center justify-center gap-1 px-2.5 py-2 text-[10px] font-medium whitespace-nowrap transition-colors ${
+              tab === t.key ? "text-accent border-b-2 border-accent" : "text-gray-500 hover:text-gray-300"
+            }`}
+          >
+            <t.icon size={11} />
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {/* Panel content */}
+      <div className="flex-1 min-h-0">
+        {tab === "market" && <LiveMarketFeed />}
+        {tab === "signals" && <ActiveSignals />}
+        {tab === "backtest" && <BacktestPanel />}
+        {tab === "flow" && <AgentFlow />}
+        {tab === "patterns" && <PatternLibrary />}
+        {tab === "history" && <SignalHistory />}
+        {tab === "learning" && <LearningLog />}
+      </div>
+    </div>
+  );
+}
 
 export default function Home() {
   return (
-    <div className="flex h-screen overflow-hidden">
-      {/* Sidebar — Agent health */}
-      <Sidebar />
+    <ErrorBoundary>
+      <SWRConfig value={swrConfig}>
+        <div className="flex flex-col h-screen overflow-hidden">
+          <div className="flex flex-1 min-h-0">
+            {/* Left sidebar — Agent health */}
+            <Sidebar />
 
-      {/* Main area */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Top KPIs + movers */}
-        <TopBar />
+            {/* Center — Main trading area */}
+            <div className="flex-1 flex flex-col min-w-0">
+              <TopBar />
+              <div className="flex-[3] min-h-0">
+                <ChartCanvas />
+              </div>
+              <div className="flex-[2] min-h-0">
+                <BottomTerminal />
+              </div>
+            </div>
 
-        {/* Chart — 60% height */}
-        <div className="flex-[3] min-h-0">
-          <ChartCanvas />
+            {/* Right panel — Backtest + Flow */}
+            <RightPanel />
+          </div>
+
+          {/* Bottom strategy alert bar */}
+          <StrategyAlert />
+
+          {/* Floating controls */}
+          <StrategyControl />
+          <ChatPanel />
         </div>
-
-        {/* Terminal — 40% height */}
-        <div className="flex-[2] min-h-0">
-          <BottomTerminal />
-        </div>
-      </div>
-
-      {/* Floating controls */}
-      <StrategyControl />
-      <ChatPanel />
-    </div>
+      </SWRConfig>
+    </ErrorBoundary>
   );
 }

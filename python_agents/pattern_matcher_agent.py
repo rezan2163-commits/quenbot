@@ -8,7 +8,7 @@ Akış:
   Scout (WebSocket) → DB (trades) → PatternMatcher
     → historical_signatures sorgusu
     → Euclidean distance hesaplama
-    → similarity > 0.90 ⇒ PATTERN_MATCH event → Brain → RiskManager → Strategist
+    → similarity > 0.50 ⇒ PATTERN_MATCH event → Brain → RiskManager → Strategist
 
 Benzerlik formülü:
   distance = ||V_current - V_historical|| (L2 norm)
@@ -49,7 +49,7 @@ def _get_llm_bridge():
 
 
 # ─── Configuration ───
-SIMILARITY_THRESHOLD = 0.90        # Minimum similarity to trigger a match
+SIMILARITY_THRESHOLD = 0.50        # Minimum similarity to trigger a match (spec: %50+)
 SCAN_INTERVAL_SECONDS = 45         # How often to scan each symbol
 VECTOR_POINTS = 60                 # N-point price vector (last N trade prices)
 MIN_HISTORICAL_SIGNATURES = 3      # Minimum signatures needed for matching

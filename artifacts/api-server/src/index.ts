@@ -1221,6 +1221,161 @@ app.post("/api/chat", express.json(), async (req, res) => {
   }
 });
 
+// ─── Backtest Scoring ───
+app.get("/api/backtest/scores", async (_req, res) => {
+  try {
+    const rows = await sql`
+      SELECT
+        s.symbol,
+        s.signal_type,
+        COUNT(*)::int AS total,
+        SUM(CASE WHEN sim.pnl > 0 THEN 1 ELSE 0 END)::int AS wins,
+        SUM(CASE WHEN sim.pnl <= 0 THEN 1 ELSE 0 END)::int AS losses,
+        ROUND(AVG(sim.pnl_pct)::numeric, 3) AS avg_pnl_pct,
+        ROUND((SUM(CASE WHEN sim.pnl > 0 THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) * 100)::numeric, 1) AS success_rate
+      FROM signals s
+      JOIN simulations sim ON sim.signal_id = s.id
+      WHERE sim.status = 'closed'
+      GROUP BY s.symbol, s.signal_type
+      ORDER BY total DESC
+      LIMIT 50
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/backtest/recent", async (_req, res) => {
+  try {
+    const rows = await sql`
+      SELECT
+        sim.id, sim.symbol, sim.side, sim.entry_price, sim.exit_price,
+        sim.pnl, sim.pnl_pct, sim.entry_time, sim.exit_time,
+        s.signal_type, s.confidence,
+        CASE WHEN sim.pnl > 0 THEN true ELSE false END AS success
+      FROM simulations sim
+      LEFT JOIN signals s ON s.id = sim.signal_id
+      WHERE sim.status = 'closed'
+      ORDER BY sim.exit_time DESC
+      LIMIT 30
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Self-Correction Status ───
+app.get("/api/selfcorrection/status", async (_req, res) => {
+  try {
+    const [corrections, recentPerf, strategyEvents, rca] = await Promise.all([
+      sql`
+        SELECT id, signal_type, failure_type, adjustment_key, adjustment_value, reason, applied, simulation_id
+        FROM correction_notes ORDER BY id DESC LIMIT 20
+      `,
+      sql`
+        SELECT
+          COUNT(*)::int AS recent_trades,
+          SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::int AS recent_wins,
+          ROUND((SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) * 100)::numeric, 1) AS recent_win_rate,
+          ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct
+        FROM simulations
+        WHERE status = 'closed' AND exit_time > NOW() - INTERVAL '24 hours'
+      `,
+      sql`
+        SELECT state_value, updated_at
+        FROM bot_state
+        WHERE state_key IN ('strategy_mode', 'last_strategy_update', 'adaptive_params')
+        ORDER BY updated_at DESC
+      `,
+      sql`
+        SELECT failure_type, COUNT(*)::int AS count,
+          ROUND(AVG(confidence)::numeric, 2) AS avg_confidence
+        FROM rca_results
+        WHERE id > (SELECT COALESCE(MAX(id), 0) - 50 FROM rca_results)
+        GROUP BY failure_type
+        ORDER BY count DESC
+      `,
+    ]);
+    const perf = recentPerf[0] || {};
+    const needsCorrection = (perf.recent_win_rate ?? 100) < 50 && (perf.recent_trades ?? 0) >= 5;
+    res.json({
+      recent_performance: perf,
+      needs_correction: needsCorrection,
+      corrections,
+      strategy_state: strategyEvents,
+      rca_summary: rca,
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Strategy Update Events ───
+app.get("/api/strategy/events", async (_req, res) => {
+  try {
+    const rows = await sql`
+      SELECT state_key, state_value, updated_at
+      FROM bot_state
+      WHERE state_key IN ('strategy_mode', 'last_strategy_update', 'adaptive_params', 'brain_calibration', 'risk_mode')
+      ORDER BY updated_at DESC
+    `;
+    const auditRows = await sql`
+      SELECT id, timestamp, total_simulations, successful, failed, success_rate, avg_win_pct, avg_loss_pct
+      FROM audit_records ORDER BY timestamp DESC LIMIT 10
+    `;
+    res.json({ state: rows, audits: auditRows });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── Agent Flow (Decision Pipeline) ───
+app.get("/api/agents/flow", async (_req, res) => {
+  try {
+    const [heartbeats, recentSignals, recentSims, recentPatterns] = await Promise.all([
+      sql`SELECT agent_name, status, last_heartbeat, metadata FROM agent_heartbeat`,
+      sql`SELECT id, symbol, signal_type, confidence, status, timestamp FROM signals ORDER BY id DESC LIMIT 5`,
+      sql`SELECT id, symbol, side, status, pnl, entry_time FROM simulations ORDER BY id DESC LIMIT 5`,
+      sql`SELECT id, symbol, similarity, predicted_direction, confidence, brain_decision FROM pattern_match_results ORDER BY id DESC LIMIT 5`,
+    ]);
+    const agents = Object.fromEntries(heartbeats.map((h: any) => [h.agent_name, h]));
+    res.json({
+      agents,
+      pipeline: {
+        scout: { status: agents.scout?.status || "unknown", lastBeat: agents.scout?.last_heartbeat },
+        pattern_matcher: { status: agents.pattern_matcher?.status || "unknown", lastBeat: agents.pattern_matcher?.last_heartbeat, recent: recentPatterns },
+        strategist: { status: agents.strategist?.status || "unknown", lastBeat: agents.strategist?.last_heartbeat, recent_signals: recentSignals },
+        ghost_simulator: { status: agents.ghost_simulator?.status || "unknown", lastBeat: agents.ghost_simulator?.last_heartbeat, recent_sims: recentSims },
+        auditor: { status: agents.auditor?.status || "unknown", lastBeat: agents.auditor?.last_heartbeat },
+        brain: { status: agents.brain?.status || "unknown", lastBeat: agents.brain?.last_heartbeat },
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ─── PnL Equity Curve ───
+app.get("/api/analytics/equity-curve", async (_req, res) => {
+  try {
+    const rows = await sql`
+      SELECT
+        exit_time AS time,
+        pnl,
+        SUM(pnl) OVER (ORDER BY exit_time) AS cumulative_pnl
+      FROM simulations
+      WHERE status = 'closed' AND exit_time IS NOT NULL
+      ORDER BY exit_time
+      LIMIT 200
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 app.listen(port, async () => {
   await connectDatabase();
   await createTables();

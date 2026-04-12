@@ -67,12 +67,13 @@ export default function BottomTerminal() {
     prevSignalsRef.current = key;
 
     for (const s of signals.slice(0, 3)) {
-      const level = s.direction === "long" ? "bull" : "bear";
+      const dir = s.direction || "unknown";
+      const level = dir === "long" ? "bull" : "bear";
       addLog(
         level,
-        `SINYAL ${s.direction.toUpperCase()} ${s.symbol} %${(
-          s.confidence * 100
-        ).toFixed(0)} conf @$${s.price.toLocaleString()} [${s.status}]`
+        `SINYAL ${dir.toUpperCase()} ${s.symbol} %${(
+          (s.confidence ?? 0) * 100
+        ).toFixed(0)} conf @$${(s.price ?? 0).toLocaleString()} [${s.status}]`
       );
     }
   }, [signals, addLog]);

@@ -96,7 +96,7 @@ class AgentOrchestrator:
         self._last_resource_snapshot = None
         self._resource_warnings: list[dict] = []
         # Pattern-match LLM evaluation throttles to keep chat responsive
-        self._pattern_eval_min_similarity = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_SIM", "0.965"))
+        self._pattern_eval_min_similarity = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_SIM", "0.50"))
         self._pattern_eval_min_interval = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_INTERVAL", "20"))
         self._last_pattern_eval_at: dict[str, float] = {}
         self._pattern_eval_semaphore = asyncio.Semaphore(1)
@@ -540,6 +540,7 @@ class AgentOrchestrator:
             self._resilient_task("PatternMatcher", self.pattern_matcher.start),
             self._resilient_task("HealthMonitor", self._health_monitor),
             self._resilient_task("DirectiveAPI", self._directive_api_server),
+            self._resilient_task("SelfCorrection", self._self_correction_loop),
         ]
 
         if os.getenv("QUENBOT_ENABLE_CHAT_POLLER", "0").lower() in {"1", "true", "yes", "on"}:
@@ -601,6 +602,88 @@ class AgentOrchestrator:
             logger.info("✓ All agents stopped")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
+
+    async def _self_correction_loop(self):
+        """Periodic self-correction: monitor win rate, auto-revise strategy if <50%"""
+        from adaptive_strategy import AdaptiveStrategyEvolver
+        evolver = AdaptiveStrategyEvolver(self.db)
+        logger.info("🔄 Self-Correction loop started (check every 5 min)")
+        while self.running:
+            try:
+                await asyncio.sleep(300)  # 5 dakikada bir kontrol
+                # Son 24 saatteki performansı kontrol et
+                result = await self.db.db_query("""
+                    SELECT
+                        COUNT(*)::int AS total,
+                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::int AS wins,
+                        ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl
+                    FROM simulations
+                    WHERE status = 'closed' AND exit_time > NOW() - INTERVAL '24 hours'
+                """)
+                if not result or not result[0]:
+                    continue
+                total, wins, avg_pnl = int(result[0][0] or 0), int(result[0][1] or 0), float(result[0][2] or 0)
+                if total < 5:
+                    continue  # Yeterli veri yok
+                win_rate = (wins / total) * 100
+
+                # Bot state'e güncel performansı yaz
+                await self.db.db_execute("""
+                    INSERT INTO bot_state (state_key, state_value, updated_at)
+                    VALUES ('self_correction_status', %s, NOW())
+                    ON CONFLICT (state_key) DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = NOW()
+                """, (json.dumps({
+                    "win_rate": round(win_rate, 1),
+                    "total_trades": total,
+                    "wins": wins,
+                    "avg_pnl_pct": float(avg_pnl),
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }),))
+
+                if win_rate < 50:
+                    logger.warning(f"⚠️ Win rate {win_rate:.1f}% < 50%! Strateji revizyonu başlatılıyor...")
+                    # Adaptive strategy revision
+                    regime = self.state_tracker.state.get("market_regime", "SIDEWAYS") if self.state_tracker else "SIDEWAYS"
+                    adaptation = await evolver.evaluate_and_evolve(regime)
+
+                    # LLM-based strategy revision if available
+                    revision_text = None
+                    if self._llm_available and self.llm_bridge:
+                        try:
+                            prompt = (
+                                f"Son 24 saatte {total} işlem yapıldı. Win rate: %{win_rate:.1f}, "
+                                f"ortalama PnL: %{avg_pnl:.2f}. Performans kötü. "
+                                f"Mevcut rejim: {regime}. "
+                                f"Stratejiyi nasıl revize etmeliyiz? Kısa ve net öneriler ver."
+                            )
+                            resp = await self.llm_bridge.ask(prompt, timeout=30)
+                            revision_text = resp[:500] if resp else None
+                        except Exception:
+                            pass
+
+                    event_data = {
+                        "type": "strategy_revised",
+                        "win_rate": round(win_rate, 1),
+                        "total_trades": total,
+                        "regime": regime,
+                        "adaptation": adaptation,
+                        "llm_recommendation": revision_text,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                    # Bot state'e strateji güncelleme kaydı yaz
+                    await self.db.db_execute("""
+                        INSERT INTO bot_state (state_key, state_value, updated_at)
+                        VALUES ('last_strategy_update', %s, NOW())
+                        ON CONFLICT (state_key) DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = NOW()
+                    """, (json.dumps(event_data),))
+
+                    logger.info(f"✅ Strateji revize edildi: {event_data}")
+                else:
+                    logger.debug(f"📊 Self-correction check OK: win_rate={win_rate:.1f}%")
+
+            except Exception as e:
+                logger.error(f"Self-correction loop error: {e}")
+                await asyncio.sleep(60)
 
     async def _chat_processor(self):
         """Chat mesajlarını hızlı kontrol et ve anında cevapla"""

@@ -2,3 +2,4 @@ packages:
   - "artifacts/**"
   - "lib/**"
   - "scripts"
+  - "dashboard"
