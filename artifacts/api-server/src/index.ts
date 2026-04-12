@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import compression from "compression";
+import fs from "fs/promises";
+import path from "path";
 import { connectDatabase, createTables, sql } from "./db";
 
 const app = express();
@@ -45,6 +47,48 @@ const moversCache: { data: any[]; updatedAt: number; refreshing: boolean } = {
   updatedAt: 0,
   refreshing: false,
 };
+
+const AGENT_LABELS: Record<string, string> = {
+  scout: "Scout",
+  strategist: "Strategist",
+  ghost_simulator: "Ghost Simulator",
+  auditor: "Auditor",
+  brain: "Brain",
+  pattern_matcher: "Pattern Matcher",
+  chat_engine: "Chat Engine",
+  llm_brain: "LLM Omurgası",
+};
+
+function parseMeta(meta: any): Record<string, any> {
+  if (!meta) return {};
+  if (typeof meta === "string") {
+    try { return JSON.parse(meta); } catch { return {}; }
+  }
+  return typeof meta === "object" ? meta : {};
+}
+
+function classifyAgent(signalType: string): string {
+  const t = String(signalType || "").toLowerCase();
+  if (t.startsWith("signature_")) return "scout";
+  if (t.startsWith("intel_") || t.startsWith("evolutionary_") || t.startsWith("momentum_") || t.startsWith("price_action_")) return "strategist";
+  if (t.startsWith("brain_")) return "brain";
+  return "strategist";
+}
+
+function signalReasonTr(meta: Record<string, any>, signalType: string): string {
+  const reasons: string[] = [];
+  const sim = Number(meta.cosine_similarity || meta.avg_similarity || meta.similarity_score || 0);
+  const trend = meta.trend;
+  const rsi = Number(meta.rsi ?? NaN);
+  const tp = Number(meta.target_pct || 0) * 100;
+  const tf = meta.primary_timeframe || meta.timeframe || "15m";
+  if (!Number.isNaN(sim) && sim > 0) reasons.push(`Benzerlik puanı ${sim.toFixed(2)} bulundu.`);
+  if (!Number.isNaN(rsi)) reasons.push(`RSI ${rsi.toFixed(1)} seviyesinde.`);
+  if (trend) reasons.push(`Piyasa eğilimi ${String(trend)} olarak tespit edildi.`);
+  if (tp > 0) reasons.push(`Hedef hareket yaklaşık %${tp.toFixed(2)} olarak hesaplandı.`);
+  reasons.push(`Sinyal tipi ${signalType} üzerinden ${tf} odaklı üretildi.`);
+  return reasons.join(" ");
+}
 
 async function refreshSummaryCache() {
   if (summaryCache.refreshing) return;
@@ -130,6 +174,9 @@ async function refreshMoversCache() {
              end_time AS timestamp
       FROM price_movements
       WHERE end_time >= NOW() - INTERVAL '3 hours'
+        AND end_price > 0
+        AND start_price > 0
+        AND ABS(change_pct) < 0.5
       ORDER BY ABS(change_pct) DESC
       LIMIT 20
     `;
@@ -201,7 +248,7 @@ app.get("/api/bot/summary", async (req, res) => {
       closed_simulations: closedSimulations.count,
       wins: wonSimulations.count,
       losses: lossSimulations.count,
-      win_rate: closedSimulations.count > 0 ? Number((wonSimulations.count / closedSimulations.count) * 100).toFixed(2) : 0,
+      win_rate: closedSimulations.count > 0 ? Number(((wonSimulations.count / closedSimulations.count) * 100).toFixed(2)) : 0,
       average_pnl: avgPnl.value,
       average_pnl_pct: avgPnlPct.value
     });
@@ -212,6 +259,7 @@ app.get("/api/bot/summary", async (req, res) => {
 
 app.get("/api/agents/status", async (req, res) => {
   try {
+    const staleAfterSeconds = Math.max(120, Number(process.env.QUENBOT_AGENT_STALE_SEC || 300));
     const heartbeats = await sql`
       SELECT agent_name, status, last_heartbeat, metadata,
              EXTRACT(EPOCH FROM (NOW() - last_heartbeat)) AS age_seconds
@@ -219,7 +267,7 @@ app.get("/api/agents/status", async (req, res) => {
     `;
     const agents: Record<string, any> = {};
     for (const hb of heartbeats) {
-      const isHealthy = hb.age_seconds < 120;
+      const isHealthy = Number(hb.age_seconds) < staleAfterSeconds;
       agents[hb.agent_name] = {
         status: isHealthy ? hb.status : "stale",
         last_heartbeat: hb.last_heartbeat,
@@ -239,7 +287,8 @@ app.get("/api/agents/status", async (req, res) => {
       agents,
       summary: {
         signals: configSignals.count,
-        movements: configMovements.count
+        movements: configMovements.count,
+        stale_after_seconds: staleAfterSeconds,
       }
     });
   } catch (error) {
@@ -279,8 +328,109 @@ app.get("/api/scout/movements", async (req, res) => {
 
 app.get("/api/signals", async (req, res) => {
   try {
-    const signals = await sql`SELECT * FROM signals ORDER BY timestamp DESC LIMIT 100`;
-    res.json(signals);
+    const limit = Math.min(500, Number(req.query.limit || 150));
+    const direction = String(req.query.direction || "all").toLowerCase();
+    const marketType = String(req.query.market_type || "all").toLowerCase();
+    const agent = String(req.query.agent || "all").toLowerCase();
+
+    const rows = await sql`SELECT * FROM signals ORDER BY timestamp DESC LIMIT ${limit}`;
+    const filtered = rows.filter((row: any) => {
+      const meta = parseMeta(row.metadata);
+      const rowDirection = (meta.position_bias || (String(row.signal_type || "").includes("long") ? "long" : String(row.signal_type || "").includes("short") ? "short" : "")).toLowerCase();
+      const rowMarket = String(meta.market_type || row.market_type || "spot").toLowerCase();
+      const rowAgent = classifyAgent(String(row.signal_type || ""));
+      if (direction !== "all" && rowDirection !== direction) return false;
+      if (marketType !== "all" && rowMarket !== marketType) return false;
+      if (agent !== "all" && rowAgent !== agent) return false;
+      return true;
+    }).map((row: any) => {
+      const meta = parseMeta(row.metadata);
+      const leverage = Number(meta.leverage_x || meta.kaldirac_x || meta.leverage || 1);
+      return {
+        ...row,
+        metadata: meta,
+        agent: classifyAgent(String(row.signal_type || "")),
+        leverage_x: leverage > 0 ? leverage : 1,
+        aciklama_tr: signalReasonTr(meta, String(row.signal_type || "")),
+      };
+    });
+    res.json(filtered);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/agents/signal-stats", async (req, res) => {
+  try {
+    const [signals, hbs] = await Promise.all([
+      sql`SELECT signal_type FROM signals ORDER BY timestamp DESC LIMIT 3000`,
+      sql`SELECT agent_name, metadata FROM agent_heartbeat ORDER BY agent_name`,
+    ]);
+    const out: Record<string, any> = {};
+    for (const key of Object.keys(AGENT_LABELS)) out[key] = { agent: key, label: AGENT_LABELS[key], signal_count: 0, generated_count: 0 };
+    for (const s of signals as any[]) {
+      const a = classifyAgent(String(s.signal_type || ""));
+      if (!out[a]) out[a] = { agent: a, label: a, signal_count: 0, generated_count: 0 };
+      out[a].signal_count += 1;
+    }
+    for (const hb of hbs as any[]) {
+      const name = String(hb.agent_name || "");
+      const m = parseMeta(hb.metadata);
+      const generated = Number(m.signals_generated || 0);
+      if (!out[name]) out[name] = { agent: name, label: AGENT_LABELS[name] || name, signal_count: 0, generated_count: 0 };
+      out[name].generated_count = generated;
+    }
+    res.json(Object.values(out));
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/agents/:agent/signals", async (req, res) => {
+  try {
+    const agent = String(req.params.agent || "strategist").toLowerCase();
+    const limit = Math.min(300, Number(req.query.limit || 120));
+    const rows = await sql`SELECT * FROM signals ORDER BY timestamp DESC LIMIT ${limit}`;
+    const sigRows = (rows as any[]).filter((r) => classifyAgent(String(r.signal_type || "")) === agent);
+
+    const signatureRefs = await sql`
+      SELECT symbol, timeframe, direction,
+             change_pct::double precision AS change_pct,
+             created_at
+      FROM historical_signatures
+      ORDER BY created_at DESC
+      LIMIT 500
+    `;
+    const refByKey = new Map<string, any>();
+    for (const r of signatureRefs as any[]) {
+      const k = `${r.symbol}:${r.timeframe}:${r.direction}`;
+      if (!refByKey.has(k)) refByKey.set(k, r);
+    }
+
+    const items = sigRows.map((r) => {
+      const m = parseMeta(r.metadata);
+      const dir = (m.position_bias || (String(r.signal_type || "").includes("long") ? "long" : "short"));
+      const tf = String(m.primary_timeframe || m.timeframe || "15m");
+      const key = `${r.symbol}:${tf}:${dir}`;
+      const ref = refByKey.get(key);
+      const leverage = Number(m.leverage_x || m.kaldirac_x || m.leverage || 1);
+      return {
+        ...r,
+        metadata: m,
+        agent,
+        leverage_x: leverage > 0 ? leverage : 1,
+        aciklama_tr: signalReasonTr(m, String(r.signal_type || "")),
+        benzerlik_etiketi: ref ? `${tf} benzerlik etiketi` : null,
+        benzer_ornek: ref ? {
+          sembol: ref.symbol,
+          yon: ref.direction,
+          zaman_dilimi: ref.timeframe,
+          gorulme_zamani: ref.created_at,
+          sonraki_hareket_yuzde: Number(ref.change_pct || 0) * 100,
+        } : null,
+      };
+    });
+    res.json(items);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -288,8 +438,138 @@ app.get("/api/signals", async (req, res) => {
 
 app.get("/api/simulations", async (req, res) => {
   try {
-    const simulations = await sql`SELECT * FROM simulations ORDER BY entry_time DESC LIMIT 100`;
-    res.json(simulations);
+    const limit = Math.min(300, Number(req.query.limit || 150));
+    const side = String(req.query.side || "all").toLowerCase();
+    const status = String(req.query.status || "all").toLowerCase();
+    const rows = await sql`
+      SELECT s.*, sg.signal_type, sg.confidence AS signal_confidence, sg.metadata AS signal_metadata
+      FROM simulations s
+      LEFT JOIN signals sg ON sg.id = s.signal_id
+      ORDER BY s.entry_time DESC
+      LIMIT ${limit}
+    `;
+    const filtered = (rows as any[]).filter((r) => {
+      if (side !== "all" && String(r.side || "").toLowerCase() !== side) return false;
+      if (status !== "all" && String(r.status || "").toLowerCase() !== status) return false;
+      return true;
+    }).map((r) => {
+      const simMeta = parseMeta(r.metadata);
+      const sigMeta = parseMeta(r.signal_metadata);
+      const leverage = Number(simMeta.leverage_x || sigMeta.leverage_x || simMeta.leverage || sigMeta.leverage || 1);
+      return {
+        ...r,
+        signal_metadata: sigMeta,
+        metadata: simMeta,
+        confidence: Number(r.signal_confidence || simMeta.signal_confidence || sigMeta.signal_confidence || 0),
+        leverage_x: leverage > 0 ? leverage : 1,
+      };
+    });
+    res.json(filtered);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/simulations/analysis", async (req, res) => {
+  try {
+    const side = String(req.query.side || "all").toLowerCase();
+    const limit = Math.min(250, Number(req.query.limit || 120));
+    const rows = await sql`
+      SELECT s.*, sg.signal_type, sg.metadata AS signal_metadata,
+             r.failure_type, r.explanation
+      FROM simulations s
+      LEFT JOIN signals sg ON sg.id = s.signal_id
+      LEFT JOIN LATERAL (
+        SELECT failure_type, explanation
+        FROM rca_results
+        WHERE simulation_id = s.id
+        ORDER BY id DESC
+        LIMIT 1
+      ) r ON TRUE
+      ORDER BY s.entry_time DESC
+      LIMIT ${limit}
+    `;
+    const items = (rows as any[])
+      .filter((r) => side === "all" || String(r.side || "").toLowerCase() === side)
+      .map((r) => {
+        const simMeta = parseMeta(r.metadata);
+        const sigMeta = parseMeta(r.signal_metadata);
+        const pnlPct = Number(r.pnl_pct || 0);
+        const outcome = pnlPct >= 0
+          ? `Pozisyon kârla kapandı. Çıkış öncesi alış/satış dengesi hedef yönü destekledi.`
+          : `Pozisyon zararla kapandı. Alış/satış akışı hedef yönün tersine döndü ve risk sınırı devreye girdi.`;
+        return {
+          ...r,
+          metadata: simMeta,
+          signal_metadata: sigMeta,
+          leverage_x: Number(simMeta.leverage_x || sigMeta.leverage_x || simMeta.leverage || sigMeta.leverage || 1),
+          sonuc_aciklamasi_tr: outcome,
+          ders_notu_tr: r.failure_type
+            ? `${r.failure_type} nedeniyle düzeltme notu oluşturuldu. Benzer durumda parametre güncellemesi uygulanır.`
+            : `Bu sonuç öğrenme kayıtlarına eklendi; benzer paternlerde başarı olasılığı güncellenecek.`,
+          rca_aciklamasi_tr: r.explanation || null,
+        };
+      });
+    res.json(items);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/system/data-folders", async (_req, res) => {
+  try {
+    const root = "/root/quenbot";
+    const top = (await fs.readdir(root, { withFileTypes: true }))
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .sort();
+    const folders = [
+      { path: "python_agents", gorev: "Ajanların karar, sinyal, simülasyon ve öğrenme kodları" },
+      { path: "artifacts/api-server", gorev: "Dashboard ve servisler için API katmanı" },
+      { path: "artifacts/market-intel", gorev: "Kullanıcı dashboard arayüzü" },
+      { path: "db", gorev: "Veritabanı şema ve yapılandırma dosyaları" },
+      { path: "lib", gorev: "Paylaşılan kütüphaneler" },
+      { path: "scripts", gorev: "Başlatma, test ve bakım komut dosyaları" },
+    ];
+    const tableMap = [
+      { tablo: "trades", biriken_veri: "Borsa bazlı gerçekleşen alım-satım kayıtları" },
+      { tablo: "price_movements", biriken_veri: "Zaman dilimi bazlı fiyat hareket özetleri" },
+      { tablo: "signals", biriken_veri: "Üretilen long/short sinyalleri ve hedef metadatası" },
+      { tablo: "simulations", biriken_veri: "Açık/kapalı kağıt pozisyonlar, kâr/zarar" },
+      { tablo: "historical_signatures", biriken_veri: "Geçmiş benzer patern imzaları" },
+      { tablo: "rca_results", biriken_veri: "Kayıp/kazanç sonrası kök neden analizi" },
+      { tablo: "correction_notes", biriken_veri: "RCA sonrası parametre düzeltme notları" },
+      { tablo: "agent_heartbeat", biriken_veri: "Ajan canlılık ve üretim sayaçları" },
+    ];
+    res.json({
+      klasor_sayisi: top.length,
+      klasorler: folders,
+      ust_klasorler: top,
+      veri_haritasi: tableMap,
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/system/model-koordinasyon", async (_req, res) => {
+  try {
+    const [hb, sigCount, simCount] = await Promise.all([
+      sql`SELECT agent_name, status, last_heartbeat FROM agent_heartbeat ORDER BY agent_name`,
+      sql`SELECT COUNT(*)::int AS count FROM signals WHERE timestamp >= NOW() - INTERVAL '24 hours'`,
+      sql`SELECT COUNT(*)::int AS count FROM simulations WHERE created_at >= NOW() - INTERVAL '24 hours'`,
+    ]);
+    const running = (hb as any[]).filter((x) => String(x.status) === "running").length;
+    const total = (hb as any[]).length;
+    res.json({
+      model_durumu: total > 0 && running === total ? "Tam eşgüdüm" : "Kısmi eşgüdüm",
+      calisan_ajan: running,
+      toplam_ajan: total,
+      son_24s_sinyal: Number((sigCount as any[])[0]?.count || 0),
+      son_24s_simulasyon: Number((simCount as any[])[0]?.count || 0),
+      ajanlar: hb,
+      aciklama: "Ajanların aynı veri hattı üzerinden birlikte çalışması heartbeat ve üretim çıktıları ile izlenir.",
+    });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -727,6 +1007,41 @@ app.get("/api/admin/table-stats", async (req, res) => {
   }
 });
 
+// ─── PnL Sıfırlama ───
+
+app.post("/api/admin/reset-pnl", async (req, res) => {
+  try {
+    // Önce bağımlı tabloları sil
+    await sql`DELETE FROM rca_results`;
+    await sql`DELETE FROM audit_reports`;
+    await sql`DELETE FROM correction_notes`;
+    const simResult = await sql`DELETE FROM simulations RETURNING id`;
+    const auditResult = await sql`DELETE FROM audit_records RETURNING id`;
+    // Bozuk price_movements kayıtlarını da temizle
+    await sql`DELETE FROM price_movements WHERE end_price = 0 OR start_price = 0`;
+    summaryCache.data = {
+      total_trades: 0,
+      total_movements: 0,
+      active_signals: 0,
+      open_simulations: 0,
+      total_pnl: 0,
+      win_rate: 0,
+      closed_simulations: 0,
+      winning_simulations: 0,
+      losing_simulations: 0,
+    };
+    summaryCache.updatedAt = 0;
+    res.json({
+      ok: true,
+      message: "PnL sıfırlandı",
+      deleted_simulations: simResult.length,
+      deleted_audit_records: auditResult.length,
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 // ─── Trade History by Symbol (paginated) ───
 
 app.get("/api/trades/history/:symbol", async (req, res) => {
@@ -1073,6 +1388,110 @@ app.get("/api/system/events", async (req, res) => {
     const r = await fetch(`${DIRECTIVE_API}/api/system/events`);
     res.json(await r.json());
   } catch { res.json({ total_events: 0, recent_events: [], error: "Event API unavailable" }); }
+});
+
+/* ═══ GEMMA ACTIVITY FEED (Terminal-style) ═══ */
+app.get("/api/gemma/activity-feed", async (req, res) => {
+  try {
+    // 1) Get event bus recent events from directive API
+    let events: any[] = [];
+    try {
+      const r = await fetch(`${DIRECTIVE_API}/api/system/events`);
+      const data = await r.json();
+      events = data.recent_events || [];
+    } catch {}
+
+    // 2) Get recent signals with agent info
+    const recentSignals = await sql`
+      SELECT signal_type, symbol, confidence, status, metadata, created_at
+      FROM signals ORDER BY created_at DESC LIMIT 10
+    `;
+
+    // 3) Get recent simulation changes
+    const recentSims = await sql`
+      SELECT symbol, side, entry_price, exit_price, pnl_pct, status, metadata, 
+             COALESCE(exit_time, created_at) AS ts
+      FROM simulations ORDER BY COALESCE(exit_time, created_at) DESC LIMIT 8
+    `;
+
+    // 4) Get agent heartbeat metadata (contains counters)
+    const heartbeats = await sql`
+      SELECT agent_name, status, metadata, last_heartbeat FROM agent_heartbeat
+      WHERE agent_name NOT IN ('system_resources') ORDER BY agent_name
+    `;
+
+    // 5) Get recent learning log entries
+    const learning = await sql`
+      SELECT signal_type, was_correct, pnl_pct, created_at
+      FROM brain_learning_log ORDER BY created_at DESC LIMIT 5
+    `;
+
+    // Build feed lines
+    const feed: { ts: number; text: string; level: string }[] = [];
+
+    // Event bus entries (already have data_summary from Python)
+    for (const ev of events) {
+      feed.push({
+        ts: ev.timestamp || 0,
+        text: ev.data_summary || `${ev.source}: ${ev.type}`,
+        level: ev.type?.includes('warning') || ev.type?.includes('rejected') ? 'warn' :
+               ev.type?.includes('error') ? 'error' :
+               ev.type?.includes('approved') || ev.type?.includes('opened') || ev.type?.includes('closed') ? 'success' : 'info',
+      });
+    }
+
+    // Agent heartbeats translated
+    const agentTr: Record<string, string> = {
+      scout: 'Keşifçi', strategist: 'Stratejist', ghost_simulator: 'Simülatör',
+      auditor: 'Denetçi', brain: 'Beyin', pattern_matcher: 'Örüntü Eşleştirici',
+      llm_brain: 'Gemma Omurga', chat_engine: 'Sohbet'
+    };
+    for (const hb of heartbeats) {
+      const m = typeof hb.metadata === 'string' ? (() => { try { return JSON.parse(hb.metadata); } catch { return {}; } })() : (hb.metadata || {});
+      const name = agentTr[hb.agent_name] || hb.agent_name;
+      const parts: string[] = [];
+      if (m.trade_counter != null) parts.push(`${m.trade_counter} işlem`);
+      if (m.signals_generated != null) parts.push(`${m.signals_generated} sinyal üretildi`);
+      if (m.active_simulations != null) parts.push(`${m.active_simulations} aktif sim`);
+      if (m.audit_count != null) parts.push(`${m.audit_count} denetim`);
+      if (m.scan_count != null) parts.push(`${m.scan_count} tarama`);
+      if (m.match_count != null) parts.push(`${m.match_count} eşleşme`);
+      if (m.active_model) parts.push(`model: ${m.active_model}`);
+      if (m.total_calls != null) parts.push(`${m.total_calls} LLM çağrısı`);
+      if (m.avg_latency_ms != null) parts.push(`ort: ${Math.round(m.avg_latency_ms)}ms`);
+
+      const status = hb.status === 'running' ? '✓ Aktif' : hb.status === 'degraded' ? '⚠ Kısıtlı' : '✗ Kapalı';
+      const hbTs = hb.last_heartbeat ? new Date(hb.last_heartbeat).getTime() / 1000 : 0;
+      feed.push({
+        ts: hbTs,
+        text: `🤖 [${name}] ${status} — ${parts.join(' | ') || 'bekleniyor'}`,
+        level: hb.status === 'running' ? 'info' : 'warn',
+      });
+    }
+
+    // Recent learning
+    for (const l of learning) {
+      const lr = l.was_correct ? '✅ Doğru tahmin' : '❌ Yanlış tahmin';
+      const lTs = l.created_at ? new Date(l.created_at).getTime() / 1000 : 0;
+      feed.push({
+        ts: lTs,
+        text: `🧠 Beyin öğrenme: ${l.signal_type} — ${lr}, K/Z: %${Number(l.pnl_pct || 0).toFixed(2)}`,
+        level: l.was_correct ? 'success' : 'warn',
+      });
+    }
+
+    // Sort by timestamp desc
+    feed.sort((a, b) => b.ts - a.ts);
+
+    res.json({
+      feed: feed.slice(0, 60),
+      total_events: feed.length,
+      agents_online: heartbeats.filter((h: any) => h.status === 'running').length,
+      agents_total: heartbeats.length,
+    });
+  } catch (e: any) {
+    res.json({ feed: [], total_events: 0, error: e.message });
+  }
 });
 
 /* ═══ DATA AUDIT / VALIDATION ═══ */

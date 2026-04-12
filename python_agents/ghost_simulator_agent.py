@@ -204,9 +204,22 @@ class GhostSimulatorAgent:
                 stop_loss = entry_price * (1 + sl_pct)
                 take_profit = entry_price * (1 - tp_pct)
 
+            # Kaldıraç hesaplama: vadeli işlemlerde sinyal güvenine göre
+            market_type = signal.get('market_type', 'spot')
+            if market_type == 'futures':
+                conf = float(signal.get('confidence', 0.5))
+                if conf >= 0.8:
+                    leverage_x = 5
+                elif conf >= 0.6:
+                    leverage_x = 3
+                else:
+                    leverage_x = 2
+            else:
+                leverage_x = 1
+
             simulation_data = {
                 'signal_id': signal['id'],
-                'market_type': signal.get('market_type', 'spot'),
+                'market_type': market_type,
                 'symbol': signal['symbol'],
                 'entry_price': entry_price,
                 'quantity': position_size,
@@ -221,6 +234,8 @@ class GhostSimulatorAgent:
                     'commission': config['commission_pct'] * position_size * entry_price,
                     'brain_analysis': metadata.get('brain_analysis', False),
                     'timeframe': metadata.get('timeframe', 'unknown'),
+                    'leverage_x': leverage_x,
+                    'kaldirac_x': leverage_x,
                 }
             }
 
@@ -329,8 +344,10 @@ class GhostSimulatorAgent:
             entry_price = float(sim_data['entry_price'])
             quantity = float(sim_data['quantity'])
             side = sim_data['side']
+            leverage = float(sim_data.get('metadata', {}).get('leverage_x', 1))
 
             pnl = (exit_price - entry_price) * quantity if side == 'long' else (entry_price - exit_price) * quantity
+            pnl *= leverage  # Kaldıraç etkisi
             commission = sim_data.get('metadata', {}).get('commission', 0)
             pnl -= commission
             pnl_pct = (pnl / (entry_price * quantity)) * 100 if entry_price * quantity else 0.0
@@ -367,7 +384,7 @@ class GhostSimulatorAgent:
 
             win_emoji = "✅" if was_correct else "❌"
             logger.info(f"👻 {win_emoji} Closed sim {sim_id}: {reason} | "
-                         f"{sim_data['symbol']} {side} | PnL: ${pnl:.2f} ({pnl_pct:.2f}%)")
+                         f"{sim_data['symbol']} {side} {leverage:.0f}x | PnL: ${pnl:.2f} ({pnl_pct:.2f}%)")
 
             # Brain'e feedback gönder (öğrenme döngüsü)
             await self._send_feedback_to_brain(sim_data, was_correct, pnl_pct)

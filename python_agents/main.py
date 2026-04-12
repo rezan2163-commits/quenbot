@@ -154,8 +154,6 @@ class AgentOrchestrator:
         )
         logger.info("⚡ GemmaDecisionCore initialized (Katman 3 — Gemma nihai karar)")
         startup_report["components"]["decision_core"] = {"status": "ok"}
-        logger.info("🔍 RCA Engine initialized")
-        startup_report["components"]["rca_engine"] = {"status": "ok"}
 
         # 6. LLM — degraded mode if unavailable
         try:
@@ -469,9 +467,12 @@ class AgentOrchestrator:
             self._resilient_task("Auditor", self.auditor.start),
             self._resilient_task("PatternMatcher", self.pattern_matcher.start),
             self._resilient_task("HealthMonitor", self._health_monitor),
-            self._resilient_task("ChatProcessor", self._chat_processor),
             self._resilient_task("DirectiveAPI", self._directive_api_server),
         ]
+
+        # API /api/chat aktifken poller yanıtı çiftleyebilir; gerekirse env ile aç.
+        if os.getenv("QUENBOT_ENABLE_CHAT_POLLER", "0").lower() in {"1", "true", "yes", "on"}:
+            tasks.append(self._resilient_task("ChatProcessor", self._chat_processor))
 
         try:
             await asyncio.gather(*tasks)
@@ -873,6 +874,16 @@ class AgentOrchestrator:
                 "event_bus": self.event_bus.get_stats(),
                 "agent_breakdown": agent_breakdown,
                 "resource_history": self.resource_monitor.get_history(),
+                "ram_plan_mb": {
+                    "total_budget": 24576,
+                    "llm": 11264,
+                    "scout": 3072,
+                    "strategist": 2560,
+                    "brain": 2048,
+                    "ghost_simulator": 1536,
+                    "auditor": 1024,
+                    "api_and_os_headroom": 3072,
+                },
             })
 
         async def get_system_summary(request):

@@ -28,6 +28,7 @@ class ResourceSnapshot:
     load_avg_5m: float
     load_avg_15m: float
     process_rss_mb: float  # current python process RSS
+    ram_budget_mb: float
     timestamp: float
 
     def to_dict(self) -> dict:
@@ -37,8 +38,12 @@ class ResourceSnapshot:
             "ram_used_mb": round(self.ram_used_mb, 0),
             "ram_percent": round(self.ram_percent, 1),
             "ram_free_mb": round(self.ram_total_mb - self.ram_used_mb, 0),
+            "ram_budget_mb": round(self.ram_budget_mb, 0),
+            "ram_budget_percent": round((self.ram_used_mb / self.ram_budget_mb * 100) if self.ram_budget_mb > 0 else 0, 1),
+            "ram_budget_free_mb": round(max(self.ram_budget_mb - self.ram_used_mb, 0), 0),
             "disk_total_gb": round(self.disk_total_gb, 1),
             "disk_used_gb": round(self.disk_used_gb, 1),
+            "disk_free_gb": round(max(self.disk_total_gb - self.disk_used_gb, 0), 1),
             "disk_percent": round(self.disk_percent, 1),
             "load_avg_1m": round(self.load_avg_1m, 2),
             "load_avg_5m": round(self.load_avg_5m, 2),
@@ -62,6 +67,7 @@ class ResourceMonitor:
         self._prev_time: float = 0
         self._history: list[dict] = []
         self._max_history = 120  # keep ~30 min at 30s intervals
+        self._ram_budget_mb = float(os.getenv("QUENBOT_RAM_TARGET_MB", "24576"))
 
     def snapshot(self) -> ResourceSnapshot:
         """Take a resource snapshot using /proc and os."""
@@ -83,6 +89,7 @@ class ResourceMonitor:
             load_avg_5m=load[1],
             load_avg_15m=load[2],
             process_rss_mb=proc_rss,
+            ram_budget_mb=self._ram_budget_mb,
             timestamp=time.time(),
         )
 

@@ -62,6 +62,7 @@ class StrategistAgent:
         self.feature_weights = Config.get_agent_config('strategist')['feature_weights']
         self.analysis_count = 0
         self.signals_generated = 0
+        self._last_signal_emitted: Dict[str, datetime] = {}
 
     async def initialize(self):
         logger.info("Initializing Strategist Agent...")
@@ -79,7 +80,48 @@ class StrategistAgent:
                 await self._update_pattern_outcomes()
             except Exception as e:
                 logger.error(f"Strategist cycle error: {e}")
-            await asyncio.sleep(45)  # Her 45 saniyede bir
+            await asyncio.sleep(900)  # 15 dakikada bir analiz döngüsü
+
+    def _build_targets(self, entry_price: float, direction: str, base_target_pct: float) -> Dict[str, Any]:
+        base = max(float(base_target_pct), 0.01)
+        plan = [
+            ('15m', 15, 1.0),
+            ('1h', 60, 1.6),
+            ('4h', 240, 2.4),
+            ('8h', 480, 3.0),
+            ('1d', 1440, 3.6),
+        ]
+        targets: Dict[str, Any] = {}
+        for label, minutes, mult in plan:
+            pct = min(base * mult, 0.20)
+            target_price = entry_price * (1 + pct) if direction == 'long' else entry_price * (1 - pct)
+            targets[label] = {
+                'minutes': minutes,
+                'target_pct': float(pct),
+                'target_price': float(target_price),
+            }
+        return targets
+
+    def _signal_key(self, symbol: str, market_type: str, direction: str) -> str:
+        return f"{symbol}:{market_type}:{direction}"
+
+    async def _can_emit_signal(self, symbol: str, market_type: str, direction: str) -> bool:
+        key = self._signal_key(symbol, market_type, direction)
+        last = self._last_signal_emitted.get(key)
+        if last and (datetime.utcnow() - last).total_seconds() < Config.SIGNAL_EMIT_INTERVAL_SECONDS:
+            return False
+
+        try:
+            db_last = await self.db.get_last_signal_timestamp(symbol, market_type, direction)
+            if db_last and (datetime.utcnow() - db_last).total_seconds() < Config.SIGNAL_EMIT_INTERVAL_SECONDS:
+                self._last_signal_emitted[key] = db_last
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _mark_signal_emitted(self, symbol: str, market_type: str, direction: str):
+        self._last_signal_emitted[self._signal_key(symbol, market_type, direction)] = datetime.utcnow()
 
     async def stop(self):
         self.running = False
@@ -144,9 +186,12 @@ class StrategistAgent:
                                             best_tf = tf
 
                                     if best_tf and abs(prediction['timeframes'].get(best_tf, {}).get('avg_change_pct', 0)) >= 0.02:
+                                        if not await self._can_emit_signal(symbol, market_type, direction):
+                                            continue
                                         last_price = float(trades[-1]['price'])
                                         best_tf_change = abs(prediction['timeframes'][best_tf].get('avg_change_pct', 0.02))
                                         target_pct = max(best_tf_change, 0.02)
+                                        targets = self._build_targets(last_price, direction, target_pct)
                                         signal_type = f'brain_{direction}_{best_tf}'
                                         signal_payload = {
                                             'market_type': market_type,
@@ -164,9 +209,14 @@ class StrategistAgent:
                                                 'timeframe_predictions': prediction['timeframes'],
                                                 'brain_analysis': True,
                                                 'market_type': market_type,
+                                                'targets': targets,
+                                                'primary_timeframe': best_tf,
+                                                'primary_target_price': targets.get(best_tf, {}).get('target_price'),
+                                                'primary_target_minutes': targets.get(best_tf, {}).get('minutes'),
                                             }
                                         }
                                         await self.db.insert_signal(signal_payload)
+                                        self._mark_signal_emitted(symbol, market_type, direction)
                                         self.signals_generated += 1
                                         logger.info(
                                             f"🧠 Brain signal [{market_type}] {symbol} {direction} "
@@ -236,7 +286,11 @@ class StrategistAgent:
                                             if best_intel_tf:
                                                 itf_change = abs(intel_tfs[best_intel_tf].get('avg_change_pct', 0))
                                                 if itf_change >= 0.01:  # Minimum %1 beklenen hareket
+                                                    if not await self._can_emit_signal(symbol, market_type, intel_dir):
+                                                        continue
                                                     last_price = float(trades[-1]['price'])
+                                                    target_pct = max(itf_change, 0.02)
+                                                    targets = self._build_targets(last_price, intel_dir, target_pct)
                                                     signal_type = f'intel_{intel_dir}_{best_intel_tf}'
                                                     signal_payload = {
                                                         'market_type': market_type,
@@ -247,7 +301,7 @@ class StrategistAgent:
                                                         'timestamp': datetime.utcnow(),
                                                         'metadata': {
                                                             'position_bias': intel_dir,
-                                                            'target_pct': float(max(itf_change, 0.02)),
+                                                            'target_pct': float(target_pct),
                                                             'timeframe': best_intel_tf,
                                                             'match_count': intel_result.get('match_count', 0),
                                                             'avg_similarity': intel_result.get('avg_similarity', 0),
@@ -259,9 +313,14 @@ class StrategistAgent:
                                                             'enriched_dim': intel_result.get('enriched_dim', 18),
                                                             'intelligence_version': intel_result.get('intelligence_version', '1.0'),
                                                             'market_type': market_type,
+                                                            'targets': targets,
+                                                            'primary_timeframe': best_intel_tf,
+                                                            'primary_target_price': targets.get(best_intel_tf, {}).get('target_price'),
+                                                            'primary_target_minutes': targets.get(best_intel_tf, {}).get('minutes'),
                                                         }
                                                     }
                                                     await self.db.insert_signal(signal_payload)
+                                                    self._mark_signal_emitted(symbol, market_type, intel_dir)
                                                     self.signals_generated += 1
                                                     logger.info(
                                                         f"🧬 Intel signal [{market_type}] {symbol} {intel_dir} "
@@ -407,10 +466,13 @@ class StrategistAgent:
                                      f"score={score:.4f} profit={mean_profit:.4f} sim={best_similarity:.2f} mode={mode}")
 
                         if best_similarity >= sim_threshold and score > 0 and mean_profit > min_profit:
+                            if not await self._can_emit_signal(symbol, market_type, direction):
+                                continue
                             signal_type = f'evolutionary_similarity_{direction}'
                             # Confidence: en az 0.3, similarity varsa onu kullan, yoksa score-based
                             evo_conf = max(float(best_similarity), min(float(score) * 0.1, 0.85), 0.3)
                             target_pct = max(float(mean_profit), 0.02)  # ≥2% target
+                            targets = self._build_targets(last_price, direction, target_pct)
                             signal_payload = {
                                 'market_type': market_type,
                                 'symbol': symbol,
@@ -434,9 +496,14 @@ class StrategistAgent:
                                     'macd': float(ind['macd']['histogram']) if ind.get('macd') else None,
                                     'trend': trend_summary.get('trend'),
                                     'atr_ratio': float(atr_ratio) if atr_ratio is not None else 0.02,
+                                    'targets': targets,
+                                    'primary_timeframe': '15m',
+                                    'primary_target_price': targets.get('15m', {}).get('target_price'),
+                                    'primary_target_minutes': 15,
                                 }
                             }
                             await self.db.insert_signal(signal_payload)
+                            self._mark_signal_emitted(symbol, market_type, direction)
                             self.signals_generated += 1
                             logger.info(
                                 f"Generated signal [{market_type}] {symbol} dir={direction} sim={best_similarity:.2f} score={score:.4f}"
@@ -444,9 +511,12 @@ class StrategistAgent:
 
                         # Momentum-based signal: evolutionary algo sonuç buldu
                         elif score > 0.05 and mean_profit > min_profit * 0.5:
+                            if not await self._can_emit_signal(symbol, market_type, direction):
+                                continue
                             momentum_conf = min(max(score * 0.6, 0.3), 0.85)
                             signal_type = f'momentum_{direction}'
                             target_pct = max(float(mean_profit), 0.02)  # ≥2% target
+                            targets = self._build_targets(last_price, direction, target_pct)
                             signal_payload = {
                                 'market_type': market_type,
                                 'symbol': symbol,
@@ -462,10 +532,15 @@ class StrategistAgent:
                                     'risk': float(risk),
                                     'sample_count': len(prices),
                                     'market_type': market_type,
-                                    'bootstrap': True
+                                    'bootstrap': True,
+                                    'targets': targets,
+                                    'primary_timeframe': '15m',
+                                    'primary_target_price': targets.get('15m', {}).get('target_price'),
+                                    'primary_target_minutes': 15,
                                 }
                             }
                             await self.db.insert_signal(signal_payload)
+                            self._mark_signal_emitted(symbol, market_type, direction)
                             self.signals_generated += 1
                             logger.info(
                                 f"📈 Momentum signal [{market_type}] {symbol} dir={direction} score={score:.4f} profit={mean_profit:.4f}"
@@ -485,8 +560,11 @@ class StrategistAgent:
                                     'short' if price_change_pct < 0 and trend_dir == 'bearish' else None
                                 )
                                 if pa_direction:
+                                    if not await self._can_emit_signal(symbol, market_type, pa_direction):
+                                        continue
                                     pa_conf = min(abs(price_change_pct) * 20 + trend_strength * 0.3, 0.7)
                                     target_pct = max(abs(price_change_pct) * 2, 0.02)  # ≥2% target
+                                    targets = self._build_targets(last_price, pa_direction, target_pct)
                                     signal_payload = {
                                         'market_type': market_type,
                                         'symbol': symbol,
@@ -505,9 +583,14 @@ class StrategistAgent:
                                             'sample_count': len(prices),
                                             'market_type': market_type,
                                             'bootstrap': True,
+                                            'targets': targets,
+                                            'primary_timeframe': '15m',
+                                            'primary_target_price': targets.get('15m', {}).get('target_price'),
+                                            'primary_target_minutes': 15,
                                         }
                                     }
                                     await self.db.insert_signal(signal_payload)
+                                    self._mark_signal_emitted(symbol, market_type, pa_direction)
                                     self.signals_generated += 1
                                     logger.info(
                                         f"🔥 Price action [{market_type}] {symbol} {pa_direction} "
@@ -576,8 +659,11 @@ class StrategistAgent:
 
                             confidence = float(min(similarity * 0.9, 0.95))
                             signal_type = f'signature_{sig_direction}'
+                            if not await self._can_emit_signal(symbol, market_type, sig_direction):
+                                continue
                             last_price = float(prices[-1])
                             target_pct = max(abs(sig_change), 0.02)  # ≥2% target
+                            targets = self._build_targets(last_price, sig_direction, target_pct)
 
                             signal_payload = {
                                 'market_type': market_type,
@@ -595,9 +681,14 @@ class StrategistAgent:
                                     'signature_id': sig.get('id'),
                                     'pre_move_indicators': sig.get('pre_move_indicators', {}),
                                     'market_type': market_type,
+                                    'targets': targets,
+                                    'primary_timeframe': sig_tf,
+                                    'primary_target_price': targets.get(sig_tf, targets.get('15m', {})).get('target_price'),
+                                    'primary_target_minutes': targets.get(sig_tf, targets.get('15m', {})).get('minutes'),
                                 }
                             }
                             await self.db.insert_signal(signal_payload)
+                            self._mark_signal_emitted(symbol, market_type, sig_direction)
                             self.signals_generated += 1
                             logger.info(
                                 f"🔖 Signature match [{market_type}] {symbol} {sig_direction} "

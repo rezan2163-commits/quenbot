@@ -13,13 +13,19 @@ class Config:
     BINANCE_SPOT_WS_URL = "wss://stream.binance.com:9443/ws"
     # Binance Futures WebSocket (fapi stream)
     BINANCE_FUTURES_WS_URL = "wss://fstream.binance.com/ws"
-    # Bybit WebSocket (V5 API)
-    BYBIT_SPOT_WS_URL = "wss://stream.bybit.com/v5/public/spot"
-    BYBIT_FUTURES_WS_URL = "wss://stream.bybit.com/v5/public/linear"
+    # Bybit WebSocket (V5 API) - global primary + global fallback + optional tunnel override
+    BYBIT_SPOT_WS_URL = os.getenv("BYBIT_SPOT_WS_URL", "wss://stream.bybit.com/v5/public/spot")
+    BYBIT_FUTURES_WS_URL = os.getenv("BYBIT_FUTURES_WS_URL", "wss://stream.bybit.com/v5/public/linear")
+    BYBIT_SPOT_WS_FALLBACK_URL = os.getenv("BYBIT_SPOT_WS_FALLBACK_URL", "wss://stream.bytick.com/v5/public/spot")
+    BYBIT_FUTURES_WS_FALLBACK_URL = os.getenv("BYBIT_FUTURES_WS_FALLBACK_URL", "wss://stream.bytick.com/v5/public/linear")
+    BYBIT_SPOT_WS_TUNNEL_URL = os.getenv("BYBIT_SPOT_WS_TUNNEL_URL", "")
+    BYBIT_FUTURES_WS_TUNNEL_URL = os.getenv("BYBIT_FUTURES_WS_TUNNEL_URL", "")
     
     # REST API Base URLs
     BINANCE_REST_API = "https://api.binance.com"
-    BYBIT_REST_API = "https://api.bybit.com"
+    BYBIT_REST_API = os.getenv("BYBIT_REST_API", "https://api.bybit.com")
+    BYBIT_REST_FALLBACK_API = os.getenv("BYBIT_REST_FALLBACK_API", "https://api.bytick.com")
+    BYBIT_REST_TUNNEL_API = os.getenv("BYBIT_REST_TUNNEL_API", "")
 
     # Trading pairs to monitor
     TRADING_PAIRS = [
@@ -39,6 +45,7 @@ class Config:
     # Time windows
     T10_WINDOW_MINUTES = 10
     SIMULATION_TIMEOUT_HOURS = 24
+    SIGNAL_EMIT_INTERVAL_SECONDS = int(os.getenv("QUENBOT_SIGNAL_EMIT_INTERVAL_SECONDS", "900"))
 
     # Evolutionary strategy parameters
     STRATEGY_POPULATION_SIZE = 40
