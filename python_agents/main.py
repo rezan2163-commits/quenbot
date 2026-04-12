@@ -4,6 +4,7 @@ import logging
 import os
 import json
 import time
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -97,7 +98,7 @@ class AgentOrchestrator:
         self._resource_warnings: list[dict] = []
         # Pattern-match LLM evaluation throttles to keep chat responsive
         self._pattern_eval_min_similarity = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_SIM", "0.50"))
-        self._pattern_eval_min_interval = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_INTERVAL", "20"))
+        self._pattern_eval_min_interval = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_INTERVAL", "180"))
         self._last_pattern_eval_at: dict[str, float] = {}
         self._pattern_eval_semaphore = asyncio.Semaphore(1)
         # Thread pool for CPU-bound work (pattern matching, similarity calc)
@@ -1020,6 +1021,18 @@ class AgentOrchestrator:
                 else:
                     return web.json_response({"error": f"unknown action: {action}"}, status=400)
 
+                await self.event_bus.publish(Event(
+                    type=EventType.COMMAND_ROUTED,
+                    source="control_api",
+                    data={"action": action, "params": params},
+                ))
+
+                await self.event_bus.publish(Event(
+                    type=EventType.COMMAND_EXECUTED,
+                    source="control_api",
+                    data={"action": action, "ok": True},
+                ))
+
                 await self.db.insert_chat_message(
                     "system",
                     json.dumps({"control_action": action, "params": params}, ensure_ascii=False)[:1000],
@@ -1029,6 +1042,11 @@ class AgentOrchestrator:
                 return web.json_response(result)
             except Exception as e:
                 logger.error(f"Control action error: {e}")
+                await self.event_bus.publish(Event(
+                    type=EventType.COMMAND_FAILED,
+                    source="control_api",
+                    data={"error": str(e)[:300]},
+                ))
                 return web.json_response({"error": str(e)}, status=500)
 
         async def get_directives(request):
@@ -1235,6 +1253,105 @@ class AgentOrchestrator:
             stats = self.event_bus.get_stats()
             return web.json_response(stats)
 
+        async def route_nl_command(message: str):
+            """Parse user natural-language command and route executable actions to agents/system."""
+            text = (message or "").strip()
+            lower = text.lower()
+            actions = []
+
+            await self.event_bus.publish(Event(
+                type=EventType.COMMAND_RECEIVED,
+                source="chat_api",
+                data={"message": text[:400]},
+            ))
+
+            # Watchlist commands
+            if any(k in lower for k in ["watchlist", "izleme", "takip listesi", "coin"]):
+                raw_symbols = re.findall(r"\b[A-Za-z]{2,10}(?:USDT)?\b", text)
+                symbols = []
+                for s in raw_symbols:
+                    su = s.upper()
+                    if su in {"LONG", "SHORT", "SPOT", "FUTURES", "RISK", "WATCHLIST", "COIN"}:
+                        continue
+                    if not su.endswith("USDT"):
+                        su = su + "USDT"
+                    symbols.append(su)
+
+                if any(k in lower for k in ["ekle", "add", "takibe al"]):
+                    for sym in symbols[:20]:
+                        await self.db.add_user_watchlist(sym, "all", "spot")
+                        await self.db.add_user_watchlist(sym, "all", "futures")
+                    if symbols:
+                        await _refresh_watchlist_runtime()
+                        actions.append({"type": "watchlist_add", "symbols": symbols[:20]})
+
+                if any(k in lower for k in ["sil", "remove", "çıkar", "kaldır"]):
+                    for sym in symbols[:20]:
+                        await self.db.remove_user_watchlist(sym, "all", "spot")
+                        await self.db.remove_user_watchlist(sym, "all", "futures")
+                    if symbols:
+                        await _refresh_watchlist_runtime()
+                        actions.append({"type": "watchlist_remove", "symbols": symbols[:20]})
+
+            # Risk commands
+            if "risk" in lower:
+                risk_changes = {}
+
+                m_trades = re.search(r"(max|en fazla)?\s*(\d+)\s*(işlem|trade)", lower)
+                if m_trades:
+                    risk_changes["max_daily_trades"] = int(m_trades.group(2))
+
+                m_open = re.search(r"(max|en fazla)?\s*(\d+)\s*(açık pozisyon|open position|pozisyon)", lower)
+                if m_open:
+                    risk_changes["max_open_positions"] = int(m_open.group(2))
+
+                m_loss = re.search(r"(-?\d+(?:\.\d+)?)\s*%\s*(günlük zarar|daily loss)", lower)
+                if m_loss:
+                    risk_changes["max_daily_loss_pct"] = float(m_loss.group(1))
+
+                m_dd = re.search(r"(-?\d+(?:\.\d+)?)\s*%\s*(drawdown|max drawdown)", lower)
+                if m_dd:
+                    risk_changes["max_drawdown_pct"] = float(m_dd.group(1))
+
+                if risk_changes:
+                    if "max_daily_trades" in risk_changes:
+                        Config.RISK_MAX_DAILY_TRADES = int(risk_changes["max_daily_trades"])
+                    if "max_open_positions" in risk_changes:
+                        Config.RISK_MAX_OPEN_POSITIONS = int(risk_changes["max_open_positions"])
+                    if "max_daily_loss_pct" in risk_changes:
+                        Config.RISK_MAX_DAILY_LOSS_PCT = float(risk_changes["max_daily_loss_pct"])
+                    if "max_drawdown_pct" in risk_changes:
+                        Config.RISK_MAX_DRAWDOWN_PCT = float(risk_changes["max_drawdown_pct"])
+                    actions.append({"type": "risk_update", "changes": risk_changes})
+
+            # Directive commands
+            if any(k in lower for k in ["directive", "direktif", "kural", "talimat"]) and ":" in text:
+                directive_text = text.split(":", 1)[1].strip()
+                if directive_text:
+                    await get_directive_store().set_master_directive(directive_text)
+                    actions.append({"type": "master_directive_update", "text": directive_text[:200]})
+
+            if actions:
+                for action in actions:
+                    await self.event_bus.publish(Event(
+                        type=EventType.COMMAND_ROUTED,
+                        source="qwen_router",
+                        data=action,
+                    ))
+                await self.event_bus.publish(Event(
+                    type=EventType.COMMAND_EXECUTED,
+                    source="qwen_router",
+                    data={"actions": actions, "count": len(actions)},
+                ))
+                return actions
+
+            await self.event_bus.publish(Event(
+                type=EventType.COMMAND_FAILED,
+                source="qwen_router",
+                data={"reason": "no_routable_action", "message": text[:200]},
+            ))
+            return []
+
         async def post_chat(request):
             """Gemma AI Chat - Natural language commands with Gemma response"""
             try:
@@ -1245,6 +1362,8 @@ class AgentOrchestrator:
                 
                 if not self.chat_engine:
                     return web.json_response({"error": "Chat engine not initialized"}, status=500)
+
+                routed_actions = await route_nl_command(message)
                 
                 # Get Gemma response
                 response = await self.chat_engine.respond(message)
@@ -1256,6 +1375,7 @@ class AgentOrchestrator:
                 return web.json_response({
                     "success": True,
                     "message": response,
+                    "routed_actions": routed_actions,
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
             except Exception as e:

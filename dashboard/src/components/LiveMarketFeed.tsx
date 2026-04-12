@@ -17,16 +17,19 @@ export default function LiveMarketFeed() {
   const moverMap = new Map(movers?.map((m) => [m.symbol, m]) || []);
 
   // Group by symbol, pick latest
-  const symbolMap = new Map<string, { symbol: string; price: number; change_pct: number; exchange: string; ts: string }>();
+  const symbolMap = new Map<string, { symbol: string; price: number; price_text: string; change_pct: number; exchange: string; market_type: string; ts: string }>();
   prices?.forEach((p) => {
-    const existing = symbolMap.get(p.symbol);
+    const key = `${p.symbol}:${p.exchange}:${p.market_type}`;
+    const existing = symbolMap.get(key);
     if (!existing || new Date(p.timestamp) > new Date(existing.ts)) {
       const mover = moverMap.get(p.symbol);
-      symbolMap.set(p.symbol, {
+      symbolMap.set(key, {
         symbol: p.symbol,
               price: toNumber(p.price),
+        price_text: String(p.price_text || p.price || "0"),
               change_pct: toNumber(mover?.change_pct ?? 0),
         exchange: p.exchange,
+        market_type: p.market_type || "spot",
         ts: p.timestamp,
       });
     }
@@ -60,7 +63,9 @@ export default function LiveMarketFeed() {
                     <span className="text-[10px] text-gray-600 uppercase">{t.exchange}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono text-gray-300">${toNumber(t.price) < 1 ? toNumber(t.price).toFixed(6) : toNumber(t.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    <span className="text-xs font-mono text-gray-300">${t.price_text}</span>
+                    <span className="text-[9px] px-1 py-0.5 rounded border border-surface-border text-gray-500 uppercase">{t.exchange}</span>
+                    <span className="text-[9px] px-1 py-0.5 rounded border border-surface-border text-gray-500 uppercase">{t.market_type}</span>
                     <span className={`flex items-center gap-0.5 text-[10px] font-medium ${up ? "text-bull" : "text-bear"}`}>
                       {up ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
                       {up ? "+" : ""}{toNumber(t.change_pct).toFixed(2)}%

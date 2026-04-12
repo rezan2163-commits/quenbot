@@ -14,8 +14,9 @@ import ActiveSignals from "@/components/ActiveSignals";
 import PatternLibrary from "@/components/PatternLibrary";
 import SignalHistory from "@/components/SignalHistory";
 import LearningLog from "@/components/LearningLog";
+import InterAgentTerminal from "@/components/InterAgentTerminal";
 import { swrConfig } from "@/lib/api";
-import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain } from "lucide-react";
+import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain, TerminalSquare } from "lucide-react";
 
 // Heavy components with lightweight-charts — lazy load
 const ChartCanvas = dynamic(() => import("@/components/ChartCanvas"), { ssr: false, loading: () => <div className="flex-1 bg-surface animate-pulse" /> });
@@ -49,7 +50,7 @@ class ErrorBoundary extends Component<{ children: ReactNode; fallback?: string }
 }
 
 function RightPanel() {
-  const [tab, setTab] = useState<"market" | "signals" | "backtest" | "flow" | "patterns" | "history" | "learning">("market");
+  const [tab, setTab] = useState<"market" | "signals" | "backtest" | "flow" | "patterns" | "history" | "learning" | "intercom">("market");
 
   const tabs = [
     { key: "market" as const, icon: Radio, label: "Piyasa" },
@@ -59,6 +60,7 @@ function RightPanel() {
     { key: "patterns" as const, icon: Database, label: "Paternler" },
     { key: "history" as const, icon: History, label: "Geçmiş" },
     { key: "learning" as const, icon: Brain, label: "Öğrenme" },
+    { key: "intercom" as const, icon: TerminalSquare, label: "İletişim" },
   ];
 
   return (
@@ -87,6 +89,7 @@ function RightPanel() {
         {tab === "patterns" && <PatternLibrary />}
         {tab === "history" && <SignalHistory />}
         {tab === "learning" && <LearningLog />}
+        {tab === "intercom" && <InterAgentTerminal />}
       </div>
     </div>
   );

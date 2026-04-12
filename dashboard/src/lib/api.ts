@@ -59,6 +59,14 @@ export interface Signal {
   direction: string;
   confidence: number;
   price: number;
+  signal_time?: string;
+  entry_price?: number;
+  current_price_at_signal?: number;
+  target_price?: number;
+  target_pct?: number;
+  estimated_duration_to_target_minutes?: number;
+  exchange?: string;
+  market_type?: string;
   status: string;
   timestamp: string;
   metadata: Record<string, any>;
@@ -89,7 +97,9 @@ export interface PriceCandle {
 export interface LivePrice {
   symbol: string;
   exchange: string;
+  market_type: string;
   price: number;
+  price_text: string;
   timestamp: string;
 }
 
@@ -238,6 +248,7 @@ export interface BacktestRecent {
   exit_time: string;
   signal_type: string;
   confidence: number;
+  signal_metadata?: Record<string, any>;
   success: boolean;
 }
 
@@ -287,6 +298,22 @@ export interface AgentFlowData {
   }>;
 }
 
+export interface EventLogItem {
+  type: string;
+  source: string;
+  data_keys: string[];
+  data_preview?: Record<string, any>;
+  timestamp: number;
+  priority?: number;
+}
+
+export interface SystemEventStats {
+  total_events: number;
+  subscriber_count: number;
+  topics: Record<string, number>;
+  recent_events: EventLogItem[];
+}
+
 export interface EquityPoint {
   time: string;
   pnl: number;
@@ -329,6 +356,13 @@ export function useAgentFlow() {
 export function useEquityCurve() {
   return useSWR<EquityPoint[]>(`${API}/api/analytics/equity-curve`, fetcher, {
     refreshInterval: 15000,
+  });
+}
+
+export function useSystemEvents() {
+  return useSWR<SystemEventStats>(`${API}/api/system/events`, fetcher, {
+    refreshInterval: 2000,
+    dedupingInterval: 1000,
   });
 }
 

@@ -55,6 +55,12 @@ class EventType(str, Enum):
     # Directive events
     DIRECTIVE_UPDATED = "directive.updated"
 
+    # Command routing events (user -> qwen -> agents)
+    COMMAND_RECEIVED = "command.received"
+    COMMAND_ROUTED = "command.routed"
+    COMMAND_EXECUTED = "command.executed"
+    COMMAND_FAILED = "command.failed"
+
 
 @dataclass
 class Event:
@@ -73,6 +79,21 @@ class EventBus:
         self._history: list[dict] = []
         self._max_history = max_history
         self._event_count = 0
+
+    def _safe_preview(self, data: dict) -> dict:
+        preview: dict[str, Any] = {}
+        for k, v in (data or {}).items():
+            if isinstance(v, (int, float, bool)) or v is None:
+                preview[k] = v
+            elif isinstance(v, str):
+                preview[k] = v[:200]
+            elif isinstance(v, list):
+                preview[k] = f"list[{len(v)}]"
+            elif isinstance(v, dict):
+                preview[k] = {ik: str(iv)[:100] for ik, iv in list(v.items())[:8]}
+            else:
+                preview[k] = str(v)[:100]
+        return preview
 
     def subscribe(self, event_type: EventType, handler: Callable[..., Coroutine]):
         """Subscribe a coroutine handler to an event type."""
@@ -97,7 +118,9 @@ class EventBus:
             "type": key,
             "source": event.source,
             "data_keys": list(event.data.keys()),
+            "data_preview": self._safe_preview(event.data),
             "timestamp": event.timestamp,
+            "priority": event.priority,
         })
         if len(self._history) > self._max_history:
             self._history = self._history[-self._max_history:]

@@ -3,6 +3,8 @@ import ctypes
 import gc
 import json
 import logging
+import os
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 
@@ -62,6 +64,8 @@ class StrategistAgent:
         self.feature_weights = Config.get_agent_config('strategist')['feature_weights']
         self.analysis_count = 0
         self.signals_generated = 0
+        self._signal_cooldown_seconds = int(os.getenv("QUENBOT_SIGNAL_COOLDOWN_SECONDS", "300"))
+        self._last_signal_emit: Dict[str, float] = {}
 
     async def initialize(self):
         logger.info("Initializing Strategist Agent...")
@@ -79,7 +83,7 @@ class StrategistAgent:
                 await self._update_pattern_outcomes()
             except Exception as e:
                 logger.error(f"Strategist cycle error: {e}")
-            await asyncio.sleep(45)  # Her 45 saniyede bir
+            await asyncio.sleep(180)  # Dakika bazlı dalgalanmayı azaltmak için 3 dk döngü
 
     async def stop(self):
         self.running = False
@@ -94,6 +98,55 @@ class StrategistAgent:
         except:
             pass
         return Config.WATCHLIST
+
+    def _can_emit_signal(self, symbol: str, market_type: str, direction: str) -> bool:
+        key = f"{symbol}:{market_type}:{direction}"
+        now = time.time()
+        last = self._last_signal_emit.get(key, 0.0)
+        if now - last < self._signal_cooldown_seconds:
+            return False
+        self._last_signal_emit[key] = now
+        return True
+
+    def _build_signal_payload(
+        self,
+        *,
+        market_type: str,
+        symbol: str,
+        signal_type: str,
+        direction: str,
+        confidence: float,
+        entry_price: float,
+        target_pct: float,
+        eta_minutes: int,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        safe_target_pct = max(float(target_pct), 0.02)
+        safe_entry = float(entry_price)
+        target_price = safe_entry * (1.0 + safe_target_pct) if direction == 'long' else safe_entry * (1.0 - safe_target_pct)
+        ts = datetime.utcnow()
+        base_meta = {
+            'position_bias': direction,
+            'market_type': market_type,
+            'target_pct': safe_target_pct,
+            'signal_time': ts.isoformat() + 'Z',
+            'entry_price': safe_entry,
+            'current_price_at_signal': safe_entry,
+            'target_price': float(target_price),
+            'estimated_duration_to_target_minutes': int(max(1, eta_minutes)),
+        }
+        if metadata:
+            base_meta.update(metadata)
+
+        return {
+            'market_type': market_type,
+            'symbol': symbol,
+            'signal_type': signal_type,
+            'confidence': float(min(max(confidence, 0.0), 1.0)),
+            'price': safe_entry,
+            'timestamp': ts,
+            'metadata': base_meta,
+        }
 
     async def _multi_timeframe_analysis(self):
         """Çoklu zaman dilimi analizi - 15m, 1h, 4h, 1d"""
@@ -148,29 +201,29 @@ class StrategistAgent:
                                         best_tf_change = abs(prediction['timeframes'][best_tf].get('avg_change_pct', 0.02))
                                         target_pct = max(best_tf_change, 0.02)
                                         signal_type = f'brain_{direction}_{best_tf}'
-                                        signal_payload = {
-                                            'market_type': market_type,
-                                            'symbol': symbol,
-                                            'signal_type': signal_type,
-                                            'confidence': float(min(confidence, 1.0)),
-                                            'price': last_price,
-                                            'timestamp': datetime.utcnow(),
-                                            'metadata': {
-                                                'position_bias': direction,
-                                                'target_pct': float(target_pct),
-                                                'timeframe': best_tf,
-                                                'match_count': prediction['match_count'],
-                                                'avg_similarity': prediction['avg_similarity'],
-                                                'timeframe_predictions': prediction['timeframes'],
-                                                'brain_analysis': True,
-                                                'market_type': market_type,
-                                            }
-                                        }
-                                        await self.db.insert_signal(signal_payload)
-                                        self.signals_generated += 1
-                                        logger.info(
-                                            f"🧠 Brain signal [{market_type}] {symbol} {direction} "
-                                            f"tf={best_tf} conf={confidence:.2f} matches={prediction['match_count']}")
+                                        if self._can_emit_signal(symbol, market_type, direction):
+                                            signal_payload = self._build_signal_payload(
+                                                market_type=market_type,
+                                                symbol=symbol,
+                                                signal_type=signal_type,
+                                                direction=direction,
+                                                confidence=confidence,
+                                                entry_price=last_price,
+                                                target_pct=target_pct,
+                                                eta_minutes=15 if best_tf == '15m' else 60,
+                                                metadata={
+                                                    'timeframe': best_tf,
+                                                    'match_count': prediction['match_count'],
+                                                    'avg_similarity': prediction['avg_similarity'],
+                                                    'timeframe_predictions': prediction['timeframes'],
+                                                    'brain_analysis': True,
+                                                },
+                                            )
+                                            await self.db.insert_signal(signal_payload)
+                                            self.signals_generated += 1
+                                            logger.info(
+                                                f"🧠 Brain signal [{market_type}] {symbol} {direction} "
+                                                f"tf={best_tf} conf={confidence:.2f} matches={prediction['match_count']}")
 
                                         # LLM-enhanced signal evaluation
                                         bridge = _get_llm_bridge()
@@ -238,35 +291,35 @@ class StrategistAgent:
                                                 if itf_change >= 0.01:  # Minimum %1 beklenen hareket
                                                     last_price = float(trades[-1]['price'])
                                                     signal_type = f'intel_{intel_dir}_{best_intel_tf}'
-                                                    signal_payload = {
-                                                        'market_type': market_type,
-                                                        'symbol': symbol,
-                                                        'signal_type': signal_type,
-                                                        'confidence': float(min(intel_conf, 0.95)),
-                                                        'price': last_price,
-                                                        'timestamp': datetime.utcnow(),
-                                                        'metadata': {
-                                                            'position_bias': intel_dir,
-                                                            'target_pct': float(max(itf_change, 0.02)),
-                                                            'timeframe': best_intel_tf,
-                                                            'match_count': intel_result.get('match_count', 0),
-                                                            'avg_similarity': intel_result.get('avg_similarity', 0),
-                                                            'top3_similarity': intel_result.get('top3_similarity', 0),
-                                                            'regime': regime_name,
-                                                            'regime_multiplier': intel_result.get('regime_multiplier', 1.0),
-                                                            'tf_agreement': intel_result.get('tf_agreement', 0),
-                                                            'avg_consistency': intel_result.get('avg_consistency', 0),
-                                                            'enriched_dim': intel_result.get('enriched_dim', 18),
-                                                            'intelligence_version': intel_result.get('intelligence_version', '1.0'),
-                                                            'market_type': market_type,
-                                                        }
-                                                    }
-                                                    await self.db.insert_signal(signal_payload)
-                                                    self.signals_generated += 1
-                                                    logger.info(
-                                                        f"🧬 Intel signal [{market_type}] {symbol} {intel_dir} "
-                                                        f"tf={best_intel_tf} conf={intel_conf:.2f} "
-                                                        f"regime={regime_name} matches={intel_result.get('match_count', 0)}")
+                                                    if self._can_emit_signal(symbol, market_type, intel_dir):
+                                                        signal_payload = self._build_signal_payload(
+                                                            market_type=market_type,
+                                                            symbol=symbol,
+                                                            signal_type=signal_type,
+                                                            direction=intel_dir,
+                                                            confidence=float(min(intel_conf, 0.95)),
+                                                            entry_price=last_price,
+                                                            target_pct=max(itf_change, 0.02),
+                                                            eta_minutes=15 if best_intel_tf == '15m' else 60,
+                                                            metadata={
+                                                                'timeframe': best_intel_tf,
+                                                                'match_count': intel_result.get('match_count', 0),
+                                                                'avg_similarity': intel_result.get('avg_similarity', 0),
+                                                                'top3_similarity': intel_result.get('top3_similarity', 0),
+                                                                'regime': regime_name,
+                                                                'regime_multiplier': intel_result.get('regime_multiplier', 1.0),
+                                                                'tf_agreement': intel_result.get('tf_agreement', 0),
+                                                                'avg_consistency': intel_result.get('avg_consistency', 0),
+                                                                'enriched_dim': intel_result.get('enriched_dim', 18),
+                                                                'intelligence_version': intel_result.get('intelligence_version', '1.0'),
+                                                            },
+                                                        )
+                                                        await self.db.insert_signal(signal_payload)
+                                                        self.signals_generated += 1
+                                                        logger.info(
+                                                            f"🧬 Intel signal [{market_type}] {symbol} {intel_dir} "
+                                                            f"tf={best_intel_tf} conf={intel_conf:.2f} "
+                                                            f"regime={regime_name} matches={intel_result.get('match_count', 0)}")
 
                                     # Pattern'ı enriched library'ye kaydet (her durumda)
                                     self.brain.record_enriched_pattern(snapshot, ind)
@@ -411,65 +464,65 @@ class StrategistAgent:
                             # Confidence: en az 0.3, similarity varsa onu kullan, yoksa score-based
                             evo_conf = max(float(best_similarity), min(float(score) * 0.1, 0.85), 0.3)
                             target_pct = max(float(mean_profit), 0.02)  # ≥2% target
-                            signal_payload = {
-                                'market_type': market_type,
-                                'symbol': symbol,
-                                'signal_type': signal_type,
-                                'confidence': float(min(evo_conf, 1.0)),
-                                'price': last_price,
-                                'timestamp': datetime.utcnow(),
-                                'metadata': {
-                                    'position_bias': direction,
-                                    'target_pct': float(target_pct),
-                                    'similarity_score': float(best_similarity),
-                                    'strategy_score': float(score),
-                                    'mean_profit': float(mean_profit),
-                                    'risk': float(risk),
-                                    'upper_threshold': float(result['params'][0]),
-                                    'lower_threshold': float(result['params'][1]),
-                                    'history_count': len(historical_vectors),
-                                    'sample_count': len(prices),
-                                    'market_type': market_type,
-                                    'rsi': float(ind['rsi']) if ind.get('rsi') is not None else None,
-                                    'macd': float(ind['macd']['histogram']) if ind.get('macd') else None,
-                                    'trend': trend_summary.get('trend'),
-                                    'atr_ratio': float(atr_ratio) if atr_ratio is not None else 0.02,
-                                }
-                            }
-                            await self.db.insert_signal(signal_payload)
-                            self.signals_generated += 1
-                            logger.info(
-                                f"Generated signal [{market_type}] {symbol} dir={direction} sim={best_similarity:.2f} score={score:.4f}"
-                            )
+                            if self._can_emit_signal(symbol, market_type, direction):
+                                signal_payload = self._build_signal_payload(
+                                    market_type=market_type,
+                                    symbol=symbol,
+                                    signal_type=signal_type,
+                                    direction=direction,
+                                    confidence=float(min(evo_conf, 1.0)),
+                                    entry_price=last_price,
+                                    target_pct=target_pct,
+                                    eta_minutes=60,
+                                    metadata={
+                                        'similarity_score': float(best_similarity),
+                                        'strategy_score': float(score),
+                                        'mean_profit': float(mean_profit),
+                                        'risk': float(risk),
+                                        'upper_threshold': float(result['params'][0]),
+                                        'lower_threshold': float(result['params'][1]),
+                                        'history_count': len(historical_vectors),
+                                        'sample_count': len(prices),
+                                        'rsi': float(ind['rsi']) if ind.get('rsi') is not None else None,
+                                        'macd': float(ind['macd']['histogram']) if ind.get('macd') else None,
+                                        'trend': trend_summary.get('trend'),
+                                        'atr_ratio': float(atr_ratio) if atr_ratio is not None else 0.02,
+                                    },
+                                )
+                                await self.db.insert_signal(signal_payload)
+                                self.signals_generated += 1
+                                logger.info(
+                                    f"Generated signal [{market_type}] {symbol} dir={direction} sim={best_similarity:.2f} score={score:.4f}"
+                                )
 
                         # Momentum-based signal: evolutionary algo sonuç buldu
                         elif score > 0.05 and mean_profit > min_profit * 0.5:
                             momentum_conf = min(max(score * 0.6, 0.3), 0.85)
                             signal_type = f'momentum_{direction}'
                             target_pct = max(float(mean_profit), 0.02)  # ≥2% target
-                            signal_payload = {
-                                'market_type': market_type,
-                                'symbol': symbol,
-                                'signal_type': signal_type,
-                                'confidence': float(momentum_conf),
-                                'price': last_price,
-                                'timestamp': datetime.utcnow(),
-                                'metadata': {
-                                    'position_bias': direction,
-                                    'target_pct': float(target_pct),
-                                    'strategy_score': float(score),
-                                    'mean_profit': float(mean_profit),
-                                    'risk': float(risk),
-                                    'sample_count': len(prices),
-                                    'market_type': market_type,
-                                    'bootstrap': True
-                                }
-                            }
-                            await self.db.insert_signal(signal_payload)
-                            self.signals_generated += 1
-                            logger.info(
-                                f"📈 Momentum signal [{market_type}] {symbol} dir={direction} score={score:.4f} profit={mean_profit:.4f}"
-                            )
+                            if self._can_emit_signal(symbol, market_type, direction):
+                                signal_payload = self._build_signal_payload(
+                                    market_type=market_type,
+                                    symbol=symbol,
+                                    signal_type=signal_type,
+                                    direction=direction,
+                                    confidence=float(momentum_conf),
+                                    entry_price=last_price,
+                                    target_pct=target_pct,
+                                    eta_minutes=45,
+                                    metadata={
+                                        'strategy_score': float(score),
+                                        'mean_profit': float(mean_profit),
+                                        'risk': float(risk),
+                                        'sample_count': len(prices),
+                                        'bootstrap': True,
+                                    },
+                                )
+                                await self.db.insert_signal(signal_payload)
+                                self.signals_generated += 1
+                                logger.info(
+                                    f"📈 Momentum signal [{market_type}] {symbol} dir={direction} score={score:.4f} profit={mean_profit:.4f}"
+                                )
 
                         # BOOTSTRAP/LEARNING: Basit fiyat hareketi sinyali
                         elif self.state_tracker and self.state_tracker.get_mode() in ('BOOTSTRAP', 'LEARNING'):
@@ -487,32 +540,32 @@ class StrategistAgent:
                                 if pa_direction:
                                     pa_conf = min(abs(price_change_pct) * 20 + trend_strength * 0.3, 0.7)
                                     target_pct = max(abs(price_change_pct) * 2, 0.02)  # ≥2% target
-                                    signal_payload = {
-                                        'market_type': market_type,
-                                        'symbol': symbol,
-                                        'signal_type': f'price_action_{pa_direction}',
-                                        'confidence': float(pa_conf),
-                                        'price': last_price,
-                                        'timestamp': datetime.utcnow(),
-                                        'metadata': {
-                                            'position_bias': pa_direction,
-                                            'target_pct': float(target_pct),
-                                            'price_change_pct': float(price_change_pct),
-                                            'rsi': float(rsi_val),
-                                            'trend': trend_dir,
-                                            'trend_strength': float(trend_strength),
-                                            'atr_ratio': atr_ratio,
-                                            'sample_count': len(prices),
-                                            'market_type': market_type,
-                                            'bootstrap': True,
-                                        }
-                                    }
-                                    await self.db.insert_signal(signal_payload)
-                                    self.signals_generated += 1
-                                    logger.info(
-                                        f"🔥 Price action [{market_type}] {symbol} {pa_direction} "
-                                        f"chg={price_change_pct*100:.2f}% rsi={rsi_val:.0f} trend={trend_dir}"
-                                    )
+                                    if self._can_emit_signal(symbol, market_type, pa_direction):
+                                        signal_payload = self._build_signal_payload(
+                                            market_type=market_type,
+                                            symbol=symbol,
+                                            signal_type=f'price_action_{pa_direction}',
+                                            direction=pa_direction,
+                                            confidence=float(pa_conf),
+                                            entry_price=last_price,
+                                            target_pct=target_pct,
+                                            eta_minutes=30,
+                                            metadata={
+                                                'price_change_pct': float(price_change_pct),
+                                                'rsi': float(rsi_val),
+                                                'trend': trend_dir,
+                                                'trend_strength': float(trend_strength),
+                                                'atr_ratio': atr_ratio,
+                                                'sample_count': len(prices),
+                                                'bootstrap': True,
+                                            },
+                                        )
+                                        await self.db.insert_signal(signal_payload)
+                                        self.signals_generated += 1
+                                        logger.info(
+                                            f"🔥 Price action [{market_type}] {symbol} {pa_direction} "
+                                            f"chg={price_change_pct*100:.2f}% rsi={rsi_val:.0f} trend={trend_dir}"
+                                        )
 
                     except Exception as e:
                         logger.exception(f"Error processing {symbol} ({market_type}): {e}")
@@ -579,31 +632,31 @@ class StrategistAgent:
                             last_price = float(prices[-1])
                             target_pct = max(abs(sig_change), 0.02)  # ≥2% target
 
-                            signal_payload = {
-                                'market_type': market_type,
-                                'symbol': symbol,
-                                'signal_type': signal_type,
-                                'confidence': confidence,
-                                'price': last_price,
-                                'timestamp': datetime.utcnow(),
-                                'metadata': {
-                                    'position_bias': sig_direction,
-                                    'target_pct': float(target_pct),
-                                    'cosine_similarity': float(similarity),
-                                    'reference_change_pct': float(sig_change),
-                                    'reference_timeframe': sig_tf,
-                                    'signature_id': sig.get('id'),
-                                    'pre_move_indicators': sig.get('pre_move_indicators', {}),
-                                    'market_type': market_type,
-                                }
-                            }
-                            await self.db.insert_signal(signal_payload)
-                            self.signals_generated += 1
-                            logger.info(
-                                f"🔖 Signature match [{market_type}] {symbol} {sig_direction} "
-                                f"sim={similarity:.2f} ref_chg={sig_change:+.2%} tf={sig_tf}"
-                            )
-                            break  # 1 match per symbol per cycle
+                            if self._can_emit_signal(symbol, market_type, sig_direction):
+                                signal_payload = self._build_signal_payload(
+                                    market_type=market_type,
+                                    symbol=symbol,
+                                    signal_type=signal_type,
+                                    direction=sig_direction,
+                                    confidence=confidence,
+                                    entry_price=last_price,
+                                    target_pct=target_pct,
+                                    eta_minutes=15 if sig_tf == '15m' else 60,
+                                    metadata={
+                                        'cosine_similarity': float(similarity),
+                                        'reference_change_pct': float(sig_change),
+                                        'reference_timeframe': sig_tf,
+                                        'signature_id': sig.get('id'),
+                                        'pre_move_indicators': sig.get('pre_move_indicators', {}),
+                                    },
+                                )
+                                await self.db.insert_signal(signal_payload)
+                                self.signals_generated += 1
+                                logger.info(
+                                    f"🔖 Signature match [{market_type}] {symbol} {sig_direction} "
+                                    f"sim={similarity:.2f} ref_chg={sig_change:+.2%} tf={sig_tf}"
+                                )
+                                break  # 1 match per symbol per cycle
 
                     except Exception as e:
                         logger.error(f"Signature matching error {symbol} ({market_type}): {e}")

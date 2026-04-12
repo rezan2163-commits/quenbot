@@ -94,17 +94,25 @@ async function refreshPricesCache() {
   try {
     // Get latest price for each symbol+exchange from trades
     const rows = await sql`
-      SELECT DISTINCT ON (symbol, exchange) symbol, exchange, price::double precision AS price, timestamp
+      SELECT DISTINCT ON (symbol, exchange, market_type)
+        symbol,
+        exchange,
+        market_type,
+        price::double precision AS price,
+        price::text AS price_text,
+        timestamp
       FROM trades
       WHERE timestamp > NOW() - INTERVAL '5 minutes'
-      ORDER BY symbol, exchange, timestamp DESC
+      ORDER BY symbol, exchange, market_type, timestamp DESC
       LIMIT 100
     `;
     
     const formatted = rows.map((row: any) => ({
       symbol: row.symbol,
       exchange: row.exchange || "binance",
+      market_type: row.market_type || "spot",
       price: Number(row.price) || 0,
+      price_text: String(row.price_text ?? row.price ?? "0"),
       timestamp: row.timestamp,
     }));
     
@@ -308,6 +316,17 @@ app.get("/api/signals", async (req, res) => {
         COALESCE(metadata->>'direction', CASE WHEN signal_type ILIKE '%short%' THEN 'short' ELSE 'long' END) AS direction,
         confidence::double precision AS confidence,
         price::double precision AS price,
+        COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
+        COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
+        COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
+        COALESCE((metadata->>'target_price')::double precision,
+          CASE WHEN COALESCE(metadata->>'position_bias', 'long') = 'short'
+            THEN price::double precision * (1 - GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02))
+            ELSE price::double precision * (1 + GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02))
+          END
+        ) AS target_price,
+        GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02) AS target_pct,
+        COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes,
         status,
         timestamp,
         metadata,
@@ -807,13 +826,41 @@ app.get("/api/signals/history", async (req, res) => {
     const limit = Math.min(200, Number(req.query.limit || 100));
     let rows;
     if (status && symbol) {
-      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price FROM signals WHERE status = ${status} AND symbol = ${symbol} ORDER BY timestamp DESC LIMIT ${limit}`;
+      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
+        COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
+        COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
+        COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
+        COALESCE((metadata->>'target_price')::double precision, price::double precision) AS target_price,
+        GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02) AS target_pct,
+        COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
+        FROM signals WHERE status = ${status} AND symbol = ${symbol} ORDER BY timestamp DESC LIMIT ${limit}`;
     } else if (status) {
-      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price FROM signals WHERE status = ${status} ORDER BY timestamp DESC LIMIT ${limit}`;
+      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
+        COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
+        COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
+        COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
+        COALESCE((metadata->>'target_price')::double precision, price::double precision) AS target_price,
+        GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02) AS target_pct,
+        COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
+        FROM signals WHERE status = ${status} ORDER BY timestamp DESC LIMIT ${limit}`;
     } else if (symbol) {
-      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price FROM signals WHERE symbol = ${symbol} ORDER BY timestamp DESC LIMIT ${limit}`;
+      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
+        COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
+        COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
+        COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
+        COALESCE((metadata->>'target_price')::double precision, price::double precision) AS target_price,
+        GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02) AS target_pct,
+        COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
+        FROM signals WHERE symbol = ${symbol} ORDER BY timestamp DESC LIMIT ${limit}`;
     } else {
-      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price FROM signals ORDER BY timestamp DESC LIMIT ${limit}`;
+      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
+        COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
+        COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
+        COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
+        COALESCE((metadata->>'target_price')::double precision, price::double precision) AS target_price,
+        GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02) AS target_pct,
+        COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
+        FROM signals ORDER BY timestamp DESC LIMIT ${limit}`;
     }
     res.json(rows);
   } catch (error) {
@@ -1282,7 +1329,7 @@ app.get("/api/backtest/recent", async (_req, res) => {
         sim.entry_price::float, sim.exit_price::float,
         sim.pnl::float, sim.pnl_pct::float,
         sim.entry_time, sim.exit_time,
-        s.signal_type, s.confidence::float,
+        s.signal_type, s.confidence::float, s.metadata AS signal_metadata,
         CASE WHEN sim.pnl > 0 THEN true ELSE false END AS success
       FROM simulations sim
       LEFT JOIN signals s ON s.id = sim.signal_id

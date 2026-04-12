@@ -498,14 +498,38 @@ class Database:
     # Signal operations
     async def insert_signal(self, signal_data: Dict[str, Any]) -> int:
         """Insert a new signal"""
+        metadata = signal_data.get('metadata', {}) or {}
+        market_type = signal_data.get('market_type', 'spot')
+        symbol = signal_data['symbol']
+        entry_price = float(signal_data.get('price', 0) or 0)
+        timestamp = signal_data['timestamp']
+
+        # Enforce mandatory signal fields and minimum 2% target for all signals.
+        direction = str(metadata.get('position_bias') or signal_data.get('direction') or 'long').lower()
+        if direction not in ('long', 'short'):
+            direction = 'long'
+        target_pct = max(float(metadata.get('target_pct', 0.02) or 0.02), 0.02)
+        target_price = entry_price * (1.0 + target_pct) if direction == 'long' else entry_price * (1.0 - target_pct)
+        eta_minutes = int(metadata.get('estimated_duration_to_target_minutes', 60) or 60)
+
+        metadata.setdefault('position_bias', direction)
+        metadata['target_pct'] = target_pct
+        metadata['signal_time'] = str(metadata.get('signal_time') or timestamp)
+        metadata['entry_price'] = float(metadata.get('entry_price', entry_price) or entry_price)
+        metadata['current_price_at_signal'] = float(metadata.get('current_price_at_signal', entry_price) or entry_price)
+        metadata['target_price'] = float(metadata.get('target_price', target_price) or target_price)
+        metadata['estimated_duration_to_target_minutes'] = max(1, eta_minutes)
+        metadata.setdefault('market_type', market_type)
+        metadata.setdefault('exchange', 'mixed')
+
         async with self.pool.acquire() as conn:
             return await conn.fetchval("""
                 INSERT INTO signals (market_type, symbol, signal_type, confidence, price, timestamp, metadata)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                 RETURNING id
-            """, signal_data.get('market_type', 'spot'), signal_data['symbol'], signal_data['signal_type'],
-                signal_data['confidence'], signal_data['price'], signal_data['timestamp'],
-                _dumps(signal_data.get('metadata', {})))
+            """, market_type, symbol, signal_data['signal_type'],
+                signal_data['confidence'], entry_price, timestamp,
+                _dumps(metadata))
 
     async def update_signal_status(self, signal_id: int, status: str) -> bool:
         """Update signal status"""

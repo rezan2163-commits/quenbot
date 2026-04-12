@@ -126,9 +126,15 @@ export default function BacktestPanel() {
               ) : (
                 <XCircle size={12} className="text-bear flex-shrink-0" />
               )}
-              <span className="text-[11px] text-gray-400 flex-1 truncate">
-                {(r.symbol || "").replace("USDT", "")} {r.side?.toUpperCase()}
-              </span>
+              <div className="flex-1 min-w-0">
+                <span className="text-[11px] text-gray-400 truncate block">
+                  {(r.symbol || "").replace("USDT", "")} {r.side?.toUpperCase()}
+                </span>
+                <span className="text-[10px] text-gray-600 truncate block">
+                  Hedef: %{Number(r.signal_metadata?.target_pct ?? 0) * 100 >= 2 ? (Number(r.signal_metadata?.target_pct ?? 0) * 100).toFixed(2) : "2.00"}
+                  {" "}| ETA: {Number(r.signal_metadata?.estimated_duration_to_target_minutes ?? 60)} dk
+                </span>
+              </div>
               <span className={`text-[11px] font-mono ${Number(r.pnl_pct ?? 0) >= 0 ? "text-bull" : "text-bear"}`}>
                 {Number(r.pnl_pct ?? 0) >= 0 ? "+" : ""}{Number(r.pnl_pct ?? 0).toFixed(2)}%
               </span>

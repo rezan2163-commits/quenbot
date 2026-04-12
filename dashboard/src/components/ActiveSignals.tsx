@@ -28,8 +28,10 @@ export default function ActiveSignals() {
             {active.map((s) => {
               const isLong = (s.direction || "").toLowerCase() === "long" || (s.direction || "").toLowerCase() === "buy";
               const meta = s.metadata || {};
-              const entry = meta.entry_price || s.price;
-              const target = meta.target_price;
+              const entry = s.entry_price ?? meta.entry_price ?? s.price;
+              const target = s.target_price ?? meta.target_price;
+              const currentAtSignal = s.current_price_at_signal ?? meta.current_price_at_signal ?? s.price;
+              const etaMin = s.estimated_duration_to_target_minutes ?? meta.estimated_duration_to_target_minutes ?? 60;
               const reason = meta.reason || s.signal_type;
               const conf = (toNumber(s.confidence) * 100).toFixed(0);
               const age = new Date(s.timestamp);
@@ -63,14 +65,21 @@ export default function ActiveSignals() {
                   <div className="grid grid-cols-2 gap-1 text-[10px] text-gray-400">
                     <div className="flex items-center gap-1">
                       <span className="text-gray-600">Giriş:</span>
-                      <span className="text-gray-300 font-mono">${Number(entry).toLocaleString()}</span>
+                      <span className="text-gray-300 font-mono">${String(entry)}</span>
                     </div>
                     {target && (
                       <div className="flex items-center gap-1">
                         <Target size={8} className="text-gray-600" />
-                        <span className="text-gray-300 font-mono">${Number(target).toLocaleString()}</span>
+                        <span className="text-gray-300 font-mono">${String(target)}</span>
                       </div>
                     )}
+                    <div className="flex items-center gap-1 col-span-2">
+                      <span className="text-gray-600">Sinyal Anı:</span>
+                      <span className="text-gray-300 font-mono">${String(currentAtSignal)}</span>
+                      <span className="text-[9px] px-1 py-0.5 rounded border border-surface-border text-gray-500 uppercase">{s.exchange || "mixed"}</span>
+                      <span className="text-[9px] px-1 py-0.5 rounded border border-surface-border text-gray-500 uppercase">{s.market_type || "spot"}</span>
+                    </div>
+                    <div className="col-span-2 text-gray-500">Tahmini hedef süresi: {toNumber(etaMin)} dk</div>
                     <div className="col-span-2 flex items-center gap-1">
                       <Clock size={8} className="text-gray-600" />
                       <span>{age.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}</span>
