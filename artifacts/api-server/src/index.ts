@@ -1322,7 +1322,7 @@ app.get("/api/strategy/events", async (_req, res) => {
       ORDER BY updated_at DESC
     `;
     const auditRows = await sql`
-      SELECT id, timestamp, total_simulations, successful, failed, success_rate, avg_win_pct, avg_loss_pct
+      SELECT id, timestamp, total_simulations, successful_simulations as successful, failed_simulations as failed, success_rate, avg_win_pct, avg_loss_pct
       FROM audit_records ORDER BY timestamp DESC LIMIT 10
     `;
     res.json({ state: rows, audits: auditRows });

@@ -3,17 +3,26 @@ import useSWR from "swr";
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
 async function fetcher<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    return res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export const swrConfig = {
-  onErrorRetry: (error: Error, _key: string, _config: any, revalidate: any, { retryCount }: { retryCount: number }) => {
-    if (retryCount >= 3) return;
-    setTimeout(() => revalidate({ retryOnFocus: false }), 5000);
+  onErrorRetry: (_error: Error, _key: string, _config: any, revalidate: any, { retryCount }: { retryCount: number }) => {
+    if (retryCount >= 2) return;
+    setTimeout(() => revalidate({ retryOnFocus: false }), 30000);
   },
   shouldRetryOnError: true,
+  dedupingInterval: 10000,
+  revalidateOnFocus: false,
+  revalidateOnReconnect: false,
 };
 
 /* ─── Types ─── */
@@ -171,7 +180,8 @@ export function useTopMovers() {
 
 export function useTradeTimeline() {
   return useSWR<TradeTimeline[]>(`${API}/api/analytics/trade-timeline`, fetcher, {
-    refreshInterval: 10000,
+    refreshInterval: 60000,
+    shouldRetryOnError: false,
   });
 }
 
@@ -297,19 +307,22 @@ export function useBacktestRecent() {
 
 export function useSelfCorrection() {
   return useSWR<SelfCorrectionStatus>(`${API}/api/selfcorrection/status`, fetcher, {
-    refreshInterval: 10000,
+    refreshInterval: 60000,
+    shouldRetryOnError: false,
   });
 }
 
 export function useStrategyEvents() {
   return useSWR<StrategyEvent>(`${API}/api/strategy/events`, fetcher, {
-    refreshInterval: 10000,
+    refreshInterval: 60000,
+    shouldRetryOnError: false,
   });
 }
 
 export function useAgentFlow() {
   return useSWR<AgentFlowData>(`${API}/api/agents/flow`, fetcher, {
-    refreshInterval: 15000,
+    refreshInterval: 30000,
+    shouldRetryOnError: false,
   });
 }
 
