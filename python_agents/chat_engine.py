@@ -26,7 +26,7 @@ CHAT_MAX_TOTAL_LATENCY = float(os.getenv("QUENBOT_CHAT_MAX_TOTAL_LATENCY", "12")
 
 # Dedicated chat LLM lane — completely separate from the decision/pattern LLM pool.
 # Prevents chat from ever competing with 18-second decision calls.
-CHAT_DEDICATED_MODEL = os.getenv("QUENBOT_CHAT_MODEL", "qwen3:1.7b")
+CHAT_DEDICATED_MODEL = os.getenv("QUENBOT_CHAT_MODEL", ACTIVE_LLM_MODEL)
 CHAT_DEDICATED_TIMEOUT = int(os.getenv("QUENBOT_CHAT_LLM_TIMEOUT", "14"))
 CHAT_DEDICATED_NUM_THREAD = int(os.getenv("QUENBOT_CHAT_LLM_NUM_THREAD", "8"))
 CHAT_DEDICATED_NUM_CTX = int(os.getenv("QUENBOT_CHAT_LLM_NUM_CTX", "3072"))

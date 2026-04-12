@@ -892,6 +892,145 @@ class AgentOrchestrator:
         Listens on port 3002 for directive CRUD + system status + resources."""
         from aiohttp import web
 
+        control_token = os.getenv("QUENBOT_CONTROL_TOKEN", "").strip()
+
+        def _is_control_authorized(request) -> bool:
+            if not control_token:
+                return True
+            return request.headers.get("X-Control-Token", "") == control_token
+
+        async def _refresh_watchlist_runtime():
+            try:
+                if self.scout and hasattr(self.scout, "_refresh_watchlist"):
+                    await self.scout._refresh_watchlist()
+            except Exception as e:
+                logger.warning(f"Watchlist runtime refresh failed: {e}")
+
+        async def execute_control(request):
+            """Runtime control plane for Qwen: directives, watchlist, risk params, model switch."""
+            if not _is_control_authorized(request):
+                return web.json_response({"error": "Unauthorized"}, status=403)
+
+            try:
+                body = await request.json()
+                action = str(body.get("action", "")).strip().lower()
+                params = body.get("params", {}) or {}
+
+                if not action:
+                    return web.json_response({"error": "action required"}, status=400)
+
+                if action == "set_master_directive":
+                    text = str(params.get("text", "")).strip()
+                    if not text:
+                        return web.json_response({"error": "params.text required"}, status=400)
+                    await get_directive_store().set_master_directive(text)
+                    result = {"ok": True, "action": action, "master_directive": text[:200]}
+
+                elif action == "set_agent_override":
+                    agent = str(params.get("agent", "")).strip()
+                    text = str(params.get("text", "")).strip()
+                    if not agent or not text:
+                        return web.json_response({"error": "params.agent and params.text required"}, status=400)
+                    await get_directive_store().set_agent_override(agent, text)
+                    result = {"ok": True, "action": action, "agent": agent}
+
+                elif action == "watchlist_replace":
+                    symbols = [str(s).upper() for s in (params.get("symbols") or []) if str(s).strip()]
+                    if not symbols:
+                        return web.json_response({"error": "params.symbols required"}, status=400)
+                    # Disable current active entries then insert new list for both spot/futures.
+                    current = await self.db.get_user_watchlist()
+                    for row in current:
+                        await self.db.remove_user_watchlist(row["symbol"], row.get("exchange", "all"), row.get("market_type", "spot"))
+                    for sym in symbols:
+                        await self.db.add_user_watchlist(sym, "all", "spot")
+                        await self.db.add_user_watchlist(sym, "all", "futures")
+                    await _refresh_watchlist_runtime()
+                    result = {"ok": True, "action": action, "watchlist": symbols, "count": len(symbols)}
+
+                elif action == "watchlist_add":
+                    symbol = str(params.get("symbol", "")).upper().strip()
+                    if not symbol:
+                        return web.json_response({"error": "params.symbol required"}, status=400)
+                    await self.db.add_user_watchlist(symbol, "all", "spot")
+                    await self.db.add_user_watchlist(symbol, "all", "futures")
+                    await _refresh_watchlist_runtime()
+                    result = {"ok": True, "action": action, "symbol": symbol}
+
+                elif action == "watchlist_remove":
+                    symbol = str(params.get("symbol", "")).upper().strip()
+                    if not symbol:
+                        return web.json_response({"error": "params.symbol required"}, status=400)
+                    await self.db.remove_user_watchlist(symbol, "all", "spot")
+                    await self.db.remove_user_watchlist(symbol, "all", "futures")
+                    await _refresh_watchlist_runtime()
+                    result = {"ok": True, "action": action, "symbol": symbol}
+
+                elif action == "set_risk_limits":
+                    if "max_daily_trades" in params:
+                        Config.RISK_MAX_DAILY_TRADES = int(params["max_daily_trades"])
+                    if "max_open_positions" in params:
+                        Config.RISK_MAX_OPEN_POSITIONS = int(params["max_open_positions"])
+                    if "max_daily_loss_pct" in params:
+                        Config.RISK_MAX_DAILY_LOSS_PCT = float(params["max_daily_loss_pct"])
+                    if "max_drawdown_pct" in params:
+                        Config.RISK_MAX_DRAWDOWN_PCT = float(params["max_drawdown_pct"])
+                    result = {
+                        "ok": True,
+                        "action": action,
+                        "risk": {
+                            "max_daily_trades": Config.RISK_MAX_DAILY_TRADES,
+                            "max_open_positions": Config.RISK_MAX_OPEN_POSITIONS,
+                            "max_daily_loss_pct": Config.RISK_MAX_DAILY_LOSS_PCT,
+                            "max_drawdown_pct": Config.RISK_MAX_DRAWDOWN_PCT,
+                        },
+                    }
+
+                elif action == "set_llm_model":
+                    model = str(params.get("model", "")).strip()
+                    if not model:
+                        return web.json_response({"error": "params.model required"}, status=400)
+                    if self.llm_client:
+                        self.llm_client.model = model
+                    if self.chat_engine and hasattr(self.chat_engine, "_chat_client"):
+                        self.chat_engine._chat_client = None
+                    self._last_known_llm_model = model
+                    result = {"ok": True, "action": action, "model": model}
+
+                elif action == "status":
+                    current_watchlist = []
+                    try:
+                        current_watchlist = self.scout.get_watchlist() if self.scout else []
+                    except Exception:
+                        current_watchlist = []
+                    result = {
+                        "ok": True,
+                        "action": action,
+                        "system_mode": self._system_mode,
+                        "llm_model": self._last_known_llm_model,
+                        "watchlist": current_watchlist,
+                        "risk": {
+                            "max_daily_trades": Config.RISK_MAX_DAILY_TRADES,
+                            "max_open_positions": Config.RISK_MAX_OPEN_POSITIONS,
+                            "max_daily_loss_pct": Config.RISK_MAX_DAILY_LOSS_PCT,
+                            "max_drawdown_pct": Config.RISK_MAX_DRAWDOWN_PCT,
+                        },
+                    }
+
+                else:
+                    return web.json_response({"error": f"unknown action: {action}"}, status=400)
+
+                await self.db.insert_chat_message(
+                    "system",
+                    json.dumps({"control_action": action, "params": params}, ensure_ascii=False)[:1000],
+                    "ControlAPI",
+                )
+
+                return web.json_response(result)
+            except Exception as e:
+                logger.error(f"Control action error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
         async def get_directives(request):
             store = get_directive_store()
             data = await store.get_all()
@@ -1157,6 +1296,7 @@ class AgentOrchestrator:
         app.router.add_get("/api/system/summary", get_system_summary)
         app.router.add_get("/api/system/events", get_event_log)
         app.router.add_get("/api/pattern/matches", get_pattern_matches)
+        app.router.add_post("/api/control/execute", execute_control)
 
         runner = web.AppRunner(app)
         await runner.setup()

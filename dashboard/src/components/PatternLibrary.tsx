@@ -6,10 +6,11 @@ import { useState } from "react";
 
 function OutcomeBadge({ label, val }: { label: string; val: number | null }) {
   if (val == null) return null;
-  const up = val >= 0;
+  const n = Number(val) || 0;
+  const up = n >= 0;
   return (
     <span className={`text-[10px] font-mono ${up ? "text-bull" : "text-bear"}`}>
-      {label}: {up ? "+" : ""}{val.toFixed(2)}%
+      {label}: {up ? "+" : ""}{n.toFixed(2)}%
     </span>
   );
 }
@@ -17,7 +18,8 @@ function OutcomeBadge({ label, val }: { label: string; val: number | null }) {
 function PatternRow({ p }: { p: PatternRecord }) {
   const [open, setOpen] = useState(false);
   const snap = typeof p.snapshot_data === "string" ? JSON.parse(p.snapshot_data) : p.snapshot_data;
-  const outlook = p.outcome_1h ?? p.outcome_15m ?? null;
+  const outlookRaw = p.outcome_1h ?? p.outcome_15m ?? null;
+  const outlook = outlookRaw == null ? null : Number(outlookRaw);
   const up = outlook != null && outlook >= 0;
 
   return (

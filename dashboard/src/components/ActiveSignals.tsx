@@ -5,6 +5,10 @@ import { ArrowUpCircle, ArrowDownCircle, Clock, Target } from "lucide-react";
 
 export default function ActiveSignals() {
   const { data: signals } = useSignals();
+  const toNumber = (value: unknown, fallback = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
 
   // Show only active/pending signals
   const active = signals?.filter((s) => s.status === "active" || s.status === "pending" || s.status === "open") || [];
@@ -27,7 +31,7 @@ export default function ActiveSignals() {
               const entry = meta.entry_price || s.price;
               const target = meta.target_price;
               const reason = meta.reason || s.signal_type;
-              const conf = (s.confidence * 100).toFixed(0);
+              const conf = (toNumber(s.confidence) * 100).toFixed(0);
               const age = new Date(s.timestamp);
 
               return (

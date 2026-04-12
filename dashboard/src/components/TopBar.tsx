@@ -6,6 +6,10 @@ import { TrendingUp, TrendingDown, BarChart3, Target, Activity } from "lucide-re
 export default function TopBar() {
   const { data: summary } = useDashboardSummary();
   const { data: movers } = useTopMovers();
+  const toNumber = (value: unknown, fallback = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
 
   return (
     <div className="flex items-center gap-4 px-4 py-2 border-b border-surface-border bg-surface-card/30 overflow-x-auto">
@@ -19,14 +23,14 @@ export default function TopBar() {
       <KPI
         icon={Target}
         label="Win Rate"
-        value={summary ? `%${summary.win_rate.toFixed(1)}` : "—"}
-        color={summary && summary.win_rate >= 50 ? "text-bull" : "text-bear"}
+        value={summary ? `%${toNumber(summary.win_rate).toFixed(1)}` : "—"}
+        color={summary && toNumber(summary.win_rate) >= 50 ? "text-bull" : "text-bear"}
       />
       <KPI
         icon={Activity}
         label="PnL"
-        value={summary ? `$${summary.total_pnl.toFixed(2)}` : "—"}
-        color={summary && summary.total_pnl >= 0 ? "text-bull" : "text-bear"}
+        value={summary ? `$${toNumber(summary.total_pnl).toFixed(2)}` : "—"}
+        color={summary && toNumber(summary.total_pnl) >= 0 ? "text-bull" : "text-bear"}
       />
       <KPI
         icon={TrendingUp}
@@ -47,11 +51,11 @@ export default function TopBar() {
             </span>
             <span
               className={`text-xs font-mono font-medium ${
-                m.change_pct >= 0 ? "text-bull" : "text-bear"
+                toNumber(m.change_pct) >= 0 ? "text-bull" : "text-bear"
               }`}
             >
-              {m.change_pct >= 0 ? "+" : ""}
-              {m.change_pct.toFixed(2)}%
+              {toNumber(m.change_pct) >= 0 ? "+" : ""}
+              {toNumber(m.change_pct).toFixed(2)}%
             </span>
           </div>
         ))}

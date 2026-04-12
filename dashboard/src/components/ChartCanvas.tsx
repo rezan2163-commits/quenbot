@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createChart, IChartApi, CandlestickData, Time, CandlestickSeries } from "lightweight-charts";
+import { createChart, IChartApi, CandlestickData, Time, CandlestickSeries, createSeriesMarkers } from "lightweight-charts";
 import { usePriceHistory, useSignals, useLivePrices, Signal } from "@/lib/api";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
@@ -15,6 +15,11 @@ export default function ChartCanvas() {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<any>(null);
+
+  const toNumber = (value: unknown, fallback = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
 
   // Initialize chart
   useEffect(() => {
@@ -83,10 +88,10 @@ export default function ChartCanvas() {
 
     const mapped: CandlestickData<Time>[] = candles.map((c) => ({
       time: (new Date(c.minute).getTime() / 1000) as Time,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
+      open: toNumber(c.open),
+      high: toNumber(c.high),
+      low: toNumber(c.low),
+      close: toNumber(c.close),
     }));
 
     seriesRef.current.setData(mapped);
@@ -105,7 +110,7 @@ export default function ChartCanvas() {
         text: s.direction === "long" ? "AL" : "SAT",
       }));
 
-      seriesRef.current.setMarkers(markers);
+      createSeriesMarkers(seriesRef.current, markers);
     }
 
     chartRef.current?.timeScale().fitContent();
@@ -142,7 +147,7 @@ export default function ChartCanvas() {
         {currentPrice && (
           <div className="text-right">
             <span className="text-lg font-bold font-mono text-gray-100">
-              ${currentPrice.price.toLocaleString()}
+              ${toNumber(currentPrice.price).toLocaleString()}
             </span>
           </div>
         )}
@@ -165,6 +170,7 @@ export default function ChartCanvas() {
 
 function SignalPill({ signal }: { signal: Signal }) {
   const isLong = signal.direction === "long";
+  const conf = Number(signal.confidence) || 0;
   return (
     <div
       className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap ${
@@ -173,10 +179,10 @@ function SignalPill({ signal }: { signal: Signal }) {
     >
       <span>{isLong ? "▲ AL" : "▼ SAT"}</span>
       <span className="text-gray-400">
-        {signal.symbol.replace("USDT", "")}
+        {(signal.symbol || "").replace("USDT", "")}
       </span>
       <span className="opacity-70">
-        %{(signal.confidence * 100).toFixed(0)}
+        %{(conf * 100).toFixed(0)}
       </span>
     </div>
   );

@@ -6,6 +6,10 @@ import { Brain, CheckCircle, XCircle, TrendingUp } from "lucide-react";
 export default function LearningLog() {
   const { data: log } = useLearningLog();
   const { data: stats } = useLearningStats();
+  const toNumber = (value: unknown, fallback = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
 
   return (
     <div className="h-full flex flex-col bg-surface-card/30 overflow-hidden">
@@ -16,7 +20,7 @@ export default function LearningLog() {
         </div>
         {stats && (
           <span className="text-[10px] text-gray-500">
-            Doğruluk: <span className={stats.accuracy >= 50 ? "text-bull" : "text-bear"}>{stats.accuracy.toFixed(1)}%</span>
+            Doğruluk: <span className={toNumber(stats.accuracy) >= 50 ? "text-bull" : "text-bear"}>{toNumber(stats.accuracy).toFixed(1)}%</span>
           </span>
         )}
       </div>
@@ -34,11 +38,11 @@ export default function LearningLog() {
           </div>
           <div className="bg-surface-card/50 px-2 py-1.5 text-center">
             <div className="text-[10px] text-gray-500">Doğruluk</div>
-            <div className={`text-xs font-semibold ${stats.accuracy >= 50 ? "text-bull" : "text-bear"}`}>{stats.accuracy.toFixed(1)}%</div>
+            <div className={`text-xs font-semibold ${toNumber(stats.accuracy) >= 50 ? "text-bull" : "text-bear"}`}>{toNumber(stats.accuracy).toFixed(1)}%</div>
           </div>
           <div className="bg-surface-card/50 px-2 py-1.5 text-center">
             <div className="text-[10px] text-gray-500">Ort PnL</div>
-            <div className={`text-xs font-semibold ${stats.avg_pnl >= 0 ? "text-bull" : "text-bear"}`}>{stats.avg_pnl >= 0 ? "+" : ""}{stats.avg_pnl.toFixed(2)}%</div>
+            <div className={`text-xs font-semibold ${toNumber(stats.avg_pnl) >= 0 ? "text-bull" : "text-bear"}`}>{toNumber(stats.avg_pnl) >= 0 ? "+" : ""}{toNumber(stats.avg_pnl).toFixed(2)}%</div>
           </div>
         </div>
       )}
@@ -51,8 +55,8 @@ export default function LearningLog() {
             <div key={t.signal_type} className="flex items-center justify-between text-[10px]">
               <span className="text-gray-400 truncate">{t.signal_type}</span>
               <div className="flex items-center gap-2">
-                <span className={t.correct / t.total >= 0.5 ? "text-bull" : "text-bear"}>
-                  {((t.correct / t.total) * 100).toFixed(0)}%
+                <span className={toNumber(t.correct) / Math.max(toNumber(t.total), 1) >= 0.5 ? "text-bull" : "text-bear"}>
+                  {((toNumber(t.correct) / Math.max(toNumber(t.total), 1)) * 100).toFixed(0)}%
                 </span>
                 <span className="text-gray-600">({t.total})</span>
               </div>
@@ -77,8 +81,8 @@ export default function LearningLog() {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] font-medium text-gray-300">{entry.signal_type}</span>
-                    <span className={`text-[10px] font-mono ${entry.pnl_pct >= 0 ? "text-bull" : "text-bear"}`}>
-                      {entry.pnl_pct >= 0 ? "+" : ""}{entry.pnl_pct.toFixed(2)}%
+                    <span className={`text-[10px] font-mono ${toNumber(entry.pnl_pct) >= 0 ? "text-bull" : "text-bear"}`}>
+                      {toNumber(entry.pnl_pct) >= 0 ? "+" : ""}{toNumber(entry.pnl_pct).toFixed(2)}%
                     </span>
                   </div>
                   <div className="text-[9px] text-gray-600">

@@ -6,6 +6,10 @@ import { TrendingUp, TrendingDown, Wifi, WifiOff } from "lucide-react";
 export default function LiveMarketFeed() {
   const { data: prices, error: priceErr } = useLivePrices();
   const { data: movers } = useTopMovers();
+  const toNumber = (value: unknown, fallback = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
 
   const connected = !priceErr && !!prices;
 
@@ -20,8 +24,8 @@ export default function LiveMarketFeed() {
       const mover = moverMap.get(p.symbol);
       symbolMap.set(p.symbol, {
         symbol: p.symbol,
-        price: p.price,
-        change_pct: mover?.change_pct ?? 0,
+              price: toNumber(p.price),
+              change_pct: toNumber(mover?.change_pct ?? 0),
         exchange: p.exchange,
         ts: p.timestamp,
       });
@@ -48,7 +52,7 @@ export default function LiveMarketFeed() {
         ) : (
           <div className="divide-y divide-surface-border/50">
             {tickers.map((t) => {
-              const up = t.change_pct >= 0;
+              const up = toNumber(t.change_pct) >= 0;
               return (
                 <div key={t.symbol} className="flex items-center justify-between px-3 py-1.5 hover:bg-white/[0.02] transition-colors">
                   <div className="flex items-center gap-2 min-w-0">
@@ -56,10 +60,10 @@ export default function LiveMarketFeed() {
                     <span className="text-[10px] text-gray-600 uppercase">{t.exchange}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono text-gray-300">${t.price < 1 ? t.price.toFixed(6) : t.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    <span className="text-xs font-mono text-gray-300">${toNumber(t.price) < 1 ? toNumber(t.price).toFixed(6) : toNumber(t.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     <span className={`flex items-center gap-0.5 text-[10px] font-medium ${up ? "text-bull" : "text-bear"}`}>
                       {up ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
-                      {up ? "+" : ""}{t.change_pct.toFixed(2)}%
+                      {up ? "+" : ""}{toNumber(t.change_pct).toFixed(2)}%
                     </span>
                   </div>
                 </div>

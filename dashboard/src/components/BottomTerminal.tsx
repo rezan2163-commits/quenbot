@@ -27,6 +27,11 @@ export default function BottomTerminal() {
   const prevSignalsRef = useRef<string>("");
   const prevSimsRef = useRef<string>("");
 
+  const toNumber = (value: unknown, fallback = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
+
   const addLog = useCallback(
     (level: LogEntry["level"], text: string) => {
       if (paused) return;
@@ -52,7 +57,7 @@ export default function BottomTerminal() {
     prevPricesRef.current = key;
 
     for (const p of prices.slice(0, 6)) {
-      addLog("info", `${p.symbol} $${p.price.toLocaleString()} [${p.exchange}]`);
+      addLog("info", `${p.symbol} $${toNumber(p.price).toLocaleString()} [${p.exchange}]`);
     }
   }, [prices, addLog]);
 
@@ -72,8 +77,8 @@ export default function BottomTerminal() {
       addLog(
         level,
         `SINYAL ${dir.toUpperCase()} ${s.symbol} %${(
-          (s.confidence ?? 0) * 100
-        ).toFixed(0)} conf @$${(s.price ?? 0).toLocaleString()} [${s.status}]`
+          toNumber(s.confidence) * 100
+        ).toFixed(0)} conf @$${toNumber(s.price).toLocaleString()} [${s.status}]`
       );
     }
   }, [signals, addLog]);
@@ -90,10 +95,11 @@ export default function BottomTerminal() {
 
     for (const sim of sims.slice(0, 3)) {
       if (sim.status === "open") {
-        addLog("info", `SIM AÇIK ${sim.symbol} ${sim.side} @$${sim.entry_price.toLocaleString()}`);
+        addLog("info", `SIM AÇIK ${sim.symbol} ${sim.side} @$${toNumber(sim.entry_price).toLocaleString()}`);
       } else if (sim.status === "closed" && sim.pnl_pct != null) {
-        const level = sim.pnl_pct >= 0 ? "bull" : "bear";
-        addLog(level, `SIM KAPANDI ${sim.symbol} PnL: ${sim.pnl_pct.toFixed(2)}%`);
+        const pnlPct = toNumber(sim.pnl_pct);
+        const level = pnlPct >= 0 ? "bull" : "bear";
+        addLog(level, `SIM KAPANDI ${sim.symbol} PnL: ${pnlPct.toFixed(2)}%`);
       }
     }
   }, [sims, addLog]);

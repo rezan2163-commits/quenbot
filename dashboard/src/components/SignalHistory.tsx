@@ -8,6 +8,10 @@ export default function SignalHistory() {
   const [symbolFilter, setSymbolFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const { data: signals } = useSignalHistory(symbolFilter || undefined, statusFilter || undefined);
+  const toNumber = (value: unknown, fallback = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
 
   const symbols = [...new Set(signals?.map((s) => s.symbol) || [])].sort();
 
@@ -74,9 +78,9 @@ export default function SignalHistory() {
                       </span>
                     </td>
                     <td className="px-2 py-1.5 text-right font-mono text-gray-300">
-                      ${s.price < 1 ? s.price.toFixed(6) : s.price.toLocaleString()}
+                      ${toNumber(s.price) < 1 ? toNumber(s.price).toFixed(6) : toNumber(s.price).toLocaleString()}
                     </td>
-                    <td className="px-2 py-1.5 text-right text-accent">{(s.confidence * 100).toFixed(0)}%</td>
+                    <td className="px-2 py-1.5 text-right text-accent">{(toNumber(s.confidence) * 100).toFixed(0)}%</td>
                     <td className="px-2 py-1.5 text-center">
                       <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-medium ${
                         s.status === "active" ? "bg-bull/10 text-bull" :
