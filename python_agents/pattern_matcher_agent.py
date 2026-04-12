@@ -50,12 +50,12 @@ def _get_llm_bridge():
 
 # ─── Configuration ───
 SIMILARITY_THRESHOLD = 0.90        # Minimum similarity to trigger a match
-SCAN_INTERVAL_SECONDS = 45         # How often to scan each symbol
+SCAN_INTERVAL_SECONDS = 300        # 5 dakikada bir tarama
 VECTOR_POINTS = 60                 # N-point price vector (last N trade prices)
 MIN_HISTORICAL_SIGNATURES = 3      # Minimum signatures needed for matching
 MAX_MATCHES_PER_SCAN = 5           # Top-K matches to consider
 TIMEFRAMES_TO_SCAN = ['5m', '15m', '1h']
-COOLDOWN_SECONDS = 300             # Per-symbol cooldown after a match is found
+COOLDOWN_SECONDS = 900             # 15dk cooldown — aynı sembol için çok sık sinyal önle
 
 
 class PatternMatcherAgent:
@@ -120,6 +120,7 @@ class PatternMatcherAgent:
                         continue
 
                     await self._scan_symbol(symbol)
+                    await asyncio.sleep(5)  # Semboller arası LLM boğulmasını önle
 
                 self.scan_count += 1
                 self.last_activity = datetime.utcnow()

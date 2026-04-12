@@ -83,9 +83,8 @@ class ScoutAgent:
         tasks = [
             self._monitor_binance_market('spot'),
             self._monitor_binance_market('futures'),
-            # Bybit WS disabled — server IP blocked (403 on both REST and WS)
-            # self._monitor_bybit_market('spot'),
-            # self._monitor_bybit_market('futures'),
+            self._monitor_bybit_market('spot'),
+            self._monitor_bybit_market('futures'),
             self._rest_fallback_fetcher(),
             self._price_movement_detector(),
             self._watchlist_refresher(),
@@ -154,34 +153,61 @@ class ScoutAgent:
                 await asyncio.sleep(Config.get_agent_config('scout')['reconnect_delay'])
 
     async def _monitor_bybit_market(self, market_type: str):
-        """Monitor the Bybit trade stream using V5 API format. DISABLED — IP blocked (403)."""
-        return  # Bybit WS disabled — server IP blocked
+        """Monitor the Bybit trade stream using V5 API format with endpoint fallback/tunnel support."""
         # V5 API uses different URL patterns
         if market_type == 'spot':
-            ws_url = Config.BYBIT_SPOT_WS_URL
+            urls = [
+                Config.BYBIT_SPOT_WS_TUNNEL_URL,
+                Config.BYBIT_SPOT_WS_URL,
+                Config.BYBIT_SPOT_WS_FALLBACK_URL,
+            ]
         else:
-            ws_url = Config.BYBIT_FUTURES_WS_URL
+            urls = [
+                Config.BYBIT_FUTURES_WS_TUNNEL_URL,
+                Config.BYBIT_FUTURES_WS_URL,
+                Config.BYBIT_FUTURES_WS_FALLBACK_URL,
+            ]
+        ws_candidates = [u for u in urls if u]
             
         while self.running:
             try:
-                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as websocket:
-                    self.connections[f'bybit_{market_type}'] = websocket
-                    self._ws_retry_count = 0  # Reset on successful connect
-                    logger.info(f"✓ Connected to Bybit {market_type.upper()} WebSocket: {ws_url}")
+                websocket = None
+                selected_url = None
+                for ws_url in ws_candidates:
+                    try:
+                        websocket = await websockets.connect(ws_url, ping_interval=20, ping_timeout=10)
+                        selected_url = ws_url
+                        break
+                    except Exception as conn_exc:
+                        logger.warning(f"✗ Bybit {market_type} WS connect failed [{ws_url}]: {conn_exc}")
+                        continue
 
-                    # Bybit V5 API: subscribe to publicTrade channel for each symbol
-                    subscribe_msg = {
-                        "op": "subscribe",
-                        "args": [f"publicTrade.{symbol}" for symbol in self.get_watchlist()]
-                    }
-                    await websocket.send(json.dumps(subscribe_msg))
-                    logger.info(f"Sent subscription to Bybit {market_type}: {len(self.get_watchlist())} symbols")
+                if websocket is None:
+                    raise RuntimeError(f"No reachable Bybit {market_type} WS endpoint")
 
+                self.connections[f'bybit_{market_type}'] = websocket
+                self._ws_retry_count = 0  # Reset on successful connect
+                logger.info(f"✓ Connected to Bybit {market_type.upper()} WebSocket: {selected_url}")
+
+                # Bybit V5 API: subscribe to publicTrade channel for each symbol
+                subscribe_msg = {
+                    "op": "subscribe",
+                    "args": [f"publicTrade.{symbol}" for symbol in self.get_watchlist()]
+                }
+                await websocket.send(json.dumps(subscribe_msg))
+                logger.info(f"Sent subscription to Bybit {market_type}: {len(self.get_watchlist())} symbols")
+
+                try:
                     async for message in websocket:
                         if not self.running:
                             break
                         await self._process_bybit_message(message, market_type)
                         self.last_activity = datetime.utcnow()
+                finally:
+                    try:
+                        await websocket.close()
+                    except Exception:
+                        pass
 
             except (websockets.exceptions.ConnectionClosed,
                     websockets.exceptions.InvalidStatusCode,
@@ -210,7 +236,8 @@ class ScoutAgent:
                 for symbol in active_symbols:
                     tasks.append(self._fetch_binance_rest('spot', symbol))
                     tasks.append(self._fetch_binance_rest('futures', symbol))
-                    # Note: Bybit REST API returns 403; using WebSocket only for Bybit
+                    tasks.append(self._fetch_bybit_rest('spot', symbol))
+                    tasks.append(self._fetch_bybit_rest('futures', symbol))
                 
                 await asyncio.gather(*tasks, return_exceptions=True)
                 logger.debug(f"REST API fallback fetch completed for {len(active_symbols)} symbols ({self.trade_counter} total trades)")
@@ -255,45 +282,59 @@ class ScoutAgent:
             logger.debug(f"Binance REST fetch error for {symbol} ({market_type}): {e}")
 
     async def _fetch_bybit_rest(self, market_type: str, symbol: str):
-        """Fetch recent trades from Bybit REST API (V5 format). DISABLED — IP blocked (403)."""
-        return  # Bybit REST disabled — server IP blocked
+        """Fetch recent trades from Bybit REST API (V5 format) with endpoint fallback/tunnel support."""
         try:
-            endpoint = f"{Config.BYBIT_REST_API}/v5/market/recent-trade"
+            rest_bases = [
+                Config.BYBIT_REST_TUNNEL_API,
+                Config.BYBIT_REST_API,
+                Config.BYBIT_REST_FALLBACK_API,
+            ]
+            rest_bases = [b for b in rest_bases if b]
             category = "spot" if market_type == "spot" else "linear"
             params = {
                 "category": category,
                 "symbol": symbol,
                 "limit": Config.get_agent_config('scout').get('rest_fetch_limit', 100)
             }
-            
-            async with self.http_session.get(endpoint, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    trades = data.get('result', {}).get('list', [])
-                    
-                    for trade in trades:
-                        price = float(trade['price'])
-                        quantity = float(trade['size'])
-                        side = 'buy' if trade['side'] == 'Buy' else 'sell'
-                        timestamp = datetime.utcfromtimestamp(int(trade['time']) / 1000)
-                        
-                        trade_data = {
-                            'exchange': 'bybit',
-                            'market_type': market_type,
-                            'symbol': symbol,
-                            'price': price,
-                            'quantity': quantity,
-                            'timestamp': timestamp,
-                            'side': side,
-                            'trade_id': f"bybit_{market_type}_{symbol}_{trade['execId']}"
-                        }
-                        
-                        await self.db.insert_trade(trade_data)
-                        self.price_cache[symbol] = price
-                    
-                    logger.debug(f"Fetched {len(trades)} trades from Bybit {market_type}: {symbol}")
-                else:
-                    logger.warning(f"Bybit REST API error for {symbol} ({market_type}): status {resp.status}")
+
+            last_error = None
+            for base in rest_bases:
+                endpoint = f"{base}/v5/market/recent-trade"
+                try:
+                    async with self.http_session.get(endpoint, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status != 200:
+                            last_error = f"status {resp.status}"
+                            continue
+                        data = await resp.json()
+                        trades = data.get('result', {}).get('list', [])
+                        for trade in trades:
+                            price = float(trade['price'])
+                            quantity = float(trade['size'])
+                            side = 'buy' if trade['side'] == 'Buy' else 'sell'
+                            timestamp = datetime.utcfromtimestamp(int(trade['time']) / 1000)
+
+                            trade_data = {
+                                'exchange': 'bybit',
+                                'market_type': market_type,
+                                'symbol': symbol,
+                                'price': price,
+                                'quantity': quantity,
+                                'timestamp': timestamp,
+                                'side': side,
+                                'trade_id': f"bybit_{market_type}_{symbol}_{trade.get('execId', int(timestamp.timestamp() * 1000))}"
+                            }
+
+                            await self.db.insert_trade(trade_data)
+                            self.price_cache[symbol] = price
+
+                        logger.debug(f"Fetched {len(trades)} trades from Bybit {market_type}: {symbol} via {base}")
+                        return
+                except Exception as e:
+                    last_error = str(e)
+                    continue
+
+            if last_error:
+                logger.debug(f"Bybit REST fetch error for {symbol} ({market_type}): {last_error}")
                     
         except Exception as e:
             logger.debug(f"Bybit REST fetch error for {symbol} ({market_type}): {e}")
@@ -427,11 +468,16 @@ class ScoutAgent:
             if len(trades) < 10:
                 return
 
-            prices = [float(t['price']) for t in trades]
+            prices = [float(t['price']) for t in trades if float(t.get('price') or 0) > 0]
+            if len(prices) < 10:
+                return
             start_price = prices[0]
             end_price = prices[-1]
             high_price = max(prices)
             low_price = min(prices)
+
+            if start_price <= 0 or end_price <= 0:
+                return
 
             change_pct = (end_price - start_price) / max(start_price, 1e-8)
             abs_change = abs(change_pct)

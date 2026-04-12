@@ -525,6 +525,22 @@ class Database:
             """)
             return [dict(row) for row in rows]
 
+    async def get_last_signal_timestamp(self, symbol: str, market_type: str, direction: str):
+        """Belirli sembol/piyasa/yön için en son sinyal zamanını getir."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT MAX(timestamp) AS ts
+                FROM signals
+                WHERE symbol = $1
+                  AND market_type = $2
+                  AND (
+                    metadata->>'position_bias' = $3
+                    OR ($3 = 'long' AND signal_type LIKE '%long%')
+                    OR ($3 = 'short' AND signal_type LIKE '%short%')
+                  )
+            """, symbol, market_type, direction)
+            return row['ts'] if row and row.get('ts') else None
+
     # Simulation operations
     async def insert_simulation(self, sim_data: Dict[str, Any]) -> int:
         """Insert a new simulation"""

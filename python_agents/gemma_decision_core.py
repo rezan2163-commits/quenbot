@@ -14,11 +14,13 @@ FELSEFE: Ajanlar ÖNERI sunar, Gemma NİHAİ KARAR verir.
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+ACTIVE_LLM_MODEL = os.getenv("QUENBOT_LLM_MODEL", "quenbot-brain")
 
 # Lazy LLM imports
 _llm_client = None
@@ -171,6 +173,11 @@ class GemmaDecisionCore:
     MAX_DECISION_HISTORY = 100
     # Gemma'yı aşırı yüklememek için rate limit (saniye)
     MIN_DECISION_INTERVAL = 5
+    # Chat trafiğini boğmamak için Gemma karar çağrısı ancak LLM boşsa yapılır.
+    MIN_FREE_SLOTS_FOR_GEMMA_DECISION = 1
+    # Pattern kararı için Gemma uzun süre bekletilmez; yoğunlukta hızlı fallback gerekir.
+    GEMMA_DECISION_TIMEOUT_SECONDS = 12
+    STRICT_LLM = os.getenv("QUENBOT_LLM_STRICT", "0").lower() in {"1", "true", "yes", "on"}
     # Gemma bağlanamazsa fallback kurallar
     FALLBACK_MIN_SIMILARITY = 0.92
     FALLBACK_MIN_CONFIDENCE = 0.60
@@ -223,13 +230,14 @@ class GemmaDecisionCore:
 
         # ─── Gemma çağrısı ───
         try:
-            decision = await self._gemma_evaluate(symbol, timeframe, context)
+            client = _get_llm_client()
+            self._ensure_capacity_for_decision(client, context)
+            decision = await self._gemma_evaluate(symbol, timeframe, context, client)
             self._stats['gemma_calls'] += 1
         except Exception as e:
             logger.warning(f"Gemma Decision Core fallback: {e}")
             decision = self._fallback_evaluate(symbol, timeframe, context)
             self._stats['fallback_calls'] += 1
-
         # ─── İstatistik güncelle ───
         decision.latency_ms = int((time.monotonic() - t0) * 1000)
         self._stats['total_latency_ms'] += decision.latency_ms
@@ -341,19 +349,40 @@ class GemmaDecisionCore:
             'momentum_score': strat.get('momentum_score', 0),
         }
 
+    def _ensure_capacity_for_decision(self, client, context: Dict) -> None:
+        """Chat'i bloke etmemek için yalnızca LLM gerçekten müsaitse Gemma kararına gir."""
+        semaphore = getattr(client, '_semaphore', None)
+        free_slots = getattr(semaphore, '_value', None)
+
+        if free_slots is not None and free_slots < self.MIN_FREE_SLOTS_FOR_GEMMA_DECISION:
+            raise RuntimeError(f"LLM yoğun, karar fallback'a düşürüldü (boş slot={free_slots})")
+
+        similarity = float(context.get('similarity', 0) or 0)
+        magnitude = abs(float(context.get('predicted_magnitude', 0) or 0))
+        if similarity < self.FALLBACK_MIN_SIMILARITY:
+            raise RuntimeError(
+                f"Gemma ön-eleme: similarity {similarity:.4f} < {self.FALLBACK_MIN_SIMILARITY}"
+            )
+        if magnitude < 0.01:
+            raise RuntimeError(
+                f"Gemma ön-eleme: magnitude {magnitude:.2%} çok düşük"
+            )
+
     async def _gemma_evaluate(self, symbol: str, timeframe: str,
-                               context: Dict) -> GemmaDecision:
+                               context: Dict, client=None) -> GemmaDecision:
         """Gemma 4'e tam context gönder, karar al."""
         prompt = SYNTHESIS_PROMPT_TEMPLATE.format(**context)
 
-        client = _get_llm_client()
-        response = await client.generate(
-            prompt=prompt,
-            system=DECISION_SYSTEM_PROMPT,
-            temperature=0.3,
-            json_mode=True,
-            timeout_override=45,
-            model_override="gemma4-trading:latest",
+        client = client or _get_llm_client()
+        response = await asyncio.wait_for(
+            client.generate(
+                prompt=prompt,
+                system=DECISION_SYSTEM_PROMPT,
+                temperature=0.3,
+                json_mode=True,
+                timeout_override=10,
+            ),
+            timeout=self.GEMMA_DECISION_TIMEOUT_SECONDS,
         )
 
         if not response.success or not response.text.strip():
