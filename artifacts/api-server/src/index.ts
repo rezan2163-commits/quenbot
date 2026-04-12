@@ -92,19 +92,18 @@ async function refreshPricesCache() {
   if (pricesCache.refreshing) return;
   pricesCache.refreshing = true;
   try {
-    // Get latest price for each symbol from trades
+    // Get latest price for each symbol+exchange from trades
     const rows = await sql`
-      SELECT symbol, MAX(price)::double precision AS price, MAX(timestamp) AS timestamp
+      SELECT DISTINCT ON (symbol, exchange) symbol, exchange, price::double precision AS price, timestamp
       FROM trades
-      WHERE timestamp > NOW() - INTERVAL '1 day'
-      GROUP BY symbol
-      ORDER BY symbol
-      LIMIT 50
+      WHERE timestamp > NOW() - INTERVAL '5 minutes'
+      ORDER BY symbol, exchange, timestamp DESC
+      LIMIT 100
     `;
     
     const formatted = rows.map((row: any) => ({
       symbol: row.symbol,
-      exchange: "binance",
+      exchange: row.exchange || "binance",
       price: Number(row.price) || 0,
       timestamp: row.timestamp,
     }));
