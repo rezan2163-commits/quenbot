@@ -302,10 +302,17 @@ app.get("/api/signals", async (req, res) => {
   try {
     const signals = await sql`
       SELECT
-        id, symbol, signal_type, direction,
+        id,
+        symbol,
+        signal_type,
+        COALESCE(metadata->>'direction', CASE WHEN signal_type ILIKE '%short%' THEN 'short' ELSE 'long' END) AS direction,
         confidence::double precision AS confidence,
         price::double precision AS price,
-        status, timestamp, metadata, exchange, market_type
+        status,
+        timestamp,
+        metadata,
+        COALESCE(metadata->>'exchange', 'binance') AS exchange,
+        market_type
       FROM signals
       ORDER BY timestamp DESC
       LIMIT 100
