@@ -319,13 +319,26 @@ app.get("/api/signals", async (req, res) => {
         COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
         COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
         COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
-        COALESCE((metadata->>'target_price')::double precision,
+        COALESCE(NULLIF((metadata->>'target_price')::double precision, 0),
           CASE WHEN COALESCE(metadata->>'position_bias', 'long') = 'short'
-            THEN price::double precision * (1 - GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02))
-            ELSE price::double precision * (1 + GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02))
+            THEN price::double precision * (1 - GREATEST(
+              CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
+                THEN COALESCE((metadata->>'target_pct')::double precision, 0.02) / 100.0
+                ELSE COALESCE((metadata->>'target_pct')::double precision, 0.02)
+              END, 0.02))
+            ELSE price::double precision * (1 + GREATEST(
+              CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
+                THEN COALESCE((metadata->>'target_pct')::double precision, 0.02) / 100.0
+                ELSE COALESCE((metadata->>'target_pct')::double precision, 0.02)
+              END, 0.02))
           END
         ) AS target_price,
-        GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02) AS target_pct,
+        GREATEST(
+          CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
+            THEN COALESCE((metadata->>'target_pct')::double precision, 0.02) / 100.0
+            ELSE COALESCE((metadata->>'target_pct')::double precision, 0.02)
+          END, 0.02
+        ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes,
         status,
         timestamp,
@@ -830,8 +843,13 @@ app.get("/api/signals/history", async (req, res) => {
         COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
         COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
         COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
-        COALESCE((metadata->>'target_price')::double precision, price::double precision) AS target_price,
-        GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02) AS target_pct,
+        COALESCE(NULLIF((metadata->>'target_price')::double precision, 0), price::double precision) AS target_price,
+        GREATEST(
+          CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
+            THEN COALESCE((metadata->>'target_pct')::double precision, 0.02) / 100.0
+            ELSE COALESCE((metadata->>'target_pct')::double precision, 0.02)
+          END, 0.02
+        ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
         FROM signals WHERE status = ${status} AND symbol = ${symbol} ORDER BY timestamp DESC LIMIT ${limit}`;
     } else if (status) {
@@ -839,8 +857,13 @@ app.get("/api/signals/history", async (req, res) => {
         COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
         COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
         COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
-        COALESCE((metadata->>'target_price')::double precision, price::double precision) AS target_price,
-        GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02) AS target_pct,
+        COALESCE(NULLIF((metadata->>'target_price')::double precision, 0), price::double precision) AS target_price,
+        GREATEST(
+          CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
+            THEN COALESCE((metadata->>'target_pct')::double precision, 0.02) / 100.0
+            ELSE COALESCE((metadata->>'target_pct')::double precision, 0.02)
+          END, 0.02
+        ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
         FROM signals WHERE status = ${status} ORDER BY timestamp DESC LIMIT ${limit}`;
     } else if (symbol) {
@@ -848,8 +871,13 @@ app.get("/api/signals/history", async (req, res) => {
         COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
         COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
         COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
-        COALESCE((metadata->>'target_price')::double precision, price::double precision) AS target_price,
-        GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02) AS target_pct,
+        COALESCE(NULLIF((metadata->>'target_price')::double precision, 0), price::double precision) AS target_price,
+        GREATEST(
+          CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
+            THEN COALESCE((metadata->>'target_pct')::double precision, 0.02) / 100.0
+            ELSE COALESCE((metadata->>'target_pct')::double precision, 0.02)
+          END, 0.02
+        ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
         FROM signals WHERE symbol = ${symbol} ORDER BY timestamp DESC LIMIT ${limit}`;
     } else {
@@ -857,8 +885,13 @@ app.get("/api/signals/history", async (req, res) => {
         COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
         COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
         COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
-        COALESCE((metadata->>'target_price')::double precision, price::double precision) AS target_price,
-        GREATEST(COALESCE((metadata->>'target_pct')::double precision, 0.02), 0.02) AS target_pct,
+        COALESCE(NULLIF((metadata->>'target_price')::double precision, 0), price::double precision) AS target_price,
+        GREATEST(
+          CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
+            THEN COALESCE((metadata->>'target_pct')::double precision, 0.02) / 100.0
+            ELSE COALESCE((metadata->>'target_pct')::double precision, 0.02)
+          END, 0.02
+        ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
         FROM signals ORDER BY timestamp DESC LIMIT ${limit}`;
     }

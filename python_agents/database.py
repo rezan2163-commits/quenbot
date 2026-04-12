@@ -508,7 +508,10 @@ class Database:
         direction = str(metadata.get('position_bias') or signal_data.get('direction') or 'long').lower()
         if direction not in ('long', 'short'):
             direction = 'long'
-        target_pct = max(float(metadata.get('target_pct', 0.02) or 0.02), 0.02)
+        raw_target_pct = float(metadata.get('target_pct', 0.02) or 0.02)
+        # If upstream sends percent units (e.g. 2 for 2%), convert to decimal.
+        normalized_target_pct = raw_target_pct / 100.0 if raw_target_pct > 0.5 else raw_target_pct
+        target_pct = max(normalized_target_pct, 0.02)
         target_price = entry_price * (1.0 + target_pct) if direction == 'long' else entry_price * (1.0 - target_pct)
         eta_minutes = int(metadata.get('estimated_duration_to_target_minutes', 60) or 60)
 
