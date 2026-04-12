@@ -1269,9 +1269,21 @@ class AgentOrchestrator:
             if any(k in lower for k in ["watchlist", "izleme", "takip listesi", "coin"]):
                 raw_symbols = re.findall(r"\b[A-Za-z]{2,10}(?:USDT)?\b", text)
                 symbols = []
+                stopwords = {
+                    "WATCHLIST", "WATCHLISTE", "IZLEME", "TAKIP", "LISTESI", "LİSTESİ", "COIN",
+                    "EKLE", "ADD", "SIL", "REMOVE", "CIKAR", "ÇIKAR", "KALDIR", "VE", "ILE", "İLE",
+                    "LONG", "SHORT", "SPOT", "FUTURES", "RISK",
+                }
                 for s in raw_symbols:
                     su = s.upper()
-                    if su in {"LONG", "SHORT", "SPOT", "FUTURES", "RISK", "WATCHLIST", "COIN"}:
+                    if su in stopwords:
+                        continue
+                    if su.endswith("USDT"):
+                        base = su[:-4]
+                    else:
+                        base = su
+                    # Ignore obvious natural-language words; keep likely symbols (2-6 chars).
+                    if len(base) < 2 or len(base) > 6:
                         continue
                     if not su.endswith("USDT"):
                         su = su + "USDT"
