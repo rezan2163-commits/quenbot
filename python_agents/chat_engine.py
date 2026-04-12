@@ -80,7 +80,7 @@ class ChatEngine:
     def _analyze_request(self, msg: str) -> Dict[str, Any]:
         lowered = msg.lower()
         symbols = self._extract_symbols(msg)
-        architecture = bool(re.search(r"mimari|katman|sistem|altyapi|kod|dosya|agent|ajan|gorev|gorevin|nasil calis|akis|strateji|plan", lowered))
+        architecture = bool(re.search(r"mimari|katman|sistem|altyapi|kod|dosya|agent|ajan|gorev|gorevin|nasil calis|akis|strateji|plan|hangi model|model kullan|llm|local model|ollama|gemma", lowered))
         prices = bool(symbols or re.search(r"fiyat|price|kur|kac|ne kadar|btc|eth|sol|avax|doge|coin", lowered))
         signals = bool(re.search(r"sinyal|signal|firsat|alarm|uyari", lowered))
         positions = bool(re.search(r"pozisyon|simulasyon|trade|islem|acik pozisyon|pnl", lowered))
@@ -306,7 +306,12 @@ class ChatEngine:
 
     def _build_system_dossier(self) -> str:
         from config import Config
+        from llm_client import (
+            DEFAULT_BACKEND, DEFAULT_BASE_URL, DEFAULT_MODEL,
+            DEFAULT_NUM_CTX, DEFAULT_NUM_THREAD, MODEL_CANDIDATES,
+        )
         watchlist = ", ".join(Config.WATCHLIST)
+        candidate_list = ", ".join(MODEL_CANDIDATES[:5])
         return (
             "Mimari: 5 katmanli yapi var. Katman1 Scout veri toplar; Katman2 PatternMatcher ve Brain ogrenme yapar; "
             "Katman3 GemmaDecisionCore nihai karari verir; Katman4 Strategist, RiskManager, GhostSimulator ve Auditor aksiyon/geri besleme tarafidir; "
@@ -319,7 +324,12 @@ class ChatEngine:
             "Veritabani ana tablolar: trades, price_movements, signals, simulations, pattern_records, brain_learning_log, rca_results, agent_heartbeat, bot_state, state_history, chat_messages.\n"
             "Strateji omurgasi: pattern eslesme, momentum ve geri besleme ile risk kontrollu paper trading. Risk limitleri gunluk islem, drawdown, ard arda kayip ve acik pozisyon sinirlariyla korunur.\n"
             f"Izlenen semboller: {watchlist}.\n"
-            "Not: Binance ve Bybit spot/futures global WS kaynaklari aktif; bolgesel erisim sorunu olursa fallback endpoint ve tunnel URL'leri kullanilir."
+            "Not: Binance ve Bybit spot/futures global WS kaynaklari aktif; bolgesel erisim sorunu olursa fallback endpoint ve tunnel URL'leri kullanilir.\n"
+            f"LLM yapisi: backend={DEFAULT_BACKEND}, url={DEFAULT_BASE_URL}, varsayilan model={DEFAULT_MODEL}, "
+            f"context penceresi={DEFAULT_NUM_CTX} token, cpu_thread={DEFAULT_NUM_THREAD}. "
+            f"Model oncelik sirasi: {candidate_list}... (Ollama'da bulunan ilk uygun model secilir). "
+            "Aktif model /llm komutuyla veya API /api/llm/status endpoint'iyle sorgulanabilir. "
+            "Sunucu: 24 GB RAM, 12 vCPU."
         )
 
     async def _chat_memory(self, msg: str) -> str:
@@ -367,23 +377,25 @@ class ChatEngine:
                 temperature=0.12,
                 json_mode=False,
                 timeout_override=min(timeout, FULL_CHAT_TIMEOUT),
-                model_override=ACTIVE_LLM_MODEL,
+                model_override=None,
             )
             text = (response.text or "").strip()
             if response.success and text and not self._needs_repair(text, profile):
                 return text
 
-            fast = await client.generate(
-                prompt=prompt,
-                system=SYSTEM_PROMPT,
-                temperature=0.1,
-                json_mode=False,
-                timeout_override=QUICK_CHAT_TIMEOUT,
-                model_override=FAST_LLM_MODEL,
-            )
-            fast_text = (fast.text or "").strip()
-            if fast.success and fast_text and not self._needs_repair(fast_text, profile):
-                return fast_text
+            fast_model = os.getenv("QUENBOT_LLM_FAST_MODEL")
+            if fast_model and fast_model != client.model:
+                fast = await client.generate(
+                    prompt=prompt,
+                    system=SYSTEM_PROMPT,
+                    temperature=0.1,
+                    json_mode=False,
+                    timeout_override=QUICK_CHAT_TIMEOUT,
+                    model_override=fast_model,
+                )
+                fast_text = (fast.text or "").strip()
+                if fast.success and fast_text and not self._needs_repair(fast_text, profile):
+                    return fast_text
 
             repair = await client.generate(
                 prompt=(
@@ -396,7 +408,7 @@ class ChatEngine:
                 temperature=0.08,
                 json_mode=False,
                 timeout_override=20,
-                model_override=ACTIVE_LLM_MODEL,
+                model_override=None,
             )
             repaired = (repair.text or "").strip()
             if repair.success and repaired and not self._needs_repair(repaired, profile):
@@ -411,7 +423,7 @@ class ChatEngine:
         lowered = msg.lower().strip()
         if lowered in {"/help", "yardim", "komutlar"}:
             return (
-                "Komutlar: /status, /watch add <SEMBOL>, /watch remove <SEMBOL>, "
+                "Komutlar: /status, /llm, /watch add <SEMBOL>, /watch remove <SEMBOL>, "
                 "/agent run strategist|auditor|pattern|ghost, /pattern <SEMBOL>, "
                 "/directive <metin>, /model <model_adi>."
             )
@@ -426,6 +438,25 @@ class ChatEngine:
             }
             snapshot = await self._get_live_snapshot(msg, profile)
             return self._format_live_snapshot(snapshot, profile)
+
+        if lowered in {"/llm", "/llm durumu", "llm", "hangi model", "aktif model",
+                       "llm bilgi", "model bilgi", "model durumu", "llm durumu"}:
+            from llm_client import get_llm_client, DEFAULT_NUM_CTX, DEFAULT_NUM_THREAD
+            client = get_llm_client()
+            stats = client.get_stats()
+            models = await client.list_models()
+            model_list = ", ".join(models) if models else "yok"
+            avg_ms = stats.get("avg_latency_ms", 0)
+            return (
+                f"Aktif model: {client.model} | "
+                f"Backend: {stats.get('backend', '?')} | "
+                f"URL: {stats.get('base_url', '?')} | "
+                f"Ctx penceresi: {DEFAULT_NUM_CTX} token | "
+                f"CPU thread: {DEFAULT_NUM_THREAD} | "
+                f"Toplam cagri: {stats.get('total_calls', 0)} | "
+                f"Ort gecikme: {avg_ms:.0f}ms | "
+                f"Yuklu modeller: {model_list}"
+            )
 
         if lowered.startswith("/directive ") or lowered.startswith("direktif "):
             text = msg.split(" ", 1)[1].strip() if " " in msg else ""
