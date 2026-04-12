@@ -433,6 +433,11 @@ class ScoutAgent:
             change_pct = (end_price - start_price) / max(start_price, 1e-8)
             abs_change = abs(change_pct)
 
+            # Guard against bad ticks causing unrealistic percentage explosions.
+            if abs_change > 100:
+                logger.debug(f"Skipping outlier movement {symbol} {tf_key} ({market_type}): {change_pct:+.4f}")
+                return
+
             if abs_change < Config.PRICE_MOVEMENT_THRESHOLD:
                 return
 
@@ -452,7 +457,7 @@ class ScoutAgent:
                 'symbol': symbol,
                 'start_price': start_price,
                 'end_price': end_price,
-                'change_pct': abs_change,
+                'change_pct': min(abs_change, 999999.9999),
                 'volume': total_volume,
                 'buy_volume': buy_volume,
                 'sell_volume': sell_volume,
@@ -557,7 +562,7 @@ class ScoutAgent:
                 'market_type': market_type,
                 'timeframe': tf_key,
                 'direction': direction,
-                'change_pct': float(change_pct),
+                'change_pct': float(max(min(change_pct, 9999.9999), -9999.9999)),
                 'pre_move_vector': pre_vector,
                 'pre_move_indicators': pre_indicators,
                 'volume_profile': volume_profile,

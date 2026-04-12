@@ -427,6 +427,7 @@ class Database:
     # Price movement operations
     async def insert_price_movement(self, movement_data: Dict[str, Any]) -> int:
         """Insert a price movement"""
+        safe_change_pct = float(max(min(float(movement_data.get('change_pct', 0) or 0), 999999.9999), -999999.9999))
         async with self.pool.acquire() as conn:
             return await conn.fetchval("""
                 INSERT INTO price_movements
@@ -435,7 +436,7 @@ class Database:
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 RETURNING id
             """, movement_data['exchange'], movement_data.get('market_type', 'spot'), movement_data['symbol'],
-                movement_data['start_price'], movement_data['end_price'], movement_data['change_pct'], movement_data['volume'],
+                movement_data['start_price'], movement_data['end_price'], safe_change_pct, movement_data['volume'],
                 movement_data.get('buy_volume'), movement_data.get('sell_volume'), movement_data.get('direction'),
                 movement_data.get('aggressiveness'), movement_data['start_time'], movement_data['end_time'],
                 _dumps(movement_data['t10_data']))
@@ -1129,6 +1130,7 @@ class Database:
 
     async def insert_historical_signature(self, data: Dict[str, Any]) -> int:
         """Büyük fiyat hareketi öncesi pattern'ı kaydet"""
+        safe_change_pct = float(max(min(float(data.get('change_pct', 0) or 0), 9999.9999), -9999.9999))
         async with self.pool.acquire() as conn:
             return await conn.fetchval("""
                 INSERT INTO historical_signatures
@@ -1137,7 +1139,7 @@ class Database:
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING id
             """, data['symbol'], data.get('market_type', 'spot'),
-                data['timeframe'], data['direction'], data['change_pct'],
+                data['timeframe'], data['direction'], safe_change_pct,
                 _dumps(data['pre_move_vector']),
                 _dumps(data.get('pre_move_indicators', {})),
                 _dumps(data.get('volume_profile', {})),
