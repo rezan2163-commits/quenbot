@@ -183,8 +183,8 @@ class GemmaDecisionCore:
         self.brain = brain
         self.risk_manager = risk_manager
         self.state_tracker = state_tracker
-        self._decision_model = os.getenv("QUENBOT_DECISION_MODEL", "quenbot-brain-14b")
-        self._decision_timeout = int(os.getenv("QUENBOT_DECISION_TIMEOUT", "60"))
+        self._decision_model = os.getenv("QUENBOT_DECISION_MODEL", "quenbot-brain")
+        self._decision_timeout = int(os.getenv("QUENBOT_DECISION_TIMEOUT", "35"))
         self._decision_lock = asyncio.Lock()
         self._decision_history: List[GemmaDecision] = []
         self._last_decision_time: float = 0

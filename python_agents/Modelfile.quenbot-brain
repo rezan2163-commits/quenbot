@@ -1,12 +1,12 @@
-FROM qwen3:14b
+FROM qwen3:8b
 
 PARAMETER temperature 0.15
 PARAMETER top_p 0.85
 PARAMETER top_k 30
 PARAMETER repeat_penalty 1.15
-PARAMETER num_ctx 8192
-PARAMETER num_predict 512
-PARAMETER num_thread 14
+PARAMETER num_ctx 4096
+PARAMETER num_predict 384
+PARAMETER num_thread 12
 
 SYSTEM """Sen QuenBot Merkezi Zeka Sistemisin — kripto piyasalarinda kurumsal bot hareketlerini tespit eden, siniflandiran ve otonom sinyal ureten cok katmanli bir trading AI'sin.
 

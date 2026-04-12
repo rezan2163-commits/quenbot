@@ -22,21 +22,19 @@ logger = logging.getLogger("quenbot.llm_client")
 # Defaults tuned for 12 vCPU / 24 GB RAM
 # -------------------------------------------------------------------
 DEFAULT_BASE_URL = os.getenv("QUENBOT_LLM_BASE_URL", "http://localhost:11434")
-DEFAULT_MODEL = os.getenv("QUENBOT_LLM_MODEL", "quenbot-brain-14b")
+DEFAULT_MODEL = os.getenv("QUENBOT_LLM_MODEL", "quenbot-brain")
 MODEL_CANDIDATES = [
-    "quenbot-brain-14b",
-    "qwen3:14b",
-    "quenbot-qwen8",
+    "quenbot-brain",
     "qwen3:8b",
     "qwen3:1.7b",
 ]
-DEFAULT_TIMEOUT = int(os.getenv("QUENBOT_LLM_TIMEOUT", "90"))
-DEFAULT_MAX_TOKENS = int(os.getenv("QUENBOT_LLM_MAX_TOKENS", "512"))
+DEFAULT_TIMEOUT = int(os.getenv("QUENBOT_LLM_TIMEOUT", "60"))
+DEFAULT_MAX_TOKENS = int(os.getenv("QUENBOT_LLM_MAX_TOKENS", "384"))
 DEFAULT_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_LLM_MAX_PROMPT_CHARS", "5000"))
 DEFAULT_MAX_RETRIES = int(os.getenv("QUENBOT_LLM_MAX_RETRIES", "1"))
 DEFAULT_CONCURRENCY = int(os.getenv("QUENBOT_LLM_CONCURRENCY", "2"))
 DEFAULT_NUM_THREAD = int(os.getenv("QUENBOT_LLM_NUM_THREAD", "11"))
-DEFAULT_NUM_CTX = int(os.getenv("QUENBOT_LLM_NUM_CTX", "8192"))
+DEFAULT_NUM_CTX = int(os.getenv("QUENBOT_LLM_NUM_CTX", "4096"))
 
 
 @dataclass
@@ -189,19 +187,19 @@ class LLMClient:
                         logger.info(f"Using existing model: {self.model}")
                         return True
 
-        # No suitable model found — try to pull Qwen3 14B
-        logger.info("No suitable model found. Attempting to pull qwen3:14b...")
+        # No suitable model found — try to pull Qwen3 8B
+        logger.info("No suitable model found. Attempting to pull qwen3:8b...")
         try:
             session = await self._get_session()
             async with session.post(
                 f"{self.base_url}/api/pull",
-                json={"name": "qwen3:14b", "stream": False},
+                json={"name": "qwen3:8b", "stream": False},
                 timeout=aiohttp.ClientTimeout(total=1800),
             ) as resp:
                 if resp.status == 200:
-                    self.model = "qwen3:14b"
-                    logger.info("✓ Qwen3 14B model pulled successfully")
-                    await self._create_custom_model(base_model="qwen3:14b", target_name="quenbot-brain-14b")
+                    self.model = "qwen3:8b"
+                    logger.info("✓ Qwen3 8B model pulled successfully")
+                    await self._create_custom_model(base_model="qwen3:8b", target_name="quenbot-brain")
                     return True
                 else:
                     logger.error(f"Model pull failed: HTTP {resp.status}")
@@ -209,7 +207,7 @@ class LLMClient:
             logger.error(f"Model pull error: {e}")
         return False
 
-    async def _create_custom_model(self, base_model: Optional[str] = None, target_name: str = "quenbot-brain-14b"):
+    async def _create_custom_model(self, base_model: Optional[str] = None, target_name: str = "quenbot-brain"):
         """Create a custom QuenBot model from the given base model."""
         source_model = base_model or self.model
         modelfile = f'''FROM {source_model}
