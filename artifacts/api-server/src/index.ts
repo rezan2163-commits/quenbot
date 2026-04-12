@@ -509,7 +509,10 @@ app.get("/api/analytics/price-history/:symbol", async (req, res) => {
              (ARRAY_AGG(price::double precision ORDER BY timestamp DESC))[1] AS close,
              SUM(quantity::double precision)::double precision AS volume
       FROM trades
-      WHERE symbol = ${symbol} AND timestamp >= NOW() - (${lookbackLiteral}::interval)
+      WHERE symbol = ${symbol}
+        AND timestamp >= NOW() - (${lookbackLiteral}::interval)
+        AND price > 0
+        AND quantity > 0
       GROUP BY minute
       ORDER BY minute ASC
     `;
