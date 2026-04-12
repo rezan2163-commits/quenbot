@@ -300,7 +300,16 @@ app.get("/api/scout/movements", async (req, res) => {
 
 app.get("/api/signals", async (req, res) => {
   try {
-    const signals = await sql`SELECT * FROM signals ORDER BY timestamp DESC LIMIT 100`;
+    const signals = await sql`
+      SELECT
+        id, symbol, signal_type, direction,
+        confidence::double precision AS confidence,
+        price::double precision AS price,
+        status, timestamp, metadata, exchange, market_type
+      FROM signals
+      ORDER BY timestamp DESC
+      LIMIT 100
+    `;
     res.json(signals);
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -309,7 +318,20 @@ app.get("/api/signals", async (req, res) => {
 
 app.get("/api/simulations", async (req, res) => {
   try {
-    const simulations = await sql`SELECT * FROM simulations ORDER BY entry_time DESC LIMIT 100`;
+    const simulations = await sql`
+      SELECT
+        id, signal_id, market_type, symbol,
+        entry_price::double precision AS entry_price,
+        exit_price::double precision AS exit_price,
+        quantity::double precision AS quantity,
+        side, status,
+        pnl::double precision AS pnl,
+        pnl_pct::double precision AS pnl_pct,
+        entry_time, exit_time, metadata
+      FROM simulations
+      ORDER BY entry_time DESC
+      LIMIT 100
+    `;
     res.json(simulations);
   } catch (error) {
     res.status(500).json({ error: String(error) });
