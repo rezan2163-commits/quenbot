@@ -500,6 +500,7 @@ app.get("/api/analytics/price-history/:symbol", async (req, res) => {
     const tfCfg = tfMap[tfRaw] || tfMap["5m"];
     const bucketSeconds = tfCfg.seconds;
     const lookbackLiteral = tfCfg.lookback;
+    const binanceInterval = tfRaw in tfMap ? tfRaw : "5m";
 
     const rows = await sql`
       SELECT to_timestamp(FLOOR(EXTRACT(EPOCH FROM timestamp) / ${bucketSeconds}) * ${bucketSeconds}) AS minute,
@@ -516,7 +517,52 @@ app.get("/api/analytics/price-history/:symbol", async (req, res) => {
       GROUP BY minute
       ORDER BY minute ASC
     `;
-    res.json(rows);
+
+    let merged = rows.map((r: any) => ({
+      minute: new Date(r.minute).toISOString(),
+      open: Number(r.open) || 0,
+      high: Number(r.high) || 0,
+      low: Number(r.low) || 0,
+      close: Number(r.close) || 0,
+      volume: Number(r.volume) || 0,
+      source: "local",
+    }));
+
+    // If local candle history is too short, supplement from Binance spot klines.
+    if (merged.length < 120) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 7000);
+        const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(binanceInterval)}&limit=500`;
+        const resp = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeout);
+
+        if (resp.ok) {
+          const klines = await resp.json() as any[];
+          const remote = (klines || []).map((k: any[]) => ({
+            minute: new Date(Number(k[0])).toISOString(),
+            open: Number(k[1]) || 0,
+            high: Number(k[2]) || 0,
+            low: Number(k[3]) || 0,
+            close: Number(k[4]) || 0,
+            volume: Number(k[5]) || 0,
+            source: "binance",
+          }));
+
+          const byMinute = new Map<string, any>();
+          for (const c of remote) byMinute.set(c.minute, c);
+          for (const c of merged) byMinute.set(c.minute, c); // Local data overrides remote for freshness.
+
+          merged = Array.from(byMinute.values()).sort((a, b) =>
+            new Date(a.minute).getTime() - new Date(b.minute).getTime()
+          );
+        }
+      } catch {
+        // Silent fallback: keep serving local candles if remote kline call fails.
+      }
+    }
+
+    res.json(merged);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
