@@ -14,42 +14,49 @@ export default function BacktestPanel() {
 
   // Equity curve mini chart
   useEffect(() => {
-    if (!equityRef.current || !equity?.length) return;
+    if (!equityRef.current || !equity?.length || equity.length < 2) return;
     if (chartRef.current) chartRef.current.remove();
 
-    const chart = createChart(equityRef.current, {
-      layout: { background: { color: "transparent" }, textColor: "#64748b", fontSize: 10 },
-      grid: { vertLines: { visible: false }, horzLines: { color: "#1e293b" } },
-      rightPriceScale: { borderVisible: false },
-      timeScale: { borderVisible: false, visible: false },
-      width: equityRef.current.clientWidth,
-      height: 80,
-      crosshair: { vertLine: { visible: false }, horzLine: { visible: false } },
-    });
+    try {
+      const chart = createChart(equityRef.current, {
+        layout: { background: { color: "transparent" }, textColor: "#64748b", fontSize: 10 },
+        grid: { vertLines: { visible: false }, horzLines: { color: "#1e293b" } },
+        rightPriceScale: { borderVisible: false },
+        timeScale: { borderVisible: false, visible: false },
+        width: equityRef.current.clientWidth,
+        height: 80,
+        crosshair: { vertLine: { visible: false }, horzLine: { visible: false } },
+      });
 
-    const series = chart.addSeries(LineSeries, {
-      color: "#818cf8",
-      lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
+      const series = chart.addSeries(LineSeries, {
+        color: "#818cf8",
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
 
-    series.setData(
-      equity.map((e, i) => ({
-        time: (i + 1) as Time,
-        value: e.cumulative_pnl,
-      }))
-    );
-    chart.timeScale().fitContent();
-    chartRef.current = chart;
+      series.setData(
+        equity.map((e, i) => ({
+          time: (i + 1) as Time,
+          value: Number(e.cumulative_pnl) || 0,
+        }))
+      );
+      chart.timeScale().fitContent();
+      chartRef.current = chart;
 
-    return () => { chart.remove(); chartRef.current = null; };
+      return () => { chart.remove(); chartRef.current = null; };
+    } catch {
+      console.warn("Equity chart init failed");
+    }
   }, [equity]);
 
   const overallWinRate = scores?.length
     ? (scores.reduce((a, s) => a + s.wins, 0) / Math.max(scores.reduce((a, s) => a + s.total, 0), 1)) * 100
     : 0;
   const totalTrades = scores?.reduce((a, s) => a + s.total, 0) || 0;
+  const avgPnl = scores?.length
+    ? scores.reduce((a, s) => a + Number(s.avg_pnl_pct) * s.total, 0) / Math.max(totalTrades, 1)
+    : 0;
 
   return (
     <div className="flex flex-col h-full border-l border-surface-border bg-surface overflow-hidden">
@@ -73,8 +80,8 @@ export default function BacktestPanel() {
         </div>
         <div className="text-center">
           <p className="text-[10px] text-gray-500 uppercase">Avg PnL</p>
-          <p className={`text-sm font-bold font-mono ${(scores?.[0]?.avg_pnl_pct ?? 0) >= 0 ? "text-bull" : "text-bear"}`}>
-            {scores?.length ? `%${(scores.reduce((a, s) => a + s.avg_pnl_pct * s.total, 0) / Math.max(totalTrades, 1)).toFixed(2)}` : "—"}
+          <p className={`text-sm font-bold font-mono ${avgPnl >= 0 ? "text-bull" : "text-bear"}`}>
+            {scores?.length ? `%${avgPnl.toFixed(2)}` : "—"}
           </p>
         </div>
       </div>
@@ -96,14 +103,14 @@ export default function BacktestPanel() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs font-medium text-gray-300 truncate">
-                    {s.symbol.replace("USDT", "")}
+                    {(s.symbol || "").replace("USDT", "")}
                   </span>
                   <span className="text-[10px] text-gray-500 truncate">{s.signal_type}</span>
                 </div>
               </div>
               <span className="text-[11px] font-mono text-gray-400">{s.total}</span>
-              <span className={`text-[11px] font-mono font-medium w-12 text-right ${s.success_rate >= 50 ? "text-bull" : "text-bear"}`}>
-                %{s.success_rate}
+              <span className={`text-[11px] font-mono font-medium w-12 text-right ${Number(s.success_rate) >= 50 ? "text-bull" : "text-bear"}`}>
+                %{Number(s.success_rate).toFixed(1)}
               </span>
             </div>
           ))}
@@ -120,10 +127,10 @@ export default function BacktestPanel() {
                 <XCircle size={12} className="text-bear flex-shrink-0" />
               )}
               <span className="text-[11px] text-gray-400 flex-1 truncate">
-                {r.symbol.replace("USDT", "")} {r.side?.toUpperCase()}
+                {(r.symbol || "").replace("USDT", "")} {r.side?.toUpperCase()}
               </span>
-              <span className={`text-[11px] font-mono ${(r.pnl_pct ?? 0) >= 0 ? "text-bull" : "text-bear"}`}>
-                {(r.pnl_pct ?? 0) >= 0 ? "+" : ""}{(r.pnl_pct ?? 0).toFixed(2)}%
+              <span className={`text-[11px] font-mono ${Number(r.pnl_pct ?? 0) >= 0 ? "text-bull" : "text-bear"}`}>
+                {Number(r.pnl_pct ?? 0) >= 0 ? "+" : ""}{Number(r.pnl_pct ?? 0).toFixed(2)}%
               </span>
             </div>
           ))}

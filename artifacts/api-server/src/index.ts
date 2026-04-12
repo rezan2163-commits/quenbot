@@ -1230,8 +1230,8 @@ app.get("/api/backtest/scores", async (_req, res) => {
         COUNT(*)::int AS total,
         SUM(CASE WHEN sim.pnl > 0 THEN 1 ELSE 0 END)::int AS wins,
         SUM(CASE WHEN sim.pnl <= 0 THEN 1 ELSE 0 END)::int AS losses,
-        ROUND(AVG(sim.pnl_pct)::numeric, 3) AS avg_pnl_pct,
-        ROUND((SUM(CASE WHEN sim.pnl > 0 THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) * 100)::numeric, 1) AS success_rate
+        ROUND(AVG(sim.pnl_pct)::numeric, 3)::float AS avg_pnl_pct,
+        ROUND((SUM(CASE WHEN sim.pnl > 0 THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) * 100)::numeric, 1)::float AS success_rate
       FROM signals s
       JOIN simulations sim ON sim.signal_id = s.id
       WHERE sim.status = 'closed'
@@ -1249,9 +1249,11 @@ app.get("/api/backtest/recent", async (_req, res) => {
   try {
     const rows = await sql`
       SELECT
-        sim.id, sim.symbol, sim.side, sim.entry_price, sim.exit_price,
-        sim.pnl, sim.pnl_pct, sim.entry_time, sim.exit_time,
-        s.signal_type, s.confidence,
+        sim.id, sim.symbol, sim.side,
+        sim.entry_price::float, sim.exit_price::float,
+        sim.pnl::float, sim.pnl_pct::float,
+        sim.entry_time, sim.exit_time,
+        s.signal_type, s.confidence::float,
         CASE WHEN sim.pnl > 0 THEN true ELSE false END AS success
       FROM simulations sim
       LEFT JOIN signals s ON s.id = sim.signal_id
@@ -1277,8 +1279,8 @@ app.get("/api/selfcorrection/status", async (_req, res) => {
         SELECT
           COUNT(*)::int AS recent_trades,
           SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::int AS recent_wins,
-          ROUND((SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) * 100)::numeric, 1) AS recent_win_rate,
-          ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct
+          ROUND((SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) * 100)::numeric, 1)::float AS recent_win_rate,
+          ROUND(AVG(pnl_pct)::numeric, 3)::float AS avg_pnl_pct
         FROM simulations
         WHERE status = 'closed' AND exit_time > NOW() - INTERVAL '24 hours'
       `,
@@ -1290,7 +1292,7 @@ app.get("/api/selfcorrection/status", async (_req, res) => {
       `,
       sql`
         SELECT failure_type, COUNT(*)::int AS count,
-          ROUND(AVG(confidence)::numeric, 2) AS avg_confidence
+          ROUND(AVG(confidence)::numeric, 2)::float AS avg_confidence
         FROM rca_results
         WHERE id > (SELECT COALESCE(MAX(id), 0) - 50 FROM rca_results)
         GROUP BY failure_type
@@ -1362,8 +1364,8 @@ app.get("/api/analytics/equity-curve", async (_req, res) => {
     const rows = await sql`
       SELECT
         exit_time AS time,
-        pnl,
-        SUM(pnl) OVER (ORDER BY exit_time) AS cumulative_pnl
+        pnl::float,
+        SUM(pnl::float) OVER (ORDER BY exit_time) AS cumulative_pnl
       FROM simulations
       WHERE status = 'closed' AND exit_time IS NOT NULL
       ORDER BY exit_time
