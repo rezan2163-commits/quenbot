@@ -461,13 +461,13 @@ class BrainModule:
         }
 
         # ─── Ön filtre: minimum kalite ───
-        if similarity < 0.90:
+        if similarity < 0.50:
             self._pattern_match_stats['total_vetoed'] += 1
             return {
                 'symbol': symbol, 'approved': False,
                 'direction': direction, 'magnitude': magnitude,
                 'confidence': confidence,
-                'reasoning': f"Ön-filtre: Benzerlik eşik altı {similarity:.4f} < 0.90",
+                'reasoning': f"Ön-filtre: Benzerlik eşik altı {similarity:.4f} < 0.50",
             }
 
         # ─── Ön filtre: Brain öğrenme verisi ───
@@ -646,6 +646,44 @@ class BrainModule:
                     logger.info(f"🧠 Brain: Loaded {len(new_records)} new patterns (total: {len(self.pattern_memory)})")
         except Exception as e:
             logger.debug(f"Brain refresh error: {e}")
+
+    def get_learning_context(self) -> str:
+        """
+        LLM promptlarına enjekte edilecek öğrenme özeti.
+        Her karar çağrısında Brain'in birikimli bilgisi modele beslenir.
+        """
+        lines = []
+        accuracy = self.get_accuracy()
+        total = self.prediction_accuracy['total']
+        lines.append(f"BRAIN OGRENME DURUMU: Toplam {total} tahmin, dogruluk {accuracy:.1%}")
+        lines.append(f"Pattern hafiza: {len(self.pattern_memory)} kayit")
+
+        # Sinyal tipi performansları
+        if self.signal_type_scores:
+            lines.append("SINYAL TIPI PERFORMANSLARI:")
+            for sig_type, stats in sorted(self.signal_type_scores.items(),
+                                           key=lambda x: x[1]['total'], reverse=True)[:8]:
+                if stats['total'] < 2:
+                    continue
+                acc = stats['correct'] / stats['total']
+                avg_pnl = stats['total_pnl'] / stats['total']
+                lines.append(f"  {sig_type}: {acc:.0%} dogruluk ({stats['total']}x), ort PnL {avg_pnl:+.2f}%")
+
+        # Ağırlıklar
+        w = self.learning_weights
+        lines.append(f"AGIRLIKLAR: similarity={w['similarity']:.2f} volume={w['volume_match']:.2f} "
+                     f"direction={w['direction_match']:.2f} confidence={w['confidence_history']:.2f}")
+
+        # Son kalibrasyon
+        if self._calibration_log:
+            last = self._calibration_log[-1]
+            actions = last.get('actions', [])
+            if actions:
+                lines.append(f"SON KALIBRASYON ({last.get('timestamp', '?')[:16]}):")
+                for a in actions[:3]:
+                    lines.append(f"  {a.get('type')}: {a.get('reason', a.get('signal_type', ''))}")
+
+        return "\n".join(lines)
 
 
 class ChatHandler:

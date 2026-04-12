@@ -91,7 +91,7 @@ class AgentOrchestrator:
         self._max_restarts = 50
         self._system_mode = "initializing"  # initializing | healthy | degraded
         self._llm_available = False
-        self._last_known_llm_model: str = os.getenv("QUENBOT_LLM_MODEL", "quenbot-qwen")
+        self._last_known_llm_model: str = os.getenv("QUENBOT_LLM_MODEL", "quenbot-brain-14b")
         self._start_time = time.time()
         self._last_resource_snapshot = None
         self._resource_warnings: list[dict] = []

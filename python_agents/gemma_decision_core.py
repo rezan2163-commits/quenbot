@@ -103,6 +103,9 @@ SYNTHESIS_PROMPT_TEMPLATE = """## KARAR İSTEĞİ — {symbol} ({timeframe})
 - Öneri: {strategist_recommendation}
 - Momentum Skoru: {momentum_score:.2f}
 
+### 📚 ÖĞRENME BİRİKİMİ
+{learning_context}
+
 ---
 Bu verileri sentezle ve nihai kararını JSON formatında ver."""
 
@@ -173,14 +176,14 @@ class GemmaDecisionCore:
     # Gemma'yı aşırı yüklememek için rate limit (saniye)
     MIN_DECISION_INTERVAL = float(os.getenv("QUENBOT_DECISION_MIN_INTERVAL", "1.2"))
     # Gemma bağlanamazsa fallback kurallar
-    FALLBACK_MIN_SIMILARITY = 0.92
-    FALLBACK_MIN_CONFIDENCE = 0.60
+    FALLBACK_MIN_SIMILARITY = 0.50
+    FALLBACK_MIN_CONFIDENCE = 0.50
 
     def __init__(self, brain=None, risk_manager=None, state_tracker=None):
         self.brain = brain
         self.risk_manager = risk_manager
         self.state_tracker = state_tracker
-        self._decision_model = os.getenv("QUENBOT_DECISION_MODEL", "quenbot-qwen8:latest")
+        self._decision_model = os.getenv("QUENBOT_DECISION_MODEL", "quenbot-brain-14b")
         self._decision_timeout = int(os.getenv("QUENBOT_DECISION_TIMEOUT", "18"))
         self._decision_lock = asyncio.Lock()
         self._decision_history: List[GemmaDecision] = []
@@ -349,6 +352,8 @@ class GemmaDecisionCore:
             # Strategist
             'strategist_recommendation': strat.get('recommendation', 'bekle'),
             'momentum_score': strat.get('momentum_score', 0),
+            # Learning context
+            'learning_context': self.brain.get_learning_context() if self.brain else 'Ogrenme verisi yok',
         }
 
     async def _gemma_evaluate(self, symbol: str, timeframe: str,

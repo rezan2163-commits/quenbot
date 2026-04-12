@@ -22,27 +22,21 @@ logger = logging.getLogger("quenbot.llm_client")
 # Defaults tuned for 12 vCPU / 24 GB RAM
 # -------------------------------------------------------------------
 DEFAULT_BASE_URL = os.getenv("QUENBOT_LLM_BASE_URL", "http://localhost:11434")
-DEFAULT_MODEL = os.getenv("QUENBOT_LLM_MODEL", "quenbot-qwen")
+DEFAULT_MODEL = os.getenv("QUENBOT_LLM_MODEL", "quenbot-brain-14b")
 MODEL_CANDIDATES = [
+    "quenbot-brain-14b",
+    "qwen3:14b",
     "quenbot-qwen8",
     "qwen3:8b",
-    "quenbot-qwen",
-    "qwen3:14b",
-    "quenbot-brain-12b",
-    "gemma3:12b",
-    "gemma4-trading",
-    "quenbot-brain",
-    "gemma:7b",
-    "gemma3:4b-it-q4_K_M",
     "qwen3:1.7b",
 ]
 DEFAULT_TIMEOUT = int(os.getenv("QUENBOT_LLM_TIMEOUT", "55"))
-DEFAULT_MAX_TOKENS = int(os.getenv("QUENBOT_LLM_MAX_TOKENS", "384"))
+DEFAULT_MAX_TOKENS = int(os.getenv("QUENBOT_LLM_MAX_TOKENS", "512"))
 DEFAULT_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_LLM_MAX_PROMPT_CHARS", "5000"))
 DEFAULT_MAX_RETRIES = int(os.getenv("QUENBOT_LLM_MAX_RETRIES", "1"))
 DEFAULT_CONCURRENCY = int(os.getenv("QUENBOT_LLM_CONCURRENCY", "2"))
 DEFAULT_NUM_THREAD = int(os.getenv("QUENBOT_LLM_NUM_THREAD", "11"))
-DEFAULT_NUM_CTX = int(os.getenv("QUENBOT_LLM_NUM_CTX", "4096"))
+DEFAULT_NUM_CTX = int(os.getenv("QUENBOT_LLM_NUM_CTX", "8192"))
 
 
 @dataclass
@@ -195,19 +189,19 @@ class LLMClient:
                         logger.info(f"Using existing model: {self.model}")
                         return True
 
-        # No suitable model found — try to pull Gemma
-        logger.info("No suitable model found. Attempting to pull gemma3:12b...")
+        # No suitable model found — try to pull Qwen3 14B
+        logger.info("No suitable model found. Attempting to pull qwen3:14b...")
         try:
             session = await self._get_session()
             async with session.post(
                 f"{self.base_url}/api/pull",
-                json={"name": "gemma3:12b", "stream": False},
+                json={"name": "qwen3:14b", "stream": False},
                 timeout=aiohttp.ClientTimeout(total=1800),
             ) as resp:
                 if resp.status == 200:
-                    self.model = "gemma3:12b"
-                    logger.info("✓ Gemma 3 12B model pulled successfully")
-                    await self._create_custom_model(base_model="gemma3:12b", target_name="quenbot-brain-12b")
+                    self.model = "qwen3:14b"
+                    logger.info("✓ Qwen3 14B model pulled successfully")
+                    await self._create_custom_model(base_model="qwen3:14b", target_name="quenbot-brain-14b")
                     return True
                 else:
                     logger.error(f"Model pull failed: HTTP {resp.status}")
@@ -215,12 +209,13 @@ class LLMClient:
             logger.error(f"Model pull error: {e}")
         return False
 
-    async def _create_custom_model(self, base_model: Optional[str] = None, target_name: str = "quenbot-brain-12b"):
+    async def _create_custom_model(self, base_model: Optional[str] = None, target_name: str = "quenbot-brain-14b"):
         """Create a custom QuenBot model from the given base model."""
         source_model = base_model or self.model
         modelfile = f'''FROM {source_model}
 
 PARAMETER temperature 0.18
+PARAMETER temperature 0.15
 PARAMETER top_p 0.85
 PARAMETER top_k 30
 PARAMETER repeat_penalty 1.15
@@ -228,22 +223,26 @@ PARAMETER num_ctx {DEFAULT_NUM_CTX}
 PARAMETER num_predict {DEFAULT_MAX_TOKENS}
 PARAMETER num_thread {DEFAULT_NUM_THREAD}
 
-SYSTEM """You are QuenBot Central Intelligence.
+SYSTEM """Sen QuenBot Merkezi Zeka Sistemisin — kripto piyasalarinda kurumsal bot hareketlerini tespit eden, siniflandiran ve otonom sinyal ureten cok katmanli bir trading AI'sin.
 
-You are the natural-language brain of a multi-agent crypto trading system.
-System strategy:
-- Scout collects spot and futures data.
-- Strategist analyzes 15m, 1h, 4h, 1d direction and emits signals.
-- GhostSimulator paper-trades candidate signals and reports outcomes.
-- Auditor identifies failures and improves the strategy loop.
-- Brain maintains pattern memory and learning.
-- You synthesize all of this and speak to the user naturally in Turkish.
+6 AJAN MIMARISI:
+1. Scout: Binance spot+futures WebSocket ile canli trade akisi toplar, anomalileri isaretler
+2. PatternMatcher: Euclidean distance ile gecmis paternlere benzerlik hesaplar (esik: %50+)
+3. Strategist: Coklu timeframe analiz + pattern + momentum ile sinyal uretir
+4. GhostSimulator: Paper trade, TP/SL takibi, geri besleme
+5. Auditor: RCA ile basarisizlik analizi, duzeltme onerileri
+6. Brain (SEN): Pattern kutuphanesi, benzerlik motoru, regime tespiti, surekli ogrenme
 
-Behavior rules:
-- If a system prompt asks for JSON, return strict JSON only.
-- If the interaction is normal chat, answer naturally, briefly, and clearly in Turkish.
-- Do not hallucinate missing market data.
-- Speak as the system owner, not as an external assistant."""
+KARAR HIYERARSISI:
+Veri → Anomali → Pattern Eslestirme → Sinyal → Risk Kapisi → Paper Trade → Audit → Ogrenme
+
+OGRENME: Her simulasyondan ogren, dogruluk <%40 ise threshold artir, >%70 ise azalt.
+
+DAVRANIS:
+- JSON istegi → kesin JSON döndur
+- Normal sohbet → dogal, kisa, net Turkce
+- Eksik veri → acikca belirt, uydurmadan karar verme
+- Sistemin sahibi gibi konus"""
 '''
         try:
             session = await self._get_session()
