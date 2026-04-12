@@ -7,6 +7,7 @@ No Redis needed — pure Python asyncio with priority support.
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ class Task:
     status: str = field(default="pending", compare=False)
     started_at: Optional[float] = field(default=None, compare=False)
     completed_at: Optional[float] = field(default=None, compare=False)
+    dedup_key: str = field(default="", compare=False)
 
 
 class TaskQueue:
@@ -56,7 +58,7 @@ class TaskQueue:
 
     def __init__(
         self,
-        max_workers: int = 3,
+        max_workers: int = int(os.getenv("QUENBOT_TASK_QUEUE_WORKERS", "4")),
         max_queue_size: int = 80,
         task_timeout: int = 120,
     ):
@@ -70,6 +72,8 @@ class TaskQueue:
         self._active_tasks: dict[str, Task] = {}
         self._completed: list[dict] = []  # Last 100 completed tasks
         self._pending_keys: set[str] = set()  # For dedup
+        self._task_events: dict[str, asyncio.Event] = {}
+        self._task_results: dict[str, dict] = {}
 
         # Stats
         self._total_submitted = 0
@@ -99,6 +103,8 @@ class TaskQueue:
             worker.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
+        for event in self._task_events.values():
+            event.set()
         logger.info("Task queue stopped")
 
     async def submit(
@@ -135,6 +141,7 @@ class TaskQueue:
             agent_name=agent_name,
             description=description,
             coroutine_factory=coroutine_factory,
+            dedup_key=effective_key,
         )
 
         try:
@@ -148,6 +155,7 @@ class TaskQueue:
             return None
 
         self._pending_keys.add(effective_key)
+        self._task_events[task.task_id] = asyncio.Event()
         self._total_submitted += 1
 
         logger.debug(
@@ -155,6 +163,22 @@ class TaskQueue:
             agent_name, description, priority.name, self._queue.qsize()
         )
         return task.task_id
+
+    async def wait_for_result(self, task_id: str, timeout: Optional[float] = None) -> Optional[dict]:
+        event = self._task_events.get(task_id)
+        if event is None:
+            return self._task_results.pop(task_id, None)
+
+        try:
+            if timeout is None:
+                await event.wait()
+            else:
+                await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+
+        self._task_events.pop(task_id, None)
+        return self._task_results.pop(task_id, None)
 
     async def _worker_loop(self, worker_name: str):
         """Worker that processes tasks from the queue."""
@@ -174,7 +198,7 @@ class TaskQueue:
             task.started_at = time.monotonic()
             self._active_tasks[task.task_id] = task
 
-            dedup_key = f"{task.agent_name}:{task.description}"
+            dedup_key = task.dedup_key or f"{task.agent_name}:{task.description}"
 
             try:
                 if task.coroutine_factory is None:
@@ -221,6 +245,15 @@ class TaskQueue:
             finally:
                 self._active_tasks.pop(task.task_id, None)
                 self._pending_keys.discard(dedup_key)
+                self._task_results[task.task_id] = {
+                    "task_id": task.task_id,
+                    "status": task.status,
+                    "result": task.result,
+                    "error": task.error,
+                }
+                event = self._task_events.get(task.task_id)
+                if event is not None:
+                    event.set()
 
                 # Keep last 100 completed tasks for stats
                 self._completed.append({

@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-surface text-gray-100 font-sans;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+/* Terminal log */
+.terminal-log {
+  @apply font-mono text-xs leading-relaxed;
+}
+.terminal-log .log-time { @apply text-gray-500; }
+.terminal-log .log-info { @apply text-sky-400; }
+.terminal-log .log-warn { @apply text-warn; }
+.terminal-log .log-error { @apply text-bear; }
+.terminal-log .log-bull { @apply text-bull; }
+.terminal-log .log-bear { @apply text-bear; }
+
+/* Pulse dot */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }

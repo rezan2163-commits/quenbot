@@ -1,0 +1,3 @@
+module.exports=[82726,a=>{"use strict";var b=a.i(43497);a.s(["default",0,function({children:a}){return(0,b.jsx)("html",{lang:"tr",className:"dark",children:(0,b.jsx)("body",{className:"antialiased",children:a})})},"metadata",0,{title:"QuenBot — Trading Dashboard",description:"Otonom Kripto Trading Zekası"}])},42209,a=>{a.n(a.i(82726))}];
+
+//# sourceMappingURL=dashboard_src_app_layout_tsx_06qknxn._.js.map

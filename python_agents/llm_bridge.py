@@ -84,12 +84,20 @@ class AgentLLMBridge:
         )
 
         if task_id is None:
+            response: LLMResponse = await _do_inference()
+        else:
+            envelope = await self._queue.wait_for_result(task_id, timeout=120)
+            if envelope is None:
+                logger.warning("LLM queue timeout for %s", agent_name)
+                return None
+            if envelope.get("status") != "completed":
+                logger.warning("LLM queue task failed for %s: %s", agent_name, envelope.get("error"))
+                return None
+            response: LLMResponse = envelope.get("result")
+
+        if response is None:
             return None
 
-        # Wait for the result (the queue processes it)
-        # We need to wait for the task to complete since submit just queues it
-        # Instead, call directly through the queue's semaphore
-        response: LLMResponse = await _do_inference()
         self._call_count += 1
 
         if not response.success:

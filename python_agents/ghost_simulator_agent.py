@@ -282,10 +282,21 @@ class GhostSimulatorAgent:
         entry_time = sim_data.get('entry_time')
         if not entry_time:
             return False
-        if isinstance(entry_time, str):
-            entry_time = datetime.fromisoformat(entry_time)
-        elapsed = datetime.utcnow() - entry_time
-        return elapsed.total_seconds() > (Config.SIMULATION_TIMEOUT_HOURS * 3600)
+        try:
+            if isinstance(entry_time, str):
+                entry_time = datetime.fromisoformat(entry_time)
+
+            # Handle both naive and timezone-aware datetimes safely.
+            if getattr(entry_time, 'tzinfo', None) is not None:
+                now = datetime.now(entry_time.tzinfo)
+            else:
+                now = datetime.utcnow()
+
+            elapsed = now - entry_time
+            return elapsed.total_seconds() > (Config.SIMULATION_TIMEOUT_HOURS * 3600)
+        except Exception as e:
+            logger.debug(f"Simulation timeout parse error: {e}")
+            return False
 
     async def _close_simulation_direct(self, sim_data: Dict[str, Any], reason: str):
         """Close a simulation directly from its data dict (used during dedup cleanup)."""

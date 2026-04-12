@@ -54,8 +54,17 @@ class RiskManager:
             return False, f"Consecutive losses limit ({state['consecutive_losses']})"
 
         # 4. Max drawdown kontrolü
-        if state['current_drawdown'] >= abs(self.MAX_DRAWDOWN_PCT):
-            return False, f"Max drawdown reached ({state['current_drawdown']:.2f}%)"
+        current_drawdown = float(state.get('current_drawdown', 0) or 0)
+        if current_drawdown >= abs(self.MAX_DRAWDOWN_PCT):
+            if self._is_stale_drawdown_lock(state):
+                logger.warning(
+                    "Stale drawdown lock bypassed (dd=%.2f, daily_trades=%s, daily_pnl=%.2f)",
+                    current_drawdown,
+                    state.get('daily_trade_count', 0),
+                    float(state.get('daily_pnl', 0) or 0),
+                )
+            else:
+                return False, f"Max drawdown reached ({current_drawdown:.2f}%)"
 
         # 5. Cooldown kontrolü (son kayıptan sonra bekleme)
         if self.last_loss_time:
@@ -102,6 +111,23 @@ class RiskManager:
             'PRODUCTION': 0.5,
         }
         return thresholds.get(mode, 0.5)
+
+    def _is_stale_drawdown_lock(self, state: Dict[str, Any]) -> bool:
+        """
+        Detect legacy/corrupted drawdown states that can freeze the system forever.
+        If there is no active position and no today's trading loss activity,
+        lifetime drawdown should not block fresh paper-signal intake.
+        """
+        active_positions = len(state.get('active_symbols', []))
+        total_trades = int(state.get('total_trades', 0) or 0)
+        current_drawdown = float(state.get('current_drawdown', 0) or 0)
+
+        # Require clearly stale profile: extreme DD (legacy corruption), no active positions.
+        return (
+            total_trades > 0
+            and current_drawdown > abs(self.MAX_DRAWDOWN_PCT) * 20
+            and active_positions == 0
+        )
 
     def calculate_position_size(self, confidence: float, atr_ratio: float = 0.02,
                                  balance: float = 10000.0) -> float:

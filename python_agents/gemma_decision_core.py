@@ -14,6 +14,7 @@ FELSEFE: Ajanlar ÖNERI sunar, Gemma NİHAİ KARAR verir.
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
@@ -170,7 +171,7 @@ class GemmaDecisionCore:
     # Son N kararı bellekte tut
     MAX_DECISION_HISTORY = 100
     # Gemma'yı aşırı yüklememek için rate limit (saniye)
-    MIN_DECISION_INTERVAL = 5
+    MIN_DECISION_INTERVAL = float(os.getenv("QUENBOT_DECISION_MIN_INTERVAL", "1.2"))
     # Gemma bağlanamazsa fallback kurallar
     FALLBACK_MIN_SIMILARITY = 0.92
     FALLBACK_MIN_CONFIDENCE = 0.60
@@ -179,6 +180,9 @@ class GemmaDecisionCore:
         self.brain = brain
         self.risk_manager = risk_manager
         self.state_tracker = state_tracker
+        self._decision_model = os.getenv("QUENBOT_DECISION_MODEL", "quenbot-qwen8:latest")
+        self._decision_timeout = int(os.getenv("QUENBOT_DECISION_TIMEOUT", "18"))
+        self._decision_lock = asyncio.Lock()
         self._decision_history: List[GemmaDecision] = []
         self._last_decision_time: float = 0
         self._stats = {
@@ -221,14 +225,20 @@ class GemmaDecisionCore:
         # ─── Context toplama ───
         context = self._build_context(pattern_data, scout_data, strategist_data)
 
-        # ─── Gemma çağrısı ───
-        try:
-            decision = await self._gemma_evaluate(symbol, timeframe, context)
-            self._stats['gemma_calls'] += 1
-        except Exception as e:
-            logger.warning(f"Gemma Decision Core fallback: {e}")
+        # ─── Gemma çağrısı (single-flight) ───
+        if self._decision_lock.locked():
             decision = self._fallback_evaluate(symbol, timeframe, context)
+            decision.reasoning = f"{decision.reasoning} | LLM yogun, hizli fallback"
             self._stats['fallback_calls'] += 1
+        else:
+            async with self._decision_lock:
+                try:
+                    decision = await self._gemma_evaluate(symbol, timeframe, context)
+                    self._stats['gemma_calls'] += 1
+                except Exception as e:
+                    logger.warning(f"Gemma Decision Core fallback: {e}")
+                    decision = self._fallback_evaluate(symbol, timeframe, context)
+                    self._stats['fallback_calls'] += 1
 
         # ─── İstatistik güncelle ───
         decision.latency_ms = int((time.monotonic() - t0) * 1000)
@@ -350,10 +360,12 @@ class GemmaDecisionCore:
         response = await client.generate(
             prompt=prompt,
             system=DECISION_SYSTEM_PROMPT,
-            temperature=0.3,
+            temperature=0.2,
             json_mode=True,
-            timeout_override=45,
-            model_override="gemma4-trading:latest",
+            timeout_override=self._decision_timeout,
+            model_override=self._decision_model,
+            max_tokens_override=180,
+            prefer_fast_fail=True,
         )
 
         if not response.success or not response.text.strip():

@@ -91,9 +91,15 @@ class AgentOrchestrator:
         self._max_restarts = 50
         self._system_mode = "initializing"  # initializing | healthy | degraded
         self._llm_available = False
+        self._last_known_llm_model: str = os.getenv("QUENBOT_LLM_MODEL", "quenbot-qwen")
         self._start_time = time.time()
         self._last_resource_snapshot = None
         self._resource_warnings: list[dict] = []
+        # Pattern-match LLM evaluation throttles to keep chat responsive
+        self._pattern_eval_min_similarity = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_SIM", "0.965"))
+        self._pattern_eval_min_interval = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_INTERVAL", "20"))
+        self._last_pattern_eval_at: dict[str, float] = {}
+        self._pattern_eval_semaphore = asyncio.Semaphore(1)
         # Thread pool for CPU-bound work (pattern matching, similarity calc)
         self._thread_pool = ThreadPoolExecutor(
             max_workers=6, thread_name_prefix="quenbot-cpu"
@@ -169,6 +175,7 @@ class AgentOrchestrator:
             if llm_healthy:
                 self._llm_available = True
                 logger.info(f"🧠 LLM connected (model: {self.llm_client.model})")
+                asyncio.create_task(self._warmup_llm())
                 startup_report["components"]["llm"] = {"status": "ok", "model": self.llm_client.model}
             else:
                 logger.info("🧠 LLM backend reachable, checking for models...")
@@ -176,6 +183,7 @@ class AgentOrchestrator:
                 if model_ok:
                     self._llm_available = True
                     logger.info(f"🧠 LLM model ready: {self.llm_client.model}")
+                    asyncio.create_task(self._warmup_llm())
                     startup_report["components"]["llm"] = {"status": "ok", "model": self.llm_client.model}
                 else:
                     self._llm_available = False
@@ -240,7 +248,10 @@ class AgentOrchestrator:
         startup_report["system_mode"] = self._system_mode
         startup_report["symbols"] = Config.WATCHLIST
         try:
-            await self.db.update_heartbeat('system', self._system_mode, startup_report)
+            await self.db.update_heartbeat('system', 'running', {
+                **startup_report,
+                "system_mode": self._system_mode,
+            })
         except Exception as e:
             logger.debug(f"Startup report save: {e}")
 
@@ -289,6 +300,46 @@ class AgentOrchestrator:
         bus.subscribe(EventType.PATTERN_MATCH, self._on_pattern_match)
 
         logger.info("✓ Event bus subscriptions wired")
+
+    async def _warmup_llm(self):
+        """Prime the active model to reduce first-response latency for chat."""
+        if not self.llm_client:
+            return
+        try:
+            await self.llm_client.generate(
+                prompt="Kisa bir hazirlik kontrolu yap ve sadece hazirim yaz.",
+                system="Sadece tek kelime cevap ver: hazirim",
+                temperature=0.0,
+                json_mode=False,
+                timeout_override=20,
+                model_override=self.llm_client.model,
+            )
+            logger.info("✓ LLM warmup completed")
+        except Exception as e:
+            logger.debug(f"LLM warmup skipped: {e}")
+        # Also warm up the dedicated chat model in background if different.
+        asyncio.create_task(self._warmup_chat_model())
+
+    async def _warmup_chat_model(self):
+        """Pre-load the dedicated chat model so first user message gets fast response."""
+        chat_model = os.getenv("QUENBOT_CHAT_MODEL", "").strip()
+        if not chat_model or chat_model == self.llm_client.model if self.llm_client else True:
+            return  # same model — already warmed
+        try:
+            from llm_client import LLMClient
+            tmp = LLMClient(model=chat_model, timeout=30, max_tokens=8, max_retries=0)
+            resp = await tmp.generate(
+                prompt="hazirim",
+                system="Tek kelime: hazirim",
+                temperature=0.0,
+                json_mode=False,
+                timeout_override=28,
+                max_tokens_override=8,
+            )
+            await tmp.close()
+            logger.info(f"✓ Chat model warmup done: {chat_model} (success={resp.success})")
+        except Exception as e:
+            logger.debug(f"Chat model warmup skipped: {e}")
 
     # ─── Event Handlers ───
 
@@ -358,7 +409,10 @@ class AgentOrchestrator:
             logger.warning("⚠ LLM went offline — switching to DEGRADED mode (rule-based)")
         elif not was_available and now_available:
             self._system_mode = "healthy"
-            logger.info(f"✓ LLM back online — switching to HEALTHY mode (model: {event.data.get('model', '?')})")
+            model = event.data.get('model', '?')
+            if model and model != '?':
+                self._last_known_llm_model = model
+            logger.info(f"✓ LLM back online — switching to HEALTHY mode (model: {model})")
 
     async def _on_pattern_match(self, event: Event):
         """PatternMatcher found high-similarity match → Brain evaluates → Signal pipeline."""
@@ -366,13 +420,29 @@ class AgentOrchestrator:
         symbol = match_data.get('symbol', '')
         similarity = match_data.get('similarity', 0)
         match_id = match_data.get('match_id')
+        now = time.monotonic()
+
+        # Fast gate: ignore low-value pattern matches to avoid LLM saturation.
+        if similarity < self._pattern_eval_min_similarity:
+            return
+
+        # Per-symbol cooldown to reduce repetitive evaluations for near-identical bursts.
+        last_eval = self._last_pattern_eval_at.get(symbol, 0.0)
+        if now - last_eval < self._pattern_eval_min_interval:
+            return
+
+        # Global single-flight to keep chat and critical calls responsive under load.
+        if self._pattern_eval_semaphore.locked():
+            return
 
         logger.info(f"🎯 Pattern Match event: {symbol} similarity={similarity:.4f}")
 
         # Brain (Gemma) merkezi karar otoritesi olarak değerlendirir
         if self.brain:
             try:
-                decision = await self.brain.evaluate_pattern_match(match_data)
+                self._last_pattern_eval_at[symbol] = now
+                async with self._pattern_eval_semaphore:
+                    decision = await self.brain.evaluate_pattern_match(match_data)
 
                 # DB'ye Brain kararını kaydet
                 if match_id or symbol:
@@ -469,9 +539,11 @@ class AgentOrchestrator:
             self._resilient_task("Auditor", self.auditor.start),
             self._resilient_task("PatternMatcher", self.pattern_matcher.start),
             self._resilient_task("HealthMonitor", self._health_monitor),
-            self._resilient_task("ChatProcessor", self._chat_processor),
             self._resilient_task("DirectiveAPI", self._directive_api_server),
         ]
+
+        if os.getenv("QUENBOT_ENABLE_CHAT_POLLER", "0").lower() in {"1", "true", "yes", "on"}:
+            tasks.append(self._resilient_task("ChatProcessor", self._chat_processor))
 
         try:
             await asyncio.gather(*tasks)
@@ -605,6 +677,13 @@ class AgentOrchestrator:
                     })
 
                 self._system_mode = "healthy" if self._llm_available else "degraded"
+
+                # Keep system heartbeat fresh so dashboard agent counter does not mark it stale.
+                await self.db.update_heartbeat('system', 'running', {
+                    "mode": self._system_mode,
+                    "llm_available": self._llm_available,
+                    "uptime_seconds": int(time.time() - self._start_time),
+                })
 
                 # ─── Resource monitoring ───
                 snap = self.resource_monitor.snapshot()
@@ -883,6 +962,10 @@ class AgentOrchestrator:
 
             # Gather all status in one call
             llm_healthy = self._llm_available
+            # Always surface the last known model name (even when temporarily unreachable)
+            if self.llm_client and self.llm_client.model:
+                self._last_known_llm_model = self.llm_client.model
+            current_model = self._last_known_llm_model
             st = self.state_tracker.state if self.state_tracker else {}
             brain = self.brain.get_brain_status() if self.brain else {}
             pm = {}
@@ -892,10 +975,11 @@ class AgentOrchestrator:
                 pm = {}
 
             return web.json_response({
-                "mode": self._system_mode,
+                "mode": "active" if self.running else self._system_mode,
+                "health": self._system_mode,
                 "llm": {
                     "ok": llm_healthy,
-                    "model": self.llm_client.model if self.llm_client and llm_healthy else None,
+                    "model": current_model,
                 },
                 "resources": {
                     "cpu": resource.get("cpu_percent", 0),

@@ -147,6 +147,46 @@ app.use(compression());
 app.use(cors());
 app.use(express.json());
 
+const AGENT_STALE_SECONDS = Number(process.env.AGENT_STALE_SECONDS || 600);
+
+async function buildAgentStatusResponse() {
+  const heartbeats = await sql`
+    SELECT agent_name, status, last_heartbeat, metadata,
+           EXTRACT(EPOCH FROM (NOW() - last_heartbeat)) AS age_seconds
+    FROM agent_heartbeat ORDER BY agent_name
+  `;
+
+  const agents: Record<string, any> = {};
+  for (const hb of heartbeats) {
+    const ageSeconds = Math.max(0, Math.round(Number(hb.age_seconds || 0)));
+    const isFresh = ageSeconds < AGENT_STALE_SECONDS;
+    agents[hb.agent_name] = {
+      status: isFresh ? hb.status : "stale",
+      source_status: hb.status,
+      last_heartbeat: hb.last_heartbeat,
+      age_seconds: ageSeconds,
+      metadata: hb.metadata,
+    };
+  }
+
+  if (Object.keys(agents).length === 0) {
+    for (const name of ['scout', 'strategist', 'ghost_simulator', 'auditor', 'brain', 'chat_engine']) {
+      agents[name] = { status: "unknown", source_status: null, last_heartbeat: null, age_seconds: null, metadata: null };
+    }
+  }
+
+  const [configSignals] = await sql`SELECT COUNT(*)::int AS count FROM signals`;
+  const [configMovements] = await sql`SELECT COUNT(*)::int AS count FROM price_movements`;
+  return {
+    agents,
+    summary: {
+      signals: configSignals.count,
+      movements: configMovements.count,
+      stale_threshold_seconds: AGENT_STALE_SECONDS,
+    },
+  };
+}
+
 app.get("/api/health", async (req, res) => {
   try {
     res.json({
@@ -212,36 +252,18 @@ app.get("/api/bot/summary", async (req, res) => {
 
 app.get("/api/agents/status", async (req, res) => {
   try {
-    const heartbeats = await sql`
-      SELECT agent_name, status, last_heartbeat, metadata,
-             EXTRACT(EPOCH FROM (NOW() - last_heartbeat)) AS age_seconds
-      FROM agent_heartbeat ORDER BY agent_name
-    `;
-    const agents: Record<string, any> = {};
-    for (const hb of heartbeats) {
-      const isHealthy = hb.age_seconds < 120;
-      agents[hb.agent_name] = {
-        status: isHealthy ? hb.status : "stale",
-        last_heartbeat: hb.last_heartbeat,
-        age_seconds: Math.round(Number(hb.age_seconds)),
-        metadata: hb.metadata,
-      };
-    }
-    // Fallback if no heartbeats yet
-    if (Object.keys(agents).length === 0) {
-      for (const name of ['scout', 'strategist', 'ghost_simulator', 'auditor', 'brain', 'chat_engine']) {
-        agents[name] = { status: "unknown", last_heartbeat: null, age_seconds: null, metadata: null };
-      }
-    }
-    const [configSignals] = await sql`SELECT COUNT(*)::int AS count FROM signals`;
-    const [configMovements] = await sql`SELECT COUNT(*)::int AS count FROM price_movements`;
-    res.json({
-      agents,
-      summary: {
-        signals: configSignals.count,
-        movements: configMovements.count
-      }
-    });
+    const payload = await buildAgentStatusResponse();
+    res.json(payload);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Backward-compatible alias used by older dashboards/tools
+app.get("/api/system/agents", async (req, res) => {
+  try {
+    const payload = await buildAgentStatusResponse();
+    res.json(payload);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -1128,11 +1150,11 @@ app.post("/api/chat", express.json(), async (req, res) => {
   }
 
   try {
-    // Forward to Python agents on port 3002
-    // Note: Agents process runs in same system, using localhost:3002
+    // Forward to Python agents on port 3002 with a bounded timeout for snappy UX.
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000);
-    
+    // 38s: allows cold model load (~10s) + inference (~20s) + buffer
+    const timeoutId = setTimeout(() => controller.abort(), 38000);
+
     try {
       const agentResponse = await fetch("http://127.0.0.1:3002/api/chat", {
         method: "POST",
@@ -1153,15 +1175,42 @@ app.post("/api/chat", express.json(), async (req, res) => {
       }
     } catch (fetchError) {
       clearTimeout(timeoutId);
-      // Timeout or connection error - agents might be warming up
       console.warn("Agents connection attempt:", fetchError instanceof Error ? fetchError.message : "timeout");
     }
 
-    // Fallback: Agents unavailable
+    // Fast fallback: return live system snapshot instead of generic busy text.
+    try {
+      const summaryRes = await fetch("http://127.0.0.1:3002/api/system/summary", {
+        signal: AbortSignal.timeout(4000),
+      });
+      if (summaryRes.ok) {
+        const summary = await summaryRes.json();
+        const llmModel = summary?.llm?.model || "quenbot-qwen";
+        const llmOk = summary?.llm?.ok ?? true;
+        const trades = summary?.state?.trades ?? 0;
+        const patterns = summary?.brain?.patterns ?? 0;
+        const scans = summary?.pattern_matcher?.scans ?? 0;
+        const matches = summary?.pattern_matcher?.matches ?? 0;
+        const cpu = summary?.resources?.cpu ?? 0;
+        const ram = summary?.resources?.ram_mb || "?";
+        const statusNote = llmOk
+          ? "Model hazir, yanit gecikmeli geldi."
+          : "Model yogun, kisaca gonderin.";
+        return res.json({
+          success: true,
+          status: "chat_timeout_fallback",
+          message: `Sistem calisıyor — ${statusNote} Model: ${llmModel} | Islem: ${trades} | Pattern: ${patterns} | Tarama: ${scans} eslesme: ${matches} | CPU: %${Math.round(cpu)} RAM: ${ram}. Soruyu tekrar gonderin.`,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    } catch {
+      // ignore and use static fallback below
+    }
+
     res.json({
       success: true,
-      message: "⏳ AI asistan şu an meşgul, lütfen birkaç saniye sonra tekrar deneyin.",
       status: "agents_unavailable",
+      message: "Sistem aktif. Sohbet motoru cok yogun, ayni soruyu hemen tekrar gonderin — bu sefer cok daha hizli cevaplayacak.",
       timestamp: new Date().toISOString(),
     });
   } catch (error) {

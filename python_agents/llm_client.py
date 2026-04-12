@@ -9,9 +9,8 @@ Auto-detects available models and falls back gracefully.
 import asyncio
 import json
 import logging
+import os
 import time
-import subprocess
-import shutil
 from typing import Optional
 from dataclasses import dataclass, field
 
@@ -21,16 +20,29 @@ logger = logging.getLogger("quenbot.llm_client")
 
 # -------------------------------------------------------------------
 # Defaults tuned for 12 vCPU / 24 GB RAM
-# Gemma 4 Trading model with 5 strategic enhancements
 # -------------------------------------------------------------------
-DEFAULT_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "gemma4-trading"
-MODEL_CANDIDATES = ["gemma4-trading", "quenbot-brain", "gemma:7b", "gemma3:4b-it-q4_K_M", "gemma3", "qwen3:1.7b"]
-DEFAULT_TIMEOUT = 90           # faster CPU = shorter timeout
-DEFAULT_MAX_TOKENS = 1024      # longer responses with more RAM
-DEFAULT_MAX_PROMPT_CHARS = 8000  # 3x more context fits in 24GB
-DEFAULT_MAX_RETRIES = 2
-DEFAULT_CONCURRENCY = 3        # parallel inferences with 12 vCPU + 24GB RAM
+DEFAULT_BASE_URL = os.getenv("QUENBOT_LLM_BASE_URL", "http://localhost:11434")
+DEFAULT_MODEL = os.getenv("QUENBOT_LLM_MODEL", "quenbot-qwen")
+MODEL_CANDIDATES = [
+    "quenbot-qwen8",
+    "qwen3:8b",
+    "quenbot-qwen",
+    "qwen3:14b",
+    "quenbot-brain-12b",
+    "gemma3:12b",
+    "gemma4-trading",
+    "quenbot-brain",
+    "gemma:7b",
+    "gemma3:4b-it-q4_K_M",
+    "qwen3:1.7b",
+]
+DEFAULT_TIMEOUT = int(os.getenv("QUENBOT_LLM_TIMEOUT", "55"))
+DEFAULT_MAX_TOKENS = int(os.getenv("QUENBOT_LLM_MAX_TOKENS", "384"))
+DEFAULT_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_LLM_MAX_PROMPT_CHARS", "5000"))
+DEFAULT_MAX_RETRIES = int(os.getenv("QUENBOT_LLM_MAX_RETRIES", "1"))
+DEFAULT_CONCURRENCY = int(os.getenv("QUENBOT_LLM_CONCURRENCY", "2"))
+DEFAULT_NUM_THREAD = int(os.getenv("QUENBOT_LLM_NUM_THREAD", "11"))
+DEFAULT_NUM_CTX = int(os.getenv("QUENBOT_LLM_NUM_CTX", "4096"))
 
 
 @dataclass
@@ -76,6 +88,9 @@ class LLMClient:
         self.max_tokens = max_tokens
         self.max_prompt_chars = max_prompt_chars
         self.max_retries = max_retries
+        # Per-instance inference parameters (can be overridden by callers)
+        self.num_thread: int = DEFAULT_NUM_THREAD
+        self.num_ctx: int = DEFAULT_NUM_CTX
         self._session: Optional[aiohttp.ClientSession] = None
         self._semaphore = asyncio.Semaphore(DEFAULT_CONCURRENCY)
         self._total_calls = 0
@@ -181,19 +196,18 @@ class LLMClient:
                         return True
 
         # No suitable model found — try to pull Gemma
-        logger.info("No suitable model found. Attempting to pull gemma3:4b-it-q4_K_M...")
+        logger.info("No suitable model found. Attempting to pull gemma3:12b...")
         try:
             session = await self._get_session()
             async with session.post(
                 f"{self.base_url}/api/pull",
-                json={"name": "gemma3:4b-it-q4_K_M", "stream": False},
-                timeout=aiohttp.ClientTimeout(total=600),  # 10 min for download
+                json={"name": "gemma3:12b", "stream": False},
+                timeout=aiohttp.ClientTimeout(total=1800),
             ) as resp:
                 if resp.status == 200:
-                    self.model = "gemma3:4b-it-q4_K_M"
-                    logger.info("✓ Gemma 3 4B model pulled successfully")
-                    # Now create custom quenbot-brain from it
-                    await self._create_custom_model()
+                    self.model = "gemma3:12b"
+                    logger.info("✓ Gemma 3 12B model pulled successfully")
+                    await self._create_custom_model(base_model="gemma3:12b", target_name="quenbot-brain-12b")
                     return True
                 else:
                     logger.error(f"Model pull failed: HTTP {resp.status}")
@@ -201,39 +215,46 @@ class LLMClient:
             logger.error(f"Model pull error: {e}")
         return False
 
-    async def _create_custom_model(self):
-        """Create the quenbot-brain custom model from the active base model."""
-        modelfile = f"""FROM {self.model}
+    async def _create_custom_model(self, base_model: Optional[str] = None, target_name: str = "quenbot-brain-12b"):
+        """Create a custom QuenBot model from the given base model."""
+        source_model = base_model or self.model
+        modelfile = f'''FROM {source_model}
 
-PARAMETER temperature 0.3
+PARAMETER temperature 0.18
 PARAMETER top_p 0.85
 PARAMETER top_k 30
 PARAMETER repeat_penalty 1.15
-PARAMETER num_ctx 8192
-PARAMETER num_predict 1024
-PARAMETER num_thread 10
+PARAMETER num_ctx {DEFAULT_NUM_CTX}
+PARAMETER num_predict {DEFAULT_MAX_TOKENS}
+PARAMETER num_thread {DEFAULT_NUM_THREAD}
 
-SYSTEM \"\"\"You are QuenBot Central Intelligence, a specialized cryptocurrency trading analysis AI.
-You operate as part of a multi-agent trading system with the following agents:
-- Scout: Market data collection and anomaly detection
-- Strategist: Signal generation and pattern analysis
-- Ghost Simulator: Paper trading and backtesting
-- Auditor: Quality control and root cause analysis
-- Brain: Pattern learning and prediction
+SYSTEM """You are QuenBot Central Intelligence.
 
-You provide structured, data-driven analysis. Always respond in valid JSON when requested.
-Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
-"""
+You are the natural-language brain of a multi-agent crypto trading system.
+System strategy:
+- Scout collects spot and futures data.
+- Strategist analyzes 15m, 1h, 4h, 1d direction and emits signals.
+- GhostSimulator paper-trades candidate signals and reports outcomes.
+- Auditor identifies failures and improves the strategy loop.
+- Brain maintains pattern memory and learning.
+- You synthesize all of this and speak to the user naturally in Turkish.
+
+Behavior rules:
+- If a system prompt asks for JSON, return strict JSON only.
+- If the interaction is normal chat, answer naturally, briefly, and clearly in Turkish.
+- Do not hallucinate missing market data.
+- Speak as the system owner, not as an external assistant."""
+'''
         try:
             session = await self._get_session()
             async with session.post(
                 f"{self.base_url}/api/create",
-                json={"name": "quenbot-brain", "modelfile": modelfile, "stream": False},
-                timeout=aiohttp.ClientTimeout(total=120),
+                json={"name": target_name, "modelfile": modelfile, "stream": False},
+                timeout=aiohttp.ClientTimeout(total=900),
             ) as resp:
                 if resp.status == 200:
-                    self.model = "quenbot-brain"
-                    logger.info("✓ Custom quenbot-brain model created from " + self.model)
+                    self.model = target_name
+                    logger.info("✓ Custom %s model created from %s", target_name, source_model)
                 else:
                     logger.warning(f"Custom model creation failed (HTTP {resp.status}), using base model")
         except Exception as e:
@@ -247,14 +268,49 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
         json_mode: bool = False,
         timeout_override: Optional[int] = None,
         model_override: Optional[str] = None,
+        max_tokens_override: Optional[int] = None,
+        prefer_fast_fail: bool = False,
+        max_retries_override: Optional[int] = None,
     ) -> LLMResponse:
         """
         Generate a response from the local LLM.
         Uses semaphore to ensure single inference at a time on CPU.
         """
+        if prefer_fast_fail:
+            acquire_timeout = float(os.getenv("QUENBOT_LLM_ACQUIRE_TIMEOUT", "1.2"))
+            try:
+                await asyncio.wait_for(self._semaphore.acquire(), timeout=acquire_timeout)
+            except asyncio.TimeoutError:
+                return LLMResponse(
+                    text="",
+                    model=model_override or self.model,
+                    success=False,
+                    error=f"LLM busy (acquire timeout {acquire_timeout}s)",
+                )
+            try:
+                return await self._generate_inner(
+                    prompt,
+                    system,
+                    temperature,
+                    json_mode,
+                    timeout_override,
+                    model_override,
+                    max_tokens_override,
+                    max_retries_override,
+                )
+            finally:
+                self._semaphore.release()
+
         async with self._semaphore:
             return await self._generate_inner(
-                prompt, system, temperature, json_mode, timeout_override, model_override
+                prompt,
+                system,
+                temperature,
+                json_mode,
+                timeout_override,
+                model_override,
+                max_tokens_override,
+                max_retries_override,
             )
 
     async def _generate_inner(
@@ -265,6 +321,8 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
         json_mode: bool,
         timeout_override: Optional[int],
         model_override: Optional[str] = None,
+        max_tokens_override: Optional[int] = None,
+        max_retries_override: Optional[int] = None,
     ) -> LLMResponse:
         prompt = self._trim_prompt(prompt)
         if system:
@@ -272,20 +330,27 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
 
         use_model = model_override or self.model
 
+        # Qwen3 thinking modunu kapat -- yoksa <think>...</think> bloklari
+        # onlarca token harcatip yanitlari geciktirir
+        _disable_thinking = "qwen3" in use_model.lower() or "quenbot-qwen" in use_model.lower()
+
         payload = {
             "model": use_model,
             "prompt": prompt,
             "stream": False,
+            "keep_alive": os.getenv("QUENBOT_LLM_KEEP_ALIVE", "30m"),
             "options": {
                 "temperature": temperature,
                 "top_p": 0.85,
-                "top_k": 30,
-                "repeat_penalty": 1.15,
-                "num_predict": self.max_tokens,
-                "num_ctx": 8192,
-                "num_thread": 10,
+                "top_k": 40,
+                "repeat_penalty": 1.1,
+                "num_predict": int(max_tokens_override or self.max_tokens),
+                "num_ctx": self.num_ctx,
+                "num_thread": self.num_thread,
             },
         }
+        if _disable_thinking:
+            payload["think"] = False
 
         if system:
             payload["system"] = system
@@ -293,8 +358,9 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
             payload["format"] = "json"
 
         effective_timeout = timeout_override or self.timeout
+        effective_retries = self.max_retries if max_retries_override is None else max(0, int(max_retries_override))
 
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(effective_retries + 1):
             t0 = time.monotonic()
             try:
                 session = await self._get_session()
@@ -327,9 +393,9 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 logger.warning(
                     "LLM timeout (attempt %d/%d, %.0fms)",
-                    attempt + 1, self.max_retries + 1, elapsed_ms
+                    attempt + 1, effective_retries + 1, elapsed_ms
                 )
-                if attempt == self.max_retries:
+                if attempt == effective_retries:
                     self._total_errors += 1
                     return LLMResponse(
                         text="",
@@ -343,9 +409,9 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 logger.error(
                     "LLM error (attempt %d/%d): %s",
-                    attempt + 1, self.max_retries + 1, str(e)
+                    attempt + 1, effective_retries + 1, str(e)
                 )
-                if attempt == self.max_retries:
+                if attempt == effective_retries:
                     self._total_errors += 1
                     return LLMResponse(
                         text="",
@@ -400,6 +466,9 @@ Be concise. Focus on actionable insights. Never hallucinate data.\"\"\"
             "avg_latency_ms": round(avg_latency, 1),
             "model": self.model,
             "base_url": self.base_url,
+            "concurrency": DEFAULT_CONCURRENCY,
+            "num_thread": DEFAULT_NUM_THREAD,
+            "num_ctx": DEFAULT_NUM_CTX,
         }
 
 

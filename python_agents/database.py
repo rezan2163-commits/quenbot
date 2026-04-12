@@ -525,6 +525,41 @@ class Database:
             """)
             return [dict(row) for row in rows]
 
+    async def get_signal_pipeline_snapshot(self, hours: int = 6) -> Dict[str, Any]:
+        """Return recent signal flow summary for chat/system narration."""
+        hrs = max(1, min(int(hours), 168))
+        cutoff = datetime.utcnow() - timedelta(hours=hrs)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*)::int AS total,
+                    COUNT(CASE WHEN status = 'pending' THEN 1 END)::int AS pending,
+                    COUNT(CASE WHEN status = 'processed' THEN 1 END)::int AS processed,
+                    COUNT(CASE WHEN status LIKE 'risk_%' THEN 1 END)::int AS risk_rejected
+                FROM signals
+                WHERE timestamp >= $1
+                """,
+                cutoff,
+            )
+            latest = await conn.fetchrow(
+                """
+                SELECT symbol, signal_type, status, confidence::double precision AS confidence, timestamp
+                FROM signals
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """
+            )
+
+        return {
+            "window_hours": hrs,
+            "total": int(row["total"] or 0),
+            "pending": int(row["pending"] or 0),
+            "processed": int(row["processed"] or 0),
+            "risk_rejected": int(row["risk_rejected"] or 0),
+            "latest": dict(latest) if latest else None,
+        }
+
     # Simulation operations
     async def insert_simulation(self, sim_data: Dict[str, Any]) -> int:
         """Insert a new simulation"""
@@ -654,8 +689,8 @@ class Database:
     async def get_dashboard_summary(self) -> Dict[str, Any]:
         """Get dashboard summary statistics"""
         async with self.pool.acquire() as conn:
-            # Total trades
-            total_trades = await conn.fetchval("SELECT COUNT(*) FROM trades")
+            # Raw exchange trade ticks (NOT strategy executions)
+            market_ticks_total = await conn.fetchval("SELECT COUNT(*) FROM trades")
 
             # Recent movements (last 24h)
             cutoff = datetime.utcnow() - timedelta(hours=24)
@@ -678,12 +713,34 @@ class Database:
                 SELECT COALESCE(SUM(pnl), 0) FROM simulations WHERE status = 'closed'
             """)
 
+            # Strategy execution metrics (paper-trade lifecycle)
+            strategy_closed_trades = await conn.fetchval("""
+                SELECT COUNT(*) FROM simulations WHERE status = 'closed'
+            """)
+            strategy_wins = await conn.fetchval("""
+                SELECT COUNT(*) FROM simulations WHERE status = 'closed' AND pnl > 0
+            """)
+            win_rate = (float(strategy_wins) / float(strategy_closed_trades)) if strategy_closed_trades else 0.0
+
+            # Recent signal risk rejections (last 24h) for health narration
+            cutoff = datetime.utcnow() - timedelta(hours=24)
+            risk_rejected_24h = await conn.fetchval("""
+                SELECT COUNT(*) FROM signals
+                WHERE timestamp >= $1 AND status LIKE 'risk_%'
+            """, cutoff)
+
             return {
-                "total_trades": total_trades,
+                # Keep backward-compatible key for callers, but now map to strategy trades.
+                "total_trades": int(strategy_closed_trades or 0),
+                "strategy_closed_trades": int(strategy_closed_trades or 0),
+                "strategy_wins": int(strategy_wins or 0),
+                "win_rate": float(win_rate),
                 "recent_movements_24h": recent_movements,
                 "active_signals": active_signals,
                 "open_simulations": open_sims,
-                "total_pnl": float(total_pnl) if total_pnl else 0
+                "total_pnl": float(total_pnl) if total_pnl else 0,
+                "market_ticks_total": int(market_ticks_total or 0),
+                "risk_rejected_24h": int(risk_rejected_24h or 0),
             }
 
     async def get_closed_simulations(self, limit: int = 100) -> List[Dict[str, Any]]:

@@ -12,6 +12,18 @@ from dataclasses import dataclass
 logger = logging.getLogger("quenbot.agent_instructions")
 
 
+CORE_STRATEGY_CONTRACT = """QUENBOT CORE STRATEGY CONTRACT:
+- Scout: spot+futures trade akisini toplar, anomaliyi sayisal olarak isaretler.
+- Strategist: 15m/1h coklu timeframe + pattern/similarity + momentum ile sinyal uretir.
+- RiskManager: confidence, drawdown, cooldown ve pozisyon limitlerini uygular.
+- GhostSimulator: paper trade acip TP/SL sonucu geri besler.
+- Auditor: basarisizligi RCA ile etiketler ve correction note uretir.
+- Brain: pattern kutuphanesi + similarity + regime ile ogrenir.
+- Karar hiyerarsisi: veri -> sinyal -> risk gate -> simulasyon -> audit -> ogrenme.
+- Veri yetersizse bunu acikca belirt; sinyal yok demeden once risk_red / pending / processed sayilarini dikkate al.
+"""
+
+
 @dataclass
 class AgentInstruction:
     """Defines a complete instruction set for an agent."""
@@ -238,6 +250,9 @@ def get_system_prompt(agent_name: str, directives: Optional[str] = None) -> str:
         return ""
 
     parts = []
+
+    # 0. Core strategy contract (always-on)
+    parts.append(CORE_STRATEGY_CONTRACT)
 
     # 1. Master directives (from dashboard "Permanent Directives")
     if directives and directives.strip():
