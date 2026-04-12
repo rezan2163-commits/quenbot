@@ -121,19 +121,19 @@ export interface TradeTimeline {
 
 export function useAgents() {
   return useSWR<AgentsResponse>(`${API}/api/agents/status`, fetcher, {
-    refreshInterval: 5000,
+    refreshInterval: 15000,
   });
 }
 
 export function useSystemSummary() {
   return useSWR<SystemSummary>(`${API}/api/system/summary`, fetcher, {
-    refreshInterval: 5000,
+    refreshInterval: 15000,
   });
 }
 
 export function useDashboardSummary() {
   return useSWR<DashboardSummary>(`${API}/api/dashboard/summary`, fetcher, {
-    refreshInterval: 5000,
+    refreshInterval: 15000,
   });
 }
 
@@ -159,7 +159,7 @@ export function usePriceHistory(symbol: string) {
 
 export function useLivePrices() {
   return useSWR<LivePrice[]>(`${API}/api/live/prices`, fetcher, {
-    refreshInterval: 3000,
+    refreshInterval: 10000,
   });
 }
 
@@ -177,7 +177,7 @@ export function useTradeTimeline() {
 
 export function useChatMessages() {
   return useSWR<ChatMessage[]>(`${API}/api/chat/messages`, fetcher, {
-    refreshInterval: 3000,
+    refreshInterval: 15000,
   });
 }
 
@@ -309,7 +309,7 @@ export function useStrategyEvents() {
 
 export function useAgentFlow() {
   return useSWR<AgentFlowData>(`${API}/api/agents/flow`, fetcher, {
-    refreshInterval: 5000,
+    refreshInterval: 15000,
   });
 }
 

@@ -71,7 +71,7 @@ module.exports = {
       instances: 1,
       autorestart: true,
       watch: false,
-      max_memory_restart: "512M",
+      max_memory_restart: "1G",
       error_file: "./logs/dashboard-error.log",
       out_file: "./logs/dashboard-out.log",
       merge_logs: true,
