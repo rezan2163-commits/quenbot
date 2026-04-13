@@ -535,9 +535,12 @@ class BrainModule:
         return dict(self._pattern_match_stats)
 
     def should_generate_signal(self, symbol: str, direction: str,
-                                confidence: float, min_return: float = 0.02) -> bool:
+                                confidence: float, min_return: float = 0.02,
+                                mode: str = 'PRODUCTION') -> bool:
         """Sinyal üretilmeli mi? Öğrenme verileriyle karar ver"""
-        if confidence < 0.5:
+        # Mode-aware minimum confidence: BOOTSTRAP/LEARNING use lower threshold
+        min_conf = 0.3 if mode in ('BOOTSTRAP', 'LEARNING') else 0.5
+        if confidence < min_conf:
             return False
 
         # Geçmiş benzer sinyallerin başarı oranını kontrol et

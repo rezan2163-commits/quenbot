@@ -78,6 +78,7 @@ class StrategistAgent:
             try:
                 await self._apply_correction_notes()
                 await self._analyze_strategies()
+                await self._indicator_based_signals()
                 await self._signature_matching()
                 await self._multi_timeframe_analysis()
                 await self._update_pattern_outcomes()
@@ -188,10 +189,11 @@ class StrategistAgent:
                                 direction = prediction['direction']
 
                                 # Mode-aware confidence threshold
-                                min_conf = 0.3 if (self.state_tracker and 
-                                    self.state_tracker.get_mode() in ('BOOTSTRAP', 'LEARNING')) else 0.6
+                                _cur_mode = self.state_tracker.get_mode() if self.state_tracker else 'PRODUCTION'
+                                min_conf = 0.3 if _cur_mode in ('BOOTSTRAP', 'LEARNING') else 0.6
                                 if (confidence >= min_conf and
-                                        self.brain.should_generate_signal(symbol, direction, confidence)):
+                                        self.brain.should_generate_signal(symbol, direction, confidence,
+                                                                          mode=_cur_mode)):
 
                                     # En iyi timeframe'i seç
                                     best_tf = None
@@ -201,7 +203,7 @@ class StrategistAgent:
                                             best_strength = tf_data['strength']
                                             best_tf = tf
 
-                                    if best_tf and abs(prediction['timeframes'].get(best_tf, {}).get('avg_change_pct', 0)) >= 0.02:
+                                    if best_tf and abs(prediction['timeframes'].get(best_tf, {}).get('avg_change_pct', 0)) >= 0.01:
                                         last_price = float(trades[-1]['price'])
                                         best_tf_change = abs(prediction['timeframes'][best_tf].get('avg_change_pct', 0.02))
                                         target_pct = max(best_tf_change, 0.02)
@@ -293,7 +295,7 @@ class StrategistAgent:
 
                                             if best_intel_tf:
                                                 itf_change = abs(intel_tfs[best_intel_tf].get('avg_change_pct', 0))
-                                                if itf_change >= 0.01:  # Minimum %1 beklenen hareket
+                                                if itf_change >= 0.005:  # Minimum %0.5 beklenen hareket
                                                     last_price = float(trades[-1]['price'])
                                                     signal_type = f'intel_{intel_dir}_{best_intel_tf}'
                                                     if self._can_emit_signal(symbol, market_type, intel_dir):
@@ -672,6 +674,198 @@ class StrategistAgent:
         finally:
             gc.collect()
             _malloc_trim()
+
+    def _count_indicator_confirmations(self, ind: Dict) -> tuple:
+        """
+        Count how many indicators confirm the same direction.
+        Returns: (direction, confirming_count, base_confidence)
+        agent_instructions.py rule: minimum 2 indicator confirmations required for signal.
+        """
+        bullish = 0
+        bearish = 0
+
+        # RSI signal: above 55 = bullish trend, below 45 = bearish trend
+        # (55/45 used instead of 70/30 to detect early trend direction, not extremes)
+        rsi_val = ind.get('rsi')
+        if rsi_val is not None:
+            if rsi_val > 55:
+                bullish += 1
+            elif rsi_val < 45:
+                bearish += 1
+
+        # MACD histogram signal: positive = bullish momentum, negative = bearish momentum
+        macd_data = ind.get('macd')
+        if macd_data and isinstance(macd_data, dict):
+            hist = macd_data.get('histogram', 0)
+            if hist > 0:
+                bullish += 1
+            elif hist < 0:
+                bearish += 1
+
+        # Bollinger Bands %B signal
+        bb = ind.get('bollinger')
+        if bb and isinstance(bb, dict):
+            pct_b = bb.get('pct_b', 0.5)
+            if pct_b > 0.6:
+                bullish += 1
+            elif pct_b < 0.4:
+                bearish += 1
+
+        # Overall trend summary signal
+        trend_summary = ind.get('trend_summary', {})
+        if isinstance(trend_summary, dict):
+            trend_dir = trend_summary.get('trend', 'neutral')
+            if trend_dir == 'bullish':
+                bullish += 1
+            elif trend_dir == 'bearish':
+                bearish += 1
+
+        # OBV confirmation signal: only count explicit bullish/bearish, not neutral
+        obv_data = ind.get('obv')
+        if obv_data and isinstance(obv_data, dict):
+            obv_trend = obv_data.get('trend')
+            if obv_trend == 'bullish':
+                bullish += 1
+            elif obv_trend == 'bearish':
+                bearish += 1
+
+        if bullish >= 2 and bullish > bearish:
+            base_conf = min(0.3 + bullish * 0.08, 0.85)
+            return 'long', bullish, base_conf
+        elif bearish >= 2 and bearish > bullish:
+            base_conf = min(0.3 + bearish * 0.08, 0.85)
+            return 'short', bearish, base_conf
+
+        return None, 0, 0.0
+
+    def _get_regime_multiplier(self, regime: str) -> Dict[str, float]:
+        """
+        Return confidence multipliers per market regime per agent_instructions.py:
+        TRENDING_UP: Long +15%, Short -20%
+        TRENDING_DOWN: Short +15%, Long -20%
+        RANGING: All signals -10%
+        VOLATILE: All signals -25%
+        QUIET: All signals -15%
+        """
+        multipliers = {
+            'TRENDING_UP':   {'long': 1.15, 'short': 0.80},
+            'TRENDING_DOWN': {'long': 0.80, 'short': 1.15},
+            'RANGING':       {'long': 0.90, 'short': 0.90},
+            'VOLATILE':      {'long': 0.75, 'short': 0.75},
+            'QUIET':         {'long': 0.85, 'short': 0.85},
+            'UNKNOWN':       {'long': 1.00, 'short': 1.00},
+        }
+        return multipliers.get(regime, {'long': 1.0, 'short': 1.0})
+
+    async def _indicator_based_signals(self):
+        """
+        Technical indicator-based signal generation.
+
+        Implements agent_instructions.py rules:
+        - Minimum 2 indicator confirmations required (RSI, MACD, BB, OBV, trend)
+        - Market regime confidence multiplier applied (TRENDING/RANGING/VOLATILE/QUIET)
+        - No signals during low volume periods (< 30% of average volume)
+        - Works in all modes (BOOTSTRAP through PRODUCTION)
+        """
+        try:
+            watchlist = await self._get_watchlist()
+            mode = self.state_tracker.get_mode() if self.state_tracker else 'PRODUCTION'
+            min_conf = 0.25 if mode in ('BOOTSTRAP', 'LEARNING') else 0.35
+
+            for market_type in Config.MARKET_TYPES:
+                for symbol in watchlist:
+                    try:
+                        trades = await self.db.get_recent_trades(
+                            symbol, limit=100, market_type=market_type)
+                        if len(trades) < 30:
+                            continue
+
+                        prices = np.array(
+                            [float(row['price']) for row in reversed(trades)],
+                            dtype=np.float64)
+                        volumes = np.array(
+                            [float(row['quantity']) * float(row['price'])
+                             for row in reversed(trades)],
+                            dtype=np.float64)
+
+                        # Hacim filtresi: son 5 periyot ortalaması < son 20 periyot ortalamasının %30'u ise geç
+                        if volumes.size >= 20:
+                            avg_vol = float(np.mean(volumes[-20:]))
+                            recent_vol = float(np.mean(volumes[-5:])) if volumes.size >= 5 else float(volumes[-1])
+                            if avg_vol > 0 and recent_vol < avg_vol * 0.30:
+                                logger.debug(f"[{market_type}] {symbol}: low volume, signal generation skipped")
+                                continue
+
+                        ind = compute_all_indicators(prices, volumes=volumes)
+                        if not isinstance(ind, dict):
+                            continue
+
+                        # Piyasa rejimi tespiti
+                        regime_result = MarketRegimeDetector.detect(ind)
+                        regime_name = regime_result.get('regime', 'UNKNOWN')
+
+                        # QUIET rejimde: frekansı azalt — yalnızca yüksek güvende sinyal üret
+                        quiet_mode_min_conf = 0.60
+
+                        # İndikatör teyit sayısını hesapla
+                        direction, confirming_count, base_conf = self._count_indicator_confirmations(ind)
+
+                        if confirming_count < 2 or direction is None:
+                            continue
+
+                        # Rejim çarpanını uygula
+                        regime_mult = self._get_regime_multiplier(regime_name)
+                        confidence = float(base_conf * regime_mult.get(direction, 1.0))
+                        confidence = max(0.10, min(0.95, confidence))
+
+                        # Minimum güven eşiği kontrolü
+                        effective_min_conf = max(min_conf, quiet_mode_min_conf) if regime_name == 'QUIET' else min_conf
+                        if confidence < effective_min_conf:
+                            continue
+
+                        last_price = float(prices[-1])
+                        atr_ratio = float(ind.get('atr_ratio') or 0.02)
+                        # Direktif: stop-loss = ATR × 1.5 → R/R 1:1.5 için hedef = ATR × 2.25
+                        target_pct = max(atr_ratio * 2.25, 0.02)
+
+                        if self._can_emit_signal(symbol, market_type, direction):
+                            signal_payload = self._build_signal_payload(
+                                market_type=market_type,
+                                symbol=symbol,
+                                signal_type=f'indicator_{direction}',
+                                direction=direction,
+                                confidence=confidence,
+                                entry_price=last_price,
+                                target_pct=target_pct,
+                                eta_minutes=30,
+                                metadata={
+                                    'confirming_indicators': confirming_count,
+                                    'regime': regime_name,
+                                    'regime_multiplier': float(regime_mult.get(direction, 1.0)),
+                                    'rsi': float(ind['rsi']) if ind.get('rsi') is not None else None,
+                                    'macd_histogram': float(ind['macd']['histogram']) if ind.get('macd') else None,
+                                    'trend': ind.get('trend_summary', {}).get('trend', 'neutral'),
+                                    'trend_strength': float(
+                                        ind.get('trend_summary', {}).get('strength', 0)),
+                                    'atr_ratio': float(atr_ratio),
+                                    'bollinger_pct_b': float(ind['bollinger']['pct_b'])
+                                        if ind.get('bollinger') else None,
+                                    'sample_count': len(prices),
+                                },
+                            )
+                            await self.db.insert_signal(signal_payload)
+                            self.signals_generated += 1
+                            logger.info(
+                                f"📊 Indicator signal [{market_type}] {symbol} {direction} "
+                                f"conf={confidence:.2f} indicators={confirming_count} regime={regime_name}"
+                            )
+                    except Exception as e:
+                        logger.error(f"Indicator signal error {symbol} ({market_type}): {e}")
+                        continue
+
+            gc.collect()
+        except Exception as e:
+            logger.error(f"Indicator signals global error: {e}")
 
     async def _apply_correction_notes(self):
         """Read pending correction notes from RCA and adjust thresholds."""
