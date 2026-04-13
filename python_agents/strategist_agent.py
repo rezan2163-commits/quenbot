@@ -302,8 +302,6 @@ class StrategistAgent:
                                     if intel_result and (intel_result.get('direction') or intel_result.get('match_count', 0) > 0) and intel_result.get('confidence', 0) > 0:
                                         intel_conf = intel_result['confidence']
                                         intel_dir = intel_result.get('direction')
-                                        if not intel_dir:
-                                            intel_dir = None
                                         regime = intel_result.get('regime', {})
                                         regime_name = regime.get('regime', 'UNKNOWN') if isinstance(regime, dict) else 'UNKNOWN'
 

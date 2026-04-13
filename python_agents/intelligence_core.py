@@ -328,6 +328,9 @@ class InferenceEngine:
 
     TIMEFRAMES = ('15m', '1h', '4h', '1d')
 
+    # Conservative upper bound for confidence when no outcome data exists yet
+    MAX_FALLBACK_CONFIDENCE = 0.45
+
     def infer(self, matches: List[Tuple[Any, float]],
               regime: Dict[str, Any],
               signal_type_scores: Optional[Dict] = None) -> Dict[str, Any]:
@@ -386,7 +389,7 @@ class InferenceEngine:
                     avg_sim = sum(s for _, s in matches) / len(matches)
                     top3_sim = sum(s for _, s in matches[:3]) / min(len(matches), 3)
                     # Outcome verisi olmadığı için muhafazakâr güven
-                    fallback_conf = min(avg_sim * 0.5, 0.45)
+                    fallback_conf = min(avg_sim * 0.5, self.MAX_FALLBACK_CONFIDENCE)
                     return {
                         'direction': fallback_dir,
                         'confidence': fallback_conf,
