@@ -50,15 +50,27 @@ export default function BottomTerminal() {
     [paused]
   );
 
-  // Price feed
+  // Price feed - show unique symbols (latest price per symbol)
   useEffect(() => {
     if (!prices?.length) return;
-    const key = prices.map((p) => `${p.symbol}:${p.price}`).join(",");
+    
+    // Group by symbol, keep latest price per symbol
+    const symbolMap = new Map<string, typeof prices[0]>();
+    for (const p of prices) {
+      const existing = symbolMap.get(p.symbol);
+      if (!existing || new Date(p.timestamp) > new Date(existing.timestamp)) {
+        symbolMap.set(p.symbol, p);
+      }
+    }
+    
+    const uniquePrices = Array.from(symbolMap.values());
+    const key = uniquePrices.map((p) => `${p.symbol}:${p.price}`).join(",");
     if (key === prevPricesRef.current) return;
     prevPricesRef.current = key;
 
-    for (const p of prices.slice(0, 6)) {
-      addLog("info", `${p.symbol} $${toNumber(p.price).toLocaleString()} [${p.exchange}]`);
+    // Show all unique coins (each one once per update cycle)
+    for (const p of uniquePrices) {
+      addLog("info", `${p.symbol} $${toNumber(p.price_text || p.price).toLocaleString()} [${p.exchange}]`);
     }
   }, [prices, addLog]);
 
