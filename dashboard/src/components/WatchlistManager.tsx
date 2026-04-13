@@ -45,16 +45,13 @@ export default function WatchlistManager() {
     if (!clean) return "";
     if (aliasMap[clean]) return aliasMap[clean];
     if (clean.endsWith("USDT")) return clean;
-    return `${clean}USDT`;
+    return clean + "USDT";
   };
 
-  // Watchlist'teki unique semboller
   const watchedSymbols = new Set((watchlist || []).map((w) => w.symbol.toUpperCase()));
 
-  // Merge live prices with mover data for change_pct
   const moverMap = new Map(movers?.map((m) => [m.symbol, m]) || []);
 
-  // Group by symbol, pick latest price
   const symbolMap = new Map<string, { symbol: string; price: number; price_text: string; change_pct: number; exchange: string; market_type: string; ts: string }>();
   prices?.forEach((p) => {
     const existing = symbolMap.get(p.symbol);
@@ -72,10 +69,7 @@ export default function WatchlistManager() {
     }
   });
 
-  // Tüm fiyat verilerini göster
   const tickers = Array.from(symbolMap.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
-
-  // Öneri listesi için mevcut semboller
   const knownSymbols = Array.from(new Set((prices || []).map((p) => String(p.symbol || "").toUpperCase()))).filter(Boolean);
 
   const handleAdd = async () => {
@@ -87,11 +81,8 @@ export default function WatchlistManager() {
     setFeedback(null);
     try {
       await addWatchlistCoin(normalized, { exchange: "both", market_type: "both" });
-      await Promise.all([
-        mutateWatchlist(),
-        mutate(\`\${API}/api/live/prices\`),
-      ]);
-      setFeedback({ type: "success", msg: \`\${normalized} takibe eklendi ✓\` });
+      await Promise.all([mutateWatchlist(), mutate(API + "/api/live/prices")]);
+      setFeedback({ type: "success", msg: normalized + " takibe eklendi" });
       setSymbolInput("");
       setTimeout(() => setFeedback(null), 3000);
     } catch (err: any) {
@@ -107,14 +98,11 @@ export default function WatchlistManager() {
     setFeedback(null);
     try {
       await removeWatchlistCoin(symbol, { exchange: "all", market_type: "both" });
-      await Promise.all([
-        mutateWatchlist(),
-        mutate(\`\${API}/api/live/prices\`),
-      ]);
-      setFeedback({ type: "success", msg: \`\${symbol} takipten çıkarıldı\` });
+      await Promise.all([mutateWatchlist(), mutate(API + "/api/live/prices")]);
+      setFeedback({ type: "success", msg: symbol + " takipten cikarildi" });
       setTimeout(() => setFeedback(null), 3000);
     } catch (err: any) {
-      setFeedback({ type: "error", msg: err?.message || "Kaldırma başarısız" });
+      setFeedback({ type: "error", msg: err?.message || "Kaldirma basarisiz" });
     } finally {
       setRemoving(null);
     }
@@ -122,31 +110,25 @@ export default function WatchlistManager() {
 
   return (
     <div className="h-full flex flex-col bg-surface-card/30 overflow-hidden">
-      {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-surface-border">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-xs font-semibold text-gray-300 tracking-wide">CANLI PİYASA</span>
+          <span className="text-xs font-semibold text-gray-300 tracking-wide">CANLI PIYASA</span>
           <span className="text-[10px] text-gray-500">{watchedSymbols.size} coin</span>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowAdd((v) => !v)}
-            className={\`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] transition-colors \${
-              showAdd
-                ? "bg-bull/20 border-bull text-bull"
-                : "border-surface-border text-gray-300 hover:bg-white/[0.04]"
-            }\`}
+            className={"inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] transition-colors " + (showAdd ? "bg-bull/20 border-bull text-bull" : "border-surface-border text-gray-300 hover:bg-white/[0.04]")}
             title="Coin ekle"
           >
             <Plus size={10} /> Ekle
           </button>
-          <span className={\`flex items-center gap-1 text-[10px] \${connected ? "text-bull" : "text-red-400"}\`}>
+          <span className={"flex items-center gap-1 text-[10px] " + (connected ? "text-bull" : "text-red-400")}>
             {connected ? <Wifi size={10} /> : <WifiOff size={10} />}
           </span>
         </div>
       </div>
 
-      {/* Add Coin Input */}
       {showAdd && (
         <div className="px-3 py-2 border-b border-surface-border bg-surface/50">
           <div className="flex items-center gap-2">
@@ -154,16 +136,12 @@ export default function WatchlistManager() {
               value={symbolInput}
               onChange={(e) => setSymbolInput(e.target.value)}
               list="watchlist-known-symbols"
-              placeholder="Örn: BTC, bitcoin veya BTCUSDT"
+              placeholder="Orn: BTC, bitcoin veya BTCUSDT"
               className="flex-1 rounded border border-surface-border bg-surface px-2 py-1 text-xs text-gray-200 placeholder:text-gray-600 focus:outline-none focus:border-accent/50"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void handleAdd();
-              }}
+              onKeyDown={(e) => { if (e.key === "Enter") void handleAdd(); }}
             />
             <datalist id="watchlist-known-symbols">
-              {knownSymbols.slice(0, 80).map((s) => (
-                <option key={s} value={s.replace("USDT", "")} />
-              ))}
+              {knownSymbols.slice(0, 80).map((s) => <option key={s} value={s.replace("USDT", "")} />)}
             </datalist>
             <button
               onClick={() => void handleAdd()}
@@ -174,31 +152,22 @@ export default function WatchlistManager() {
               {adding ? "..." : "Ekle"}
             </button>
           </div>
-          <p className="mt-1 text-[10px] text-gray-500">
-            Spot + Futures & Binance + Bybit akışına eklenir.
-          </p>
+          <p className="mt-1 text-[10px] text-gray-500">Spot + Futures & Binance + Bybit akisina eklenir.</p>
         </div>
       )}
 
-      {/* Feedback */}
       {feedback && (
-        <div className={\`px-3 py-1.5 border-b border-surface-border text-[10px] \${
-          feedback.type === "success" ? "text-bull bg-bull/5" : "text-bear bg-bear/5"
-        }\`}>
+        <div className={"px-3 py-1.5 border-b border-surface-border text-[10px] " + (feedback.type === "success" ? "text-bull bg-bull/5" : "text-bear bg-bear/5")}>
           {feedback.msg}
         </div>
       )}
 
-      {/* Tickers */}
       <div className="flex-1 overflow-y-auto custom-scrollbar">
         {tickers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-gray-500 text-xs gap-2 p-4">
-            <p>Henüz coin eklenmedi</p>
-            <button
-              onClick={() => setShowAdd(true)}
-              className="px-3 py-1.5 rounded bg-accent text-white text-[10px]"
-            >
-              İlk coini ekle
+            <p>Henuz coin eklenmedi</p>
+            <button onClick={() => setShowAdd(true)} className="px-3 py-1.5 rounded bg-accent text-white text-[10px]">
+              Ilk coini ekle
             </button>
           </div>
         ) : (
@@ -206,40 +175,27 @@ export default function WatchlistManager() {
             {tickers.map((t) => {
               const up = toNumber(t.change_pct) >= 0;
               const base = t.symbol.replace("USDT", "");
-
               return (
-                <div 
-                  key={t.symbol}
-                  className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2 px-3 py-2 hover:bg-white/[0.02] transition-colors group"
-                >
-                  {/* Symbol */}
+                <div key={t.symbol} className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2 px-3 py-2 hover:bg-white/[0.02] transition-colors group">
                   <div className="min-w-0">
                     <div className="text-xs font-semibold text-gray-100 tracking-wide leading-tight">{base}</div>
-                    <div className="text-[10px] text-gray-500 leading-tight">{t.exchange} · {t.market_type}</div>
+                    <div className="text-[10px] text-gray-500 leading-tight">{t.exchange} - {t.market_type}</div>
                   </div>
-
-                  {/* Price & Change */}
                   <div className="flex flex-col items-end gap-0.5">
-                    <span className="text-xs font-mono text-gray-200">\${t.price_text}</span>
-                    <span className={\`flex items-center gap-0.5 text-[10px] font-medium \${up ? "text-bull" : "text-bear"}\`}>
+                    <span className="text-xs font-mono text-gray-200">${t.price_text}</span>
+                    <span className={"flex items-center gap-0.5 text-[10px] font-medium " + (up ? "text-bull" : "text-bear")}>
                       {up ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
                       {up ? "+" : ""}{toNumber(t.change_pct).toFixed(2)}%
                     </span>
                   </div>
-
-                  {/* Remove button - always visible on hover */}
                   <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
                       onClick={() => void handleRemove(t.symbol)}
                       disabled={removing === t.symbol}
                       className="p-1 rounded hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors disabled:opacity-50"
-                      title="Takipten çıkar"
+                      title="Takipten cikar"
                     >
-                      {removing === t.symbol ? (
-                        <RefreshCw size={12} className="animate-spin" />
-                      ) : (
-                        <Trash2 size={12} />
-                      )}
+                      {removing === t.symbol ? <RefreshCw size={12} className="animate-spin" /> : <Trash2 size={12} />}
                     </button>
                   </div>
                 </div>
@@ -249,9 +205,8 @@ export default function WatchlistManager() {
         )}
       </div>
 
-      {/* Footer */}
       <div className="px-3 py-1.5 border-t border-surface-border bg-surface/30 text-[9px] text-gray-500 text-center">
-        {watchedSymbols.size} coin izleniyor · Her coinin üzerine gel, kaldır
+        {watchedSymbols.size} coin izleniyor - Her coinin uzerine gel, kaldir
       </div>
     </div>
   );
