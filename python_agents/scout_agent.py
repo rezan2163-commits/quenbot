@@ -60,28 +60,23 @@ class ScoutAgent:
             self.last_rest_fetch[symbol] = datetime.utcnow()
 
     async def _refresh_watchlist(self):
-        """Kullanıcı watchlist'ini DB'den yükle, yoksa config'den al"""
+        """Kullanıcı watchlist'ini DB'den yükle - sadece user_watchlist tablosu kullanılır"""
         try:
             user_wl = await self.db.get_user_watchlist()
-            default_wl = [s.upper() for s in Config.WATCHLIST]
             user_symbols = [str(w.get('symbol', '')).upper() for w in (user_wl or []) if w.get('symbol')]
-
-            # Never let a tiny user watchlist accidentally narrow live market coverage.
-            merged = sorted(set(default_wl + user_symbols))
-            self._active_watchlist = merged
-
-            if user_symbols:
-                logger.info(
-                    f"📋 Watchlist merged: default={len(default_wl)} + user={len(set(user_symbols))} "
-                    f"=> active={len(self._active_watchlist)}"
-                )
-            else:
-                logger.info(f"📋 Using default watchlist: {len(self._active_watchlist)} symbols")
-        except Exception:
-            self._active_watchlist = Config.WATCHLIST.copy()
+            
+            # Sadece user watchlist'teki coinleri izle
+            self._active_watchlist = sorted(set(user_symbols)) if user_symbols else []
+            
+            logger.info(f"📋 Active watchlist: {len(self._active_watchlist)} coins -> {self._active_watchlist[:10]}{'...' if len(self._active_watchlist) > 10 else ''}")
+        except Exception as e:
+            logger.error(f"Watchlist refresh error: {e}")
+            # Hata durumunda mevcut listeyi koru
+            if not self._active_watchlist:
+                self._active_watchlist = []
 
     def get_watchlist(self) -> List[str]:
-        return self._active_watchlist if self._active_watchlist else Config.WATCHLIST
+        return self._active_watchlist if self._active_watchlist else []
 
     async def start(self):
         """Start the scout agent."""

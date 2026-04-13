@@ -672,17 +672,6 @@ app.post("/api/chat/send", async (req, res) => {
 
 // ─── User Watchlist Endpoints ───
 
-// Default watchlist - sistemin varsayılan izlediği coinler
-const DEFAULT_WATCHLIST = [
-  "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-  "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "APTUSDT", "LINKUSDT",
-  "DOTUSDT", "SUIUSDT", "OPUSDT", "ARBUSDT"
-];
-
-app.get("/api/watchlist/defaults", async (req, res) => {
-  res.json({ symbols: DEFAULT_WATCHLIST });
-});
-
 app.get("/api/watchlist", async (req, res) => {
   try {
     const rows = await sql`
