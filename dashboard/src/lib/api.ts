@@ -111,6 +111,15 @@ export interface TopMover {
   timestamp: string;
 }
 
+export interface WatchlistItem {
+  id: number;
+  symbol: string;
+  exchange: string;
+  market_type: string;
+  active: boolean;
+  created_at: string;
+}
+
 export interface DashboardSummary {
   total_trades: number;
   active_signals: number;
@@ -186,6 +195,26 @@ export function useTopMovers() {
   return useSWR<TopMover[]>(`${API}/api/analytics/top-movers`, fetcher, {
     refreshInterval: 10000,
   });
+}
+
+export function useWatchlist() {
+  return useSWR<WatchlistItem[]>(`${API}/api/watchlist`, fetcher, {
+    refreshInterval: 15000,
+  });
+}
+
+export async function addWatchlistCoin(symbol: string, opts?: { exchange?: string; market_type?: string }) {
+  const res = await fetch(`${API}/api/watchlist/add`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol,
+      exchange: opts?.exchange || "both",
+      market_type: opts?.market_type || "both",
+    }),
+  });
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  return res.json();
 }
 
 export function useTradeTimeline() {

@@ -364,6 +364,10 @@ app.get("/api/signals", async (req, res) => {
         COALESCE(metadata->>'exchange', 'binance') AS exchange,
         market_type
       FROM signals
+      WHERE NOT (
+        (status = 'failed' OR status LIKE 'risk_%')
+        AND timestamp < NOW() - INTERVAL '24 hours'
+      )
       ORDER BY timestamp DESC
       LIMIT 100
     `;
@@ -686,20 +690,38 @@ app.post("/api/watchlist/add", async (req, res) => {
     if (!symbol || typeof symbol !== "string") {
       return res.status(400).json({ error: "Symbol is required" });
     }
-    const sym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20);
-    const exch = (exchange || "all").toLowerCase().slice(0, 50);
-    const mt = (market_type || "spot").toLowerCase();
-    if (!["spot", "futures"].includes(mt)) {
-      return res.status(400).json({ error: "market_type must be 'spot' or 'futures'" });
+    let sym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20);
+    if (sym && !sym.endsWith("USDT")) sym = `${sym}USDT`;
+
+    const exchRaw = (exchange || "all").toLowerCase().slice(0, 50);
+    const mtRaw = (market_type || "spot").toLowerCase();
+
+    if (!["spot", "futures", "both"].includes(mtRaw)) {
+      return res.status(400).json({ error: "market_type must be 'spot', 'futures' or 'both'" });
     }
-    const [row] = await sql`
-      INSERT INTO user_watchlist (symbol, exchange, market_type)
-      VALUES (${sym}, ${exch}, ${mt})
-      ON CONFLICT (symbol, exchange, market_type)
-      DO UPDATE SET active = TRUE
-      RETURNING id, symbol, exchange, market_type, active
-    `;
-    res.json(row);
+    if (!["all", "binance", "bybit", "both"].includes(exchRaw)) {
+      return res.status(400).json({ error: "exchange must be 'all', 'binance', 'bybit' or 'both'" });
+    }
+
+    const exchanges = exchRaw === "both" ? ["binance", "bybit"] : [exchRaw];
+    const markets = mtRaw === "both" ? ["spot", "futures"] : [mtRaw];
+    const addedRows: any[] = [];
+
+    for (const exch of exchanges) {
+      for (const mt of markets) {
+        const [row] = await sql`
+          INSERT INTO user_watchlist (symbol, exchange, market_type)
+          VALUES (${sym}, ${exch}, ${mt})
+          ON CONFLICT (symbol, exchange, market_type)
+          DO UPDATE SET active = TRUE
+          RETURNING id, symbol, exchange, market_type, active
+        `;
+        if (row) addedRows.push(row);
+      }
+    }
+
+    const first = addedRows[0] || { symbol: sym, exchange: exchRaw, market_type: mtRaw, active: true };
+    res.json({ success: true, ...first, entries: addedRows });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -709,14 +731,23 @@ app.post("/api/watchlist/remove", async (req, res) => {
   try {
     const { symbol, exchange, market_type } = req.body;
     if (!symbol) return res.status(400).json({ error: "Symbol is required" });
-    const sym = symbol.toUpperCase();
-    const exch = (exchange || "all").toLowerCase();
-    const mt = (market_type || "spot").toLowerCase();
-    await sql`
-      UPDATE user_watchlist SET active = FALSE
-      WHERE symbol = ${sym} AND exchange = ${exch} AND market_type = ${mt}
-    `;
-    res.json({ success: true });
+    let sym = String(symbol).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20);
+    if (sym && !sym.endsWith("USDT")) sym = `${sym}USDT`;
+    const exchRaw = (exchange || "all").toLowerCase();
+    const mtRaw = (market_type || "spot").toLowerCase();
+
+    const exchanges = exchRaw === "both" ? ["binance", "bybit"] : [exchRaw];
+    const markets = mtRaw === "both" ? ["spot", "futures"] : [mtRaw];
+
+    for (const exch of exchanges) {
+      for (const mt of markets) {
+        await sql`
+          UPDATE user_watchlist SET active = FALSE
+          WHERE symbol = ${sym} AND exchange = ${exch} AND market_type = ${mt}
+        `;
+      }
+    }
+    res.json({ success: true, symbol: sym, exchange: exchRaw, market_type: mtRaw });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -934,7 +965,11 @@ app.get("/api/signals/history", async (req, res) => {
           END, 0.02
         ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
-        FROM signals WHERE status = ${status} AND symbol = ${symbol} ORDER BY timestamp DESC LIMIT ${limit}`;
+        FROM signals
+        WHERE status = ${status}
+          AND symbol = ${symbol}
+          AND NOT ((status = 'failed' OR status LIKE 'risk_%') AND timestamp < NOW() - INTERVAL '24 hours')
+        ORDER BY timestamp DESC LIMIT ${limit}`;
     } else if (status) {
       rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
         COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
@@ -948,7 +983,10 @@ app.get("/api/signals/history", async (req, res) => {
           END, 0.02
         ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
-        FROM signals WHERE status = ${status} ORDER BY timestamp DESC LIMIT ${limit}`;
+        FROM signals
+        WHERE status = ${status}
+          AND NOT ((status = 'failed' OR status LIKE 'risk_%') AND timestamp < NOW() - INTERVAL '24 hours')
+        ORDER BY timestamp DESC LIMIT ${limit}`;
     } else if (symbol) {
       rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
         COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
@@ -962,7 +1000,10 @@ app.get("/api/signals/history", async (req, res) => {
           END, 0.02
         ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
-        FROM signals WHERE symbol = ${symbol} ORDER BY timestamp DESC LIMIT ${limit}`;
+        FROM signals
+        WHERE symbol = ${symbol}
+          AND NOT ((status = 'failed' OR status LIKE 'risk_%') AND timestamp < NOW() - INTERVAL '24 hours')
+        ORDER BY timestamp DESC LIMIT ${limit}`;
     } else {
       rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
         COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
@@ -976,7 +1017,9 @@ app.get("/api/signals/history", async (req, res) => {
           END, 0.02
         ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
-        FROM signals ORDER BY timestamp DESC LIMIT ${limit}`;
+        FROM signals
+        WHERE NOT ((status = 'failed' OR status LIKE 'risk_%') AND timestamp < NOW() - INTERVAL '24 hours')
+        ORDER BY timestamp DESC LIMIT ${limit}`;
     }
     res.json(rows);
   } catch (error) {
