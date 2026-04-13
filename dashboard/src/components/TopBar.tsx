@@ -1,14 +1,39 @@
 "use client";
 
-import { useDashboardSummary, useTopMovers } from "@/lib/api";
+import { useState } from "react";
+import { mutate } from "swr";
+import { addWatchlistCoin, useDashboardSummary, useTopMovers } from "@/lib/api";
 import { TrendingUp, TrendingDown, BarChart3, Target, Activity } from "lucide-react";
+
+const API = process.env.NEXT_PUBLIC_API_URL || "";
 
 export default function TopBar() {
   const { data: summary } = useDashboardSummary();
   const { data: movers } = useTopMovers();
+  const [symbolInput, setSymbolInput] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [message, setMessage] = useState("");
   const toNumber = (value: unknown, fallback = 0) => {
     const n = Number(value);
     return Number.isFinite(n) ? n : fallback;
+  };
+
+  const handleAddCoin = async () => {
+    const raw = symbolInput.trim().toUpperCase();
+    if (!raw || adding) return;
+    setAdding(true);
+    setMessage("");
+    try {
+      await addWatchlistCoin(raw, { exchange: "both", market_type: "both" });
+      await Promise.all([mutate(`${API}/api/watchlist`), mutate(`${API}/api/live/prices`)]);
+      const normalized = raw.endsWith("USDT") ? raw : `${raw}USDT`;
+      setMessage(`${normalized} eklendi`);
+      setSymbolInput("");
+    } catch {
+      setMessage("Eklenemedi");
+    } finally {
+      setAdding(false);
+    }
   };
 
   return (
@@ -59,6 +84,30 @@ export default function TopBar() {
             </span>
           </div>
         ))}
+      </div>
+
+      {/* Always-visible coin add */}
+      <div className="w-px h-6 bg-surface-border flex-shrink-0" />
+      <div className="flex items-center gap-2 min-w-[260px]">
+        <span className="text-[10px] text-gray-500 uppercase">Coin Ekle</span>
+        <input
+          value={symbolInput}
+          onChange={(e) => setSymbolInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void handleAddCoin();
+          }}
+          placeholder="BTC veya BTCUSDT"
+          className="h-7 w-[130px] rounded border border-surface-border bg-surface px-2 text-xs text-gray-200 placeholder:text-gray-600 focus:outline-none"
+        />
+        <button
+          onClick={() => void handleAddCoin()}
+          disabled={adding || !symbolInput.trim()}
+          className="h-7 rounded bg-accent px-2.5 text-[11px] font-medium text-white disabled:opacity-50"
+          title="Spot + Futures, Binance + Bybit"
+        >
+          {adding ? "Ekleniyor" : "Ekle"}
+        </button>
+        {message && <span className="text-[10px] text-gray-400 whitespace-nowrap">{message}</span>}
       </div>
     </div>
   );
