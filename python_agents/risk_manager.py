@@ -5,6 +5,7 @@ Her signal, RiskManager'dan geçmeden simülasyona dönüşemez.
 Drawdown, günlük limit, consecutive loss, cooldown, korelasyon kontrolü.
 """
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, Optional
 
@@ -93,10 +94,13 @@ class RiskManager:
 
     def _check_bootstrap(self, signal: Dict, state: Dict) -> Tuple[bool, str]:
         """Bootstrap modda basit kontroller"""
+        bootstrap_max_open = int(
+            os.getenv("QUENBOT_BOOTSTRAP_MAX_OPEN_POSITIONS", str(max(self.MAX_OPEN_POSITIONS, 20)))
+        )
         if state['daily_trade_count'] >= self.MAX_DAILY_TRADES * 2:
             return False, "Bootstrap daily limit"
-        if len(state.get('active_symbols', [])) >= self.MAX_OPEN_POSITIONS:
-            return False, "Bootstrap max positions"
+        if len(state.get('active_symbols', [])) >= bootstrap_max_open:
+            return False, f"Bootstrap max positions ({bootstrap_max_open})"
         symbol = signal.get('symbol', '')
         if symbol in state.get('active_symbols', []):
             return False, f"Already in {symbol}"
@@ -115,19 +119,23 @@ class RiskManager:
     def _is_stale_drawdown_lock(self, state: Dict[str, Any]) -> bool:
         """
         Detect legacy/corrupted drawdown states that can freeze the system forever.
-        If there is no active position and no today's trading loss activity,
-        lifetime drawdown should not block fresh paper-signal intake.
         """
         active_positions = len(state.get('active_symbols', []))
         total_trades = int(state.get('total_trades', 0) or 0)
         current_drawdown = float(state.get('current_drawdown', 0) or 0)
+        cumulative_pnl = float(state.get('cumulative_pnl', 0) or 0)
 
-        # Require clearly stale profile: extreme DD (legacy corruption), no active positions.
-        return (
-            total_trades > 0
-            and current_drawdown > abs(self.MAX_DRAWDOWN_PCT) * 20
-            and active_positions == 0
-        )
+        # Corrupted: no PnL history but large drawdown
+        if cumulative_pnl == 0 and current_drawdown > 5:
+            return True
+
+        # No active positions + extreme DD = stale lock
+        if (total_trades > 0
+                and current_drawdown > abs(self.MAX_DRAWDOWN_PCT) * 3
+                and active_positions == 0):
+            return True
+
+        return False
 
     def calculate_position_size(self, confidence: float, atr_ratio: float = 0.02,
                                  balance: float = 10000.0) -> float:

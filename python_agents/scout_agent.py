@@ -35,7 +35,7 @@ MOVEMENT_TIMEFRAMES = {
 }
 
 # Minimum change to capture a historical signature
-SIGNATURE_THRESHOLD = 0.02  # 2%
+SIGNATURE_THRESHOLD = 0.005  # 0.5%
 
 class ScoutAgent:
     def __init__(self, db: Database, brain=None):
@@ -63,11 +63,19 @@ class ScoutAgent:
         """Kullanıcı watchlist'ini DB'den yükle, yoksa config'den al"""
         try:
             user_wl = await self.db.get_user_watchlist()
-            if user_wl:
-                self._active_watchlist = list(set(w['symbol'] for w in user_wl))
-                logger.info(f"📋 User watchlist loaded: {len(self._active_watchlist)} symbols")
+            default_wl = [s.upper() for s in Config.WATCHLIST]
+            user_symbols = [str(w.get('symbol', '')).upper() for w in (user_wl or []) if w.get('symbol')]
+
+            # Never let a tiny user watchlist accidentally narrow live market coverage.
+            merged = sorted(set(default_wl + user_symbols))
+            self._active_watchlist = merged
+
+            if user_symbols:
+                logger.info(
+                    f"📋 Watchlist merged: default={len(default_wl)} + user={len(set(user_symbols))} "
+                    f"=> active={len(self._active_watchlist)}"
+                )
             else:
-                self._active_watchlist = Config.WATCHLIST.copy()
                 logger.info(f"📋 Using default watchlist: {len(self._active_watchlist)} symbols")
         except Exception:
             self._active_watchlist = Config.WATCHLIST.copy()
@@ -405,7 +413,7 @@ class ScoutAgent:
         """Detect significant price movements across multiple timeframes (5m–1d)."""
         while self.running:
             try:
-                await asyncio.sleep(60)
+                await asyncio.sleep(15)
                 for market_type in Config.MARKET_TYPES:
                     for symbol in self.get_watchlist():
                         for tf_key, tf_minutes in MOVEMENT_TIMEFRAMES.items():

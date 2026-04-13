@@ -461,13 +461,13 @@ class BrainModule:
         }
 
         # ─── Ön filtre: minimum kalite ───
-        if similarity < 0.50:
+        if similarity < 0.35:
             self._pattern_match_stats['total_vetoed'] += 1
             return {
                 'symbol': symbol, 'approved': False,
                 'direction': direction, 'magnitude': magnitude,
                 'confidence': confidence,
-                'reasoning': f"Ön-filtre: Benzerlik eşik altı {similarity:.4f} < 0.50",
+                'reasoning': f"Ön-filtre: Benzerlik eşik altı {similarity:.4f} < 0.35",
             }
 
         # ─── Ön filtre: Brain öğrenme verisi ───
@@ -537,17 +537,19 @@ class BrainModule:
     def should_generate_signal(self, symbol: str, direction: str,
                                 confidence: float, min_return: float = 0.02) -> bool:
         """Sinyal üretilmeli mi? Öğrenme verileriyle karar ver"""
-        if confidence < 0.5:
+        if confidence < 0.3:
             return False
 
-        # Geçmiş benzer sinyallerin başarı oranını kontrol et
+        # Geçmiş benzer sinyallerin başarı oranını kontrol et — soft threshold
         for sig_type, stats in self.signal_type_scores.items():
-            if direction in sig_type and stats['total'] > 5:
+            if direction in sig_type and stats['total'] > 10:
                 accuracy = stats['correct'] / stats['total']
-                if accuracy < 0.3:
-                    logger.debug(f"Brain: Suppressing {direction} signal for {symbol} "
-                                  f"(historical accuracy {accuracy:.1%})")
-                    return False
+                if accuracy < 0.2:
+                    logger.debug(f"Brain: Low accuracy {direction} ({accuracy:.1%}) "
+                                  f"for {symbol}, reducing confidence")
+                    confidence *= 0.5
+                    if confidence < 0.15:
+                        return False
         return True
 
     def get_brain_status(self) -> Dict[str, Any]:

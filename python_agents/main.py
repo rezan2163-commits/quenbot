@@ -99,6 +99,10 @@ class AgentOrchestrator:
         # Pattern-match LLM evaluation throttles to keep chat responsive
         self._pattern_eval_min_similarity = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_SIM", "0.50"))
         self._pattern_eval_min_interval = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_INTERVAL", "180"))
+        self._pattern_signal_min_conf = float(os.getenv("QUENBOT_PATTERN_SIGNAL_MIN_CONF", "0.62"))
+        self._pattern_signal_min_quality = float(os.getenv("QUENBOT_PATTERN_SIGNAL_MIN_QUALITY", "0.70"))
+        self._pattern_signal_window_seconds = int(os.getenv("QUENBOT_PATTERN_SIGNAL_WINDOW_SECONDS", "900"))
+        self._last_pattern_signal_window: dict[str, int] = {}
         self._last_pattern_eval_at: dict[str, float] = {}
         self._pattern_eval_semaphore = asyncio.Semaphore(1)
         # Thread pool for CPU-bound work (pattern matching, similarity calc)
@@ -127,6 +131,31 @@ class AgentOrchestrator:
         await self.db.connect()
         logger.info("✓ Database initialized")
         startup_report["components"]["database"] = {"status": "ok"}
+
+        # 1.1 Pattern signature bootstrap (only when table is empty)
+        try:
+            hs_count = await self.db.count_historical_signatures()
+            if hs_count == 0:
+                inserted = await self.db.backfill_historical_signatures_from_movements(
+                    min_abs_change=0.005,
+                    limit=800,
+                )
+                logger.info(f"🔁 Historical signature backfill: inserted={inserted}")
+                startup_report["components"]["historical_signature_backfill"] = {
+                    "status": "ok",
+                    "inserted": inserted,
+                }
+            else:
+                startup_report["components"]["historical_signature_backfill"] = {
+                    "status": "skip",
+                    "existing": hs_count,
+                }
+        except Exception as e:
+            logger.warning(f"Historical signature backfill skipped: {e}")
+            startup_report["components"]["historical_signature_backfill"] = {
+                "status": "error",
+                "reason": str(e),
+            }
 
         # 2. Brain
         self.brain = BrainModule(self.db)
@@ -476,18 +505,33 @@ class AgentOrchestrator:
                 if decision.get('approved'):
                     raw_direction = decision.get('direction', 'neutral')
                     trade_direction = 'long' if raw_direction in ('up', 'long') else 'short'
+                    conf = float(decision.get('confidence', 0) or 0)
+                    quality = min(max(conf * 0.7 + float(similarity) * 0.3, 0.0), 1.0)
+
+                    # Second quality layer: low-confidence/low-quality pattern signals are vetoed.
+                    if conf < self._pattern_signal_min_conf or quality < self._pattern_signal_min_quality:
+                        logger.info(
+                            f"🚫 Pattern quality veto: {symbol} conf={conf:.2f} quality={quality:.2f}"
+                        )
+                        return
+
+                    pattern_window = int(time.time() // max(self._pattern_signal_window_seconds, 1))
+                    if self._last_pattern_signal_window.get(symbol) == pattern_window:
+                        return
+                    self._last_pattern_signal_window[symbol] = pattern_window
 
                     # Brain onayladı → Sinyal üret ve pipeline'a gönder
                     signal_data = {
                         'symbol': symbol,
                         'direction': trade_direction,
                         'signal_type': f"pattern_match_{trade_direction}",
-                        'confidence': decision['confidence'],
+                        'confidence': conf,
                         'price': float(match_data.get('current_price') or 0),
                         'source': 'pattern_matcher',
                         'metadata': {
                             'raw_direction': raw_direction,
                             'similarity': similarity,
+                            'quality_score': quality,
                             'euclidean_distance': match_data.get('euclidean_distance'),
                             'predicted_magnitude': decision['magnitude'],
                             'match_count': match_data.get('match_count', 0),
@@ -589,17 +633,23 @@ class AgentOrchestrator:
         logger.info("🛑 Shutting down agent system...")
 
         try:
-            await self.scout.stop()
-            await self.strategist.stop()
-            await self.ghost_simulator.stop()
-            await self.auditor.stop()
-            await self.pattern_matcher.stop()
+            if self.scout:
+                await self.scout.stop()
+            if self.strategist:
+                await self.strategist.stop()
+            if self.ghost_simulator:
+                await self.ghost_simulator.stop()
+            if self.auditor:
+                await self.auditor.stop()
+            if self.pattern_matcher:
+                await self.pattern_matcher.stop()
             if self.task_queue:
                 await self.task_queue.stop()
             if self.llm_client:
                 await self.llm_client.close()
             self._thread_pool.shutdown(wait=False)
-            await self.db.disconnect()
+            if self.db:
+                await self.db.disconnect()
             logger.info("✓ All agents stopped")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
@@ -613,7 +663,7 @@ class AgentOrchestrator:
             try:
                 await asyncio.sleep(300)  # 5 dakikada bir kontrol
                 # Son 24 saatteki performansı kontrol et
-                result = await self.db.db_query("""
+                result = await self.db.fetch("""
                     SELECT
                         COUNT(*)::int AS total,
                         SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::int AS wins,
@@ -623,23 +673,26 @@ class AgentOrchestrator:
                 """)
                 if not result or not result[0]:
                     continue
-                total, wins, avg_pnl = int(result[0][0] or 0), int(result[0][1] or 0), float(result[0][2] or 0)
+                row = result[0]
+                total = int(row.get('total') or 0)
+                wins = int(row.get('wins') or 0)
+                avg_pnl = float(row.get('avg_pnl') or 0)
                 if total < 5:
                     continue  # Yeterli veri yok
                 win_rate = (wins / total) * 100
 
                 # Bot state'e güncel performansı yaz
-                await self.db.db_execute("""
+                await self.db.execute("""
                     INSERT INTO bot_state (state_key, state_value, updated_at)
-                    VALUES ('self_correction_status', %s, NOW())
+                    VALUES ('self_correction_status', $1, NOW())
                     ON CONFLICT (state_key) DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = NOW()
-                """, (json.dumps({
+                """, json.dumps({
                     "win_rate": round(win_rate, 1),
                     "total_trades": total,
                     "wins": wins,
                     "avg_pnl_pct": float(avg_pnl),
                     "checked_at": datetime.now(timezone.utc).isoformat(),
-                }),))
+                }))
 
                 if win_rate < 50:
                     logger.warning(f"⚠️ Win rate {win_rate:.1f}% < 50%! Strateji revizyonu başlatılıyor...")
@@ -672,11 +725,11 @@ class AgentOrchestrator:
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                     # Bot state'e strateji güncelleme kaydı yaz
-                    await self.db.db_execute("""
+                    await self.db.execute("""
                         INSERT INTO bot_state (state_key, state_value, updated_at)
-                        VALUES ('last_strategy_update', %s, NOW())
+                        VALUES ('last_strategy_update', $1, NOW())
                         ON CONFLICT (state_key) DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = NOW()
-                    """, (json.dumps(event_data),))
+                    """, json.dumps(event_data))
 
                     logger.info(f"✅ Strateji revize edildi: {event_data}")
                 else:

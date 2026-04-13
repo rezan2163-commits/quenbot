@@ -1179,6 +1179,74 @@ class Database:
                 result.append(d)
             return result
 
+    async def count_historical_signatures(self) -> int:
+        """Historical signature sayisini don."""
+        async with self.pool.acquire() as conn:
+            val = await conn.fetchval("SELECT COUNT(*)::int FROM historical_signatures")
+            return int(val or 0)
+
+    async def backfill_historical_signatures_from_movements(
+        self,
+        min_abs_change: float = 0.005,
+        limit: int = 600,
+    ) -> int:
+        """
+        historical_signatures bosken, son price_movements kayitlarindan
+        pattern-matcher icin bootstrap veri olustur.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH candidates AS (
+                    SELECT
+                        pm.id AS movement_id,
+                        pm.symbol,
+                        pm.market_type,
+                        COALESCE(pm.t10_data->>'timeframe', '15m') AS timeframe,
+                        COALESCE(pm.direction, 'long') AS direction,
+                        (pm.change_pct)::double precision AS change_pct,
+                        COALESCE(pm.t10_data->'price_profile', '[]'::jsonb) AS pre_move_vector,
+                        jsonb_build_object(
+                            'trend', 'unknown',
+                            'trend_strength', 0,
+                            'source', 'movement_backfill'
+                        ) AS pre_move_indicators,
+                        jsonb_build_object(
+                            'total', COALESCE(pm.volume::double precision, 0),
+                            'buy_ratio', CASE
+                                WHEN COALESCE(pm.volume::double precision, 0) > 0
+                                    THEN COALESCE(pm.buy_volume::double precision, 0)
+                                         / NULLIF(pm.volume::double precision, 0)
+                                ELSE 0
+                            END,
+                            'trade_count', COALESCE((pm.t10_data->>'trade_count')::int, 0)
+                        ) AS volume_profile,
+                        pm.end_time
+                    FROM price_movements pm
+                    WHERE pm.end_time >= NOW() - INTERVAL '14 days'
+                      AND ABS((pm.change_pct)::double precision) >= $1
+                      AND jsonb_typeof(COALESCE(pm.t10_data->'price_profile', '[]'::jsonb)) = 'array'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM historical_signatures hs
+                          WHERE hs.movement_id = pm.id
+                      )
+                    ORDER BY pm.end_time DESC
+                    LIMIT $2
+                )
+                INSERT INTO historical_signatures
+                    (symbol, market_type, timeframe, direction, change_pct,
+                     pre_move_vector, pre_move_indicators, volume_profile, movement_id)
+                SELECT
+                    symbol, market_type, timeframe, direction, change_pct,
+                    pre_move_vector, pre_move_indicators, volume_profile, movement_id
+                FROM candidates
+                RETURNING id
+                """,
+                min_abs_change,
+                int(limit),
+            )
+            return len(rows)
+
     async def get_trades_in_range(self, symbol: str, start_time: datetime,
                                    end_time: datetime,
                                    market_type: str = None) -> List[Dict[str, Any]]:

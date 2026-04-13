@@ -11,7 +11,9 @@ export default function ActiveSignals() {
   };
 
   // Show only active/pending signals
-  const active = signals?.filter((s) => s.status === "active" || s.status === "pending" || s.status === "open") || [];
+  const active = (signals || [])
+    .filter((s) => s.status === "active" || s.status === "pending" || s.status === "open")
+    .sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
 
   return (
     <div className="h-full flex flex-col bg-surface-card/30 overflow-hidden">

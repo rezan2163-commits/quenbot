@@ -63,8 +63,8 @@ module.exports = {
     {
       name: "quenbot-dashboard",
       cwd: "./dashboard",
-      script: "npx",
-      args: "next start --port 5173 --hostname 0.0.0.0",
+      script: "bash",
+      args: "-lc 'pnpm run start -- --hostname 0.0.0.0'",
       interpreter: "none",
       env: {
         NODE_ENV: "production",

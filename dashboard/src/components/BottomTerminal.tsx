@@ -26,6 +26,7 @@ export default function BottomTerminal() {
   const prevPricesRef = useRef<string>("");
   const prevSignalsRef = useRef<string>("");
   const prevSimsRef = useRef<string>("");
+  const seenSimEventsRef = useRef<Set<string>>(new Set());
 
   const toNumber = (value: unknown, fallback = 0) => {
     const n = Number(value);
@@ -94,6 +95,13 @@ export default function BottomTerminal() {
     prevSimsRef.current = key;
 
     for (const sim of sims.slice(0, 3)) {
+      const eventKey = `${sim.id}:${sim.status}:${sim.exit_time ?? ""}`;
+      if (seenSimEventsRef.current.has(eventKey)) continue;
+      seenSimEventsRef.current.add(eventKey);
+      if (seenSimEventsRef.current.size > 1000) {
+        seenSimEventsRef.current.clear();
+      }
+
       if (sim.status === "open") {
         addLog("info", `SIM AÇIK ${sim.symbol} ${sim.side} @$${toNumber(sim.entry_price).toLocaleString()}`);
       } else if (sim.status === "closed" && sim.pnl_pct != null) {

@@ -174,7 +174,7 @@ class GemmaDecisionCore:
     # Son N kararı bellekte tut
     MAX_DECISION_HISTORY = 100
     # Gemma'yı aşırı yüklememek için rate limit (saniye)
-    MIN_DECISION_INTERVAL = float(os.getenv("QUENBOT_DECISION_MIN_INTERVAL", "1.2"))
+    MIN_DECISION_INTERVAL = float(os.getenv("QUENBOT_DECISION_MIN_INTERVAL", "0.5"))
     # Gemma bağlanamazsa fallback kurallar
     FALLBACK_MIN_SIMILARITY = 0.50
     FALLBACK_MIN_CONFIDENCE = 0.50

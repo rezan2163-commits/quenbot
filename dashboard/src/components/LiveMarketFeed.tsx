@@ -22,6 +22,24 @@ export default function LiveMarketFeed() {
 
   const connected = !priceErr && !!prices;
 
+  const aliasMap: Record<string, string> = {
+    BITCOIN: "BTCUSDT",
+    ETHEREUM: "ETHUSDT",
+    RIPPLE: "XRPUSDT",
+    SOLANA: "SOLUSDT",
+    CARDANO: "ADAUSDT",
+    LITECOIN: "LTCUSDT",
+    DOGECOIN: "DOGEUSDT",
+  };
+
+  const normalizeInputSymbol = (rawInput: string) => {
+    const clean = rawInput.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!clean) return "";
+    if (aliasMap[clean]) return aliasMap[clean];
+    if (clean.endsWith("USDT")) return clean;
+    return `${clean}USDT`;
+  };
+
   // Merge live prices with mover data for change_pct
   const moverMap = new Map(movers?.map((m) => [m.symbol, m]) || []);
 
@@ -45,24 +63,26 @@ export default function LiveMarketFeed() {
   });
 
   const tickers = Array.from(symbolMap.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
+  const knownSymbols = Array.from(new Set((prices || []).map((p) => String(p.symbol || "").toUpperCase()))).filter(Boolean);
 
   const handleAdd = async () => {
-    const raw = symbolInput.trim().toUpperCase();
+    const raw = symbolInput.trim();
     if (!raw || adding) return;
+    const normalized = normalizeInputSymbol(raw);
+    if (!normalized) return;
     setAdding(true);
     setFeedback("");
     try {
-      await addWatchlistCoin(raw, { exchange: "both", market_type: "both" });
+      await addWatchlistCoin(normalized, { exchange: "both", market_type: "both" });
       await Promise.all([
         mutate(`${API}/api/watchlist`),
         mutate(`${API}/api/live/prices`),
       ]);
-      const normalized = raw.endsWith("USDT") ? raw : `${raw}USDT`;
       setFeedback(`${normalized} spot+futures (binance+bybit) takibe eklendi.`);
       setSymbolInput("");
       setShowAdd(false);
-    } catch {
-      setFeedback("Coin eklenemedi. Sembolü kontrol et.");
+    } catch (err: any) {
+      setFeedback(err?.message ? `Coin eklenemedi: ${err.message}` : "Coin eklenemedi. Sembolü kontrol et.");
     } finally {
       setAdding(false);
     }
@@ -97,12 +117,21 @@ export default function LiveMarketFeed() {
             <input
               value={symbolInput}
               onChange={(e) => setSymbolInput(e.target.value)}
-              placeholder="Örn: BTC veya BTCUSDT"
+              list="live-known-symbols"
+              placeholder="Örn: BTC, bitcoin veya BTCUSDT"
               className="flex-1 rounded border border-surface-border bg-surface px-2 py-1 text-xs text-gray-200 placeholder:text-gray-600 focus:outline-none"
               onKeyDown={(e) => {
                 if (e.key === "Enter") void handleAdd();
               }}
             />
+            <datalist id="live-known-symbols">
+              {knownSymbols.slice(0, 80).map((s) => (
+                <option key={s} value={s.replace("USDT", "")} />
+              ))}
+              {knownSymbols.slice(0, 80).map((s) => (
+                <option key={`${s}-full`} value={s} />
+              ))}
+            </datalist>
             <button
               onClick={() => void handleAdd()}
               disabled={adding || !symbolInput.trim()}
@@ -127,16 +156,19 @@ export default function LiveMarketFeed() {
           <div className="divide-y divide-surface-border/50">
             {tickers.map((t) => {
               const up = toNumber(t.change_pct) >= 0;
+              const base = t.symbol.replace("USDT", "");
               return (
-                <div key={t.symbol} className="flex items-center justify-between px-3 py-1.5 hover:bg-white/[0.02] transition-colors">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-xs font-medium text-gray-200 truncate">{t.symbol}</span>
-                    <span className="text-[10px] text-gray-600 uppercase">{t.exchange}</span>
+                <div key={`${t.symbol}-${t.exchange}-${t.market_type}`} className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 px-3 py-2 hover:bg-white/[0.02] transition-colors">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-gray-100 tracking-wide leading-tight break-all">{base}</div>
+                    <div className="text-[10px] text-gray-500 leading-tight break-all">{t.symbol}</div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono text-gray-300">${t.price_text}</span>
-                    <span className="text-[9px] px-1 py-0.5 rounded border border-surface-border text-gray-500 uppercase">{t.exchange}</span>
-                    <span className="text-[9px] px-1 py-0.5 rounded border border-surface-border text-gray-500 uppercase">{t.market_type}</span>
+                  <div className="flex flex-col items-end gap-1">
+                    <span className="text-xs font-mono text-gray-200">${t.price_text}</span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-[9px] px-1 py-0.5 rounded border border-surface-border text-gray-500 uppercase">{t.exchange}</span>
+                      <span className="text-[9px] px-1 py-0.5 rounded border border-surface-border text-gray-500 uppercase">{t.market_type}</span>
+                    </div>
                     <span className={`flex items-center gap-0.5 text-[10px] font-medium ${up ? "text-bull" : "text-bear"}`}>
                       {up ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
                       {up ? "+" : ""}{toNumber(t.change_pct).toFixed(2)}%

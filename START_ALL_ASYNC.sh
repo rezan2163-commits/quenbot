@@ -20,7 +20,7 @@ sleep 3
 
 # API Server
 echo "→ API Server başlatılıyor..."
-pnpm --dir artifacts/api-server run dev > /tmp/api-server.log 2>&1 &
+pnpm --dir artifacts/api-server run start > /tmp/api-server.log 2>&1 &
 API_PID=$!
 echo "  PID: $API_PID → http://localhost:3001"
 
@@ -28,7 +28,7 @@ sleep 3
 
 # Dashboard
 echo "→ Dashboard başlatılıyor..."
-pnpm --dir artifacts/market-intel run preview > /tmp/dashboard.log 2>&1 &
+pnpm --dir dashboard run start > /tmp/dashboard.log 2>&1 &
 DASHBOARD_PID=$!
 echo "  PID: $DASHBOARD_PID"
 

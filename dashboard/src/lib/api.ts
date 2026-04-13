@@ -204,17 +204,35 @@ export function useWatchlist() {
 }
 
 export async function addWatchlistCoin(symbol: string, opts?: { exchange?: string; market_type?: string }) {
-  const res = await fetch(`${API}/api/watchlist/add`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      symbol,
-      exchange: opts?.exchange || "both",
-      market_type: opts?.market_type || "both",
-    }),
-  });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json();
+  const attempts = [
+    { exchange: opts?.exchange || "both", market_type: opts?.market_type || "both" },
+    { exchange: "all", market_type: "both" },
+    { exchange: "all", market_type: "spot" },
+  ];
+
+  let lastError = "";
+  for (const attempt of attempts) {
+    const res = await fetch(`${API}/api/watchlist/add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol,
+        exchange: attempt.exchange,
+        market_type: attempt.market_type,
+      }),
+    });
+
+    if (res.ok) return res.json();
+
+    try {
+      const data = await res.json();
+      lastError = data?.error || `API ${res.status}`;
+    } catch {
+      lastError = `API ${res.status}`;
+    }
+  }
+
+  throw new Error(lastError || "Coin eklenemedi");
 }
 
 export function useTradeTimeline() {

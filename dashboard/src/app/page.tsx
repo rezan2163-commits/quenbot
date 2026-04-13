@@ -64,7 +64,7 @@ function RightPanel() {
   ];
 
   return (
-    <div className="w-80 flex-shrink-0 h-full flex flex-col border-l border-surface-border">
+    <div className="w-[26rem] xl:w-[28rem] flex-shrink-0 h-full flex flex-col border-l border-surface-border">
       {/* Tab selector — scrollable */}
       <div className="flex overflow-x-auto border-b border-surface-border bg-surface-card/30 custom-scrollbar">
         {tabs.map((t) => (

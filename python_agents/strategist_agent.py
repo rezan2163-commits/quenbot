@@ -64,8 +64,12 @@ class StrategistAgent:
         self.feature_weights = Config.get_agent_config('strategist')['feature_weights']
         self.analysis_count = 0
         self.signals_generated = 0
-        self._signal_cooldown_seconds = int(os.getenv("QUENBOT_SIGNAL_COOLDOWN_SECONDS", "300"))
+        self._signal_cooldown_seconds = int(os.getenv("QUENBOT_SIGNAL_COOLDOWN_SECONDS", "900"))
+        self._signal_window_seconds = int(os.getenv("QUENBOT_SIGNAL_WINDOW_SECONDS", "900"))
+        self._min_signal_confidence = float(os.getenv("QUENBOT_MIN_SIGNAL_CONFIDENCE", "0.62"))
+        self._min_quality_score = float(os.getenv("QUENBOT_MIN_QUALITY_SCORE", "0.68"))
         self._last_signal_emit: Dict[str, float] = {}
+        self._last_signal_window: Dict[str, int] = {}
 
     async def initialize(self):
         logger.info("Initializing Strategist Agent...")
@@ -83,7 +87,7 @@ class StrategistAgent:
                 await self._update_pattern_outcomes()
             except Exception as e:
                 logger.error(f"Strategist cycle error: {e}")
-            await asyncio.sleep(180)  # Dakika bazlı dalgalanmayı azaltmak için 3 dk döngü
+            await asyncio.sleep(30)  # 30s döngü — daha hızlı sinyal tepkisi
 
     async def stop(self):
         self.running = False
@@ -99,13 +103,41 @@ class StrategistAgent:
             pass
         return Config.WATCHLIST
 
-    def _can_emit_signal(self, symbol: str, market_type: str, direction: str) -> bool:
-        key = f"{symbol}:{market_type}:{direction}"
+    def _signal_quality_score(self, confidence: float, target_pct: float) -> float:
+        # 15m horizon quality: confidence dominates; overly tiny/huge targets are penalized.
+        c = min(max(float(confidence), 0.0), 1.0)
+        tp = abs(float(target_pct))
+        ideal = 0.012  # ~1.2%
+        target_component = 1.0 - min(abs(tp - ideal) / 0.03, 1.0)
+        return min(max(c * 0.8 + target_component * 0.2, 0.0), 1.0)
+
+    def _can_emit_signal(
+        self,
+        symbol: str,
+        market_type: str,
+        direction: str,
+        confidence: float,
+        target_pct: float,
+    ) -> bool:
+        if confidence < self._min_signal_confidence:
+            return False
+
+        quality = self._signal_quality_score(confidence, target_pct)
+        if quality < self._min_quality_score:
+            return False
+
+        key = f"{symbol}:{market_type}"
         now = time.time()
         last = self._last_signal_emit.get(key, 0.0)
         if now - last < self._signal_cooldown_seconds:
             return False
+
+        window_id = int(now // max(self._signal_window_seconds, 1))
+        if self._last_signal_window.get(key) == window_id:
+            return False
+
         self._last_signal_emit[key] = now
+        self._last_signal_window[key] = window_id
         return True
 
     def _build_signal_payload(
@@ -122,8 +154,9 @@ class StrategistAgent:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         safe_target_pct = abs(float(target_pct))
-        safe_target_pct = max(safe_target_pct, 0.02)
-        safe_target_pct = min(safe_target_pct, float(Config.STRATEGY_MAX_TARGET_PCT))
+        safe_target_pct = max(safe_target_pct, 0.005)
+        max_target_15m = float(os.getenv("QUENBOT_15M_MAX_TARGET_PCT", "0.03"))
+        safe_target_pct = min(safe_target_pct, min(float(Config.STRATEGY_MAX_TARGET_PCT), max_target_15m))
         if direction == 'short':
             # Prevent impossible negative target prices on short signals.
             safe_target_pct = min(safe_target_pct, 0.95)
@@ -204,9 +237,9 @@ class StrategistAgent:
                                     if best_tf and abs(prediction['timeframes'].get(best_tf, {}).get('avg_change_pct', 0)) >= 0.02:
                                         last_price = float(trades[-1]['price'])
                                         best_tf_change = abs(prediction['timeframes'][best_tf].get('avg_change_pct', 0.02))
-                                        target_pct = max(best_tf_change, 0.02)
+                                        target_pct = max(best_tf_change, 0.005)
                                         signal_type = f'brain_{direction}_{best_tf}'
-                                        if self._can_emit_signal(symbol, market_type, direction):
+                                        if self._can_emit_signal(symbol, market_type, direction, confidence, target_pct):
                                             signal_payload = self._build_signal_payload(
                                                 market_type=market_type,
                                                 symbol=symbol,
@@ -215,7 +248,7 @@ class StrategistAgent:
                                                 confidence=confidence,
                                                 entry_price=last_price,
                                                 target_pct=target_pct,
-                                                eta_minutes=15 if best_tf == '15m' else 60,
+                                                eta_minutes=15,
                                                 metadata={
                                                     'timeframe': best_tf,
                                                     'match_count': prediction['match_count'],
@@ -293,10 +326,10 @@ class StrategistAgent:
 
                                             if best_intel_tf:
                                                 itf_change = abs(intel_tfs[best_intel_tf].get('avg_change_pct', 0))
-                                                if itf_change >= 0.01:  # Minimum %1 beklenen hareket
+                                                if itf_change >= 0.005:  # Minimum %0.5 beklenen hareket
                                                     last_price = float(trades[-1]['price'])
                                                     signal_type = f'intel_{intel_dir}_{best_intel_tf}'
-                                                    if self._can_emit_signal(symbol, market_type, intel_dir):
+                                                    if self._can_emit_signal(symbol, market_type, intel_dir, float(intel_conf), max(itf_change, 0.005)):
                                                         signal_payload = self._build_signal_payload(
                                                             market_type=market_type,
                                                             symbol=symbol,
@@ -304,8 +337,8 @@ class StrategistAgent:
                                                             direction=intel_dir,
                                                             confidence=float(min(intel_conf, 0.95)),
                                                             entry_price=last_price,
-                                                            target_pct=max(itf_change, 0.02),
-                                                            eta_minutes=15 if best_intel_tf == '15m' else 60,
+                                                            target_pct=max(itf_change, 0.005),
+                                                            eta_minutes=15,
                                                             metadata={
                                                                 'timeframe': best_intel_tf,
                                                                 'match_count': intel_result.get('match_count', 0),
@@ -468,8 +501,8 @@ class StrategistAgent:
                             signal_type = f'evolutionary_similarity_{direction}'
                             # Confidence: en az 0.3, similarity varsa onu kullan, yoksa score-based
                             evo_conf = max(float(best_similarity), min(float(score) * 0.1, 0.85), 0.3)
-                            target_pct = max(float(mean_profit), 0.02)  # ≥2% target
-                            if self._can_emit_signal(symbol, market_type, direction):
+                            target_pct = max(float(mean_profit), 0.005)
+                            if self._can_emit_signal(symbol, market_type, direction, float(min(evo_conf, 1.0)), target_pct):
                                 signal_payload = self._build_signal_payload(
                                     market_type=market_type,
                                     symbol=symbol,
@@ -478,7 +511,7 @@ class StrategistAgent:
                                     confidence=float(min(evo_conf, 1.0)),
                                     entry_price=last_price,
                                     target_pct=target_pct,
-                                    eta_minutes=60,
+                                    eta_minutes=15,
                                     metadata={
                                         'similarity_score': float(best_similarity),
                                         'strategy_score': float(score),
@@ -504,8 +537,8 @@ class StrategistAgent:
                         elif score > 0.05 and mean_profit > min_profit * 0.5:
                             momentum_conf = min(max(score * 0.6, 0.3), 0.85)
                             signal_type = f'momentum_{direction}'
-                            target_pct = max(float(mean_profit), 0.02)  # ≥2% target
-                            if self._can_emit_signal(symbol, market_type, direction):
+                            target_pct = max(float(mean_profit), 0.005)
+                            if self._can_emit_signal(symbol, market_type, direction, float(momentum_conf), target_pct):
                                 signal_payload = self._build_signal_payload(
                                     market_type=market_type,
                                     symbol=symbol,
@@ -514,7 +547,7 @@ class StrategistAgent:
                                     confidence=float(momentum_conf),
                                     entry_price=last_price,
                                     target_pct=target_pct,
-                                    eta_minutes=45,
+                                    eta_minutes=15,
                                     metadata={
                                         'strategy_score': float(score),
                                         'mean_profit': float(mean_profit),
@@ -537,15 +570,15 @@ class StrategistAgent:
 
                             # RSI + trend alignment → sinyal
                             rsi_val = ind.get('rsi')
-                            if (abs(price_change_pct) > 0.001 and trend_strength > 0.15 and
+                            if (abs(price_change_pct) > 0.005 and trend_strength > 0.20 and
                                     rsi_val is not None and 20 < rsi_val < 80):
                                 pa_direction = 'long' if price_change_pct > 0 and trend_dir == 'bullish' else (
                                     'short' if price_change_pct < 0 and trend_dir == 'bearish' else None
                                 )
                                 if pa_direction:
-                                    pa_conf = min(abs(price_change_pct) * 20 + trend_strength * 0.3, 0.7)
-                                    target_pct = max(abs(price_change_pct) * 2, 0.02)  # ≥2% target
-                                    if self._can_emit_signal(symbol, market_type, pa_direction):
+                                    pa_conf = min(abs(price_change_pct) * 18 + trend_strength * 0.35, 0.85)
+                                    target_pct = max(abs(price_change_pct) * 1.2, 0.005)
+                                    if self._can_emit_signal(symbol, market_type, pa_direction, float(pa_conf), target_pct):
                                         signal_payload = self._build_signal_payload(
                                             market_type=market_type,
                                             symbol=symbol,
@@ -554,7 +587,7 @@ class StrategistAgent:
                                             confidence=float(pa_conf),
                                             entry_price=last_price,
                                             target_pct=target_pct,
-                                            eta_minutes=30,
+                                            eta_minutes=15,
                                             metadata={
                                                 'price_change_pct': float(price_change_pct),
                                                 'rsi': float(rsi_val),
@@ -635,9 +668,9 @@ class StrategistAgent:
                             confidence = float(min(similarity * 0.9, 0.95))
                             signal_type = f'signature_{sig_direction}'
                             last_price = float(prices[-1])
-                            target_pct = max(abs(sig_change), 0.02)  # ≥2% target
+                            target_pct = max(abs(sig_change), 0.005)
 
-                            if self._can_emit_signal(symbol, market_type, sig_direction):
+                            if self._can_emit_signal(symbol, market_type, sig_direction, confidence, target_pct):
                                 signal_payload = self._build_signal_payload(
                                     market_type=market_type,
                                     symbol=symbol,
@@ -646,7 +679,7 @@ class StrategistAgent:
                                     confidence=confidence,
                                     entry_price=last_price,
                                     target_pct=target_pct,
-                                    eta_minutes=15 if sig_tf == '15m' else 60,
+                                    eta_minutes=15,
                                     metadata={
                                         'cosine_similarity': float(similarity),
                                         'reference_change_pct': float(sig_change),

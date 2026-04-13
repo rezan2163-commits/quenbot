@@ -368,7 +368,7 @@ app.get("/api/signals", async (req, res) => {
         (status = 'failed' OR status LIKE 'risk_%')
         AND timestamp < NOW() - INTERVAL '24 hours'
       )
-      ORDER BY timestamp DESC
+      ORDER BY confidence DESC, timestamp DESC
       LIMIT 100
     `;
     res.json(signals);
@@ -690,7 +690,19 @@ app.post("/api/watchlist/add", async (req, res) => {
     if (!symbol || typeof symbol !== "string") {
       return res.status(400).json({ error: "Symbol is required" });
     }
+    const aliasMap: Record<string, string> = {
+      BITCOIN: "BTC",
+      ETHEREUM: "ETH",
+      RIPPLE: "XRP",
+      SOLANA: "SOL",
+      CARDANO: "ADA",
+      LITECOIN: "LTC",
+      DOGECOIN: "DOGE",
+    };
     let sym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20);
+    if (aliasMap[sym]) {
+      sym = aliasMap[sym];
+    }
     if (sym && !sym.endsWith("USDT")) sym = `${sym}USDT`;
 
     const exchRaw = (exchange || "all").toLowerCase().slice(0, 50);

@@ -22,7 +22,7 @@ def _get_llm_bridge():
     return _llm_bridge
 
 # Minimum potansiyel getiri filtresi
-MIN_POTENTIAL_RETURN = 0.02  # %2
+MIN_POTENTIAL_RETURN = 0.005  # %0.5
 
 
 class GhostSimulatorAgent:
@@ -66,7 +66,11 @@ class GhostSimulatorAgent:
                 # Sort by id desc (newest first), close older duplicates
                 sims.sort(key=lambda s: s.get('id', 0), reverse=True)
                 keeper = sims[0]
-                self.active_simulations[keeper['id']] = keeper
+                if self._is_stale_open(keeper):
+                    await self._close_simulation_direct(keeper, 'startup_stale_cleanup')
+                    logger.info(f"🧹 Closed stale keeper sim #{keeper.get('id')} for {sym}")
+                else:
+                    self.active_simulations[keeper['id']] = keeper
                 for dup in sims[1:]:
                     try:
                         await self._close_simulation_direct(dup, 'duplicate_cleanup')
@@ -74,7 +78,12 @@ class GhostSimulatorAgent:
                     except Exception as e:
                         logger.error(f"Error closing duplicate sim #{dup.get('id')}: {e}")
             else:
-                self.active_simulations[sims[0]['id']] = sims[0]
+                only = sims[0]
+                if self._is_stale_open(only):
+                    await self._close_simulation_direct(only, 'startup_stale_cleanup')
+                    logger.info(f"🧹 Closed stale sim #{only.get('id')} for {sym}")
+                else:
+                    self.active_simulations[only['id']] = only
 
         # Sync state_tracker active_symbols with actual open simulations
         if self.state_tracker:
@@ -96,6 +105,7 @@ class GhostSimulatorAgent:
 
         while self.running:
             try:
+                await self._reconcile_active_simulations()
                 await self._process_pending_signals()
                 await self._monitor_active_simulations()
                 self.last_activity = datetime.utcnow()
@@ -247,6 +257,10 @@ class GhostSimulatorAgent:
                 symbol = sim_data['symbol']
                 current_price = current_prices.get(symbol)
                 if current_price is None or current_price <= 0:
+                    # No fresh trade tick: still allow timeout based closure.
+                    if self._check_timeout(sim_data):
+                        await self._close_simulation(sim_id, 'timeout', float(sim_data['entry_price']))
+                        to_close.append(sim_id)
                     continue
 
                 entry = float(sim_data['entry_price'])
@@ -298,6 +312,45 @@ class GhostSimulatorAgent:
             logger.debug(f"Simulation timeout parse error: {e}")
             return False
 
+    def _is_stale_open(self, sim_data: Dict[str, Any]) -> bool:
+        """Startup/cycle cleanup guard for very old open simulations."""
+        entry_time = sim_data.get('entry_time')
+        if not entry_time:
+            return False
+        try:
+            if isinstance(entry_time, str):
+                entry_time = datetime.fromisoformat(entry_time)
+            if getattr(entry_time, 'tzinfo', None) is not None:
+                now = datetime.now(entry_time.tzinfo)
+            else:
+                now = datetime.utcnow()
+            return (now - entry_time).total_seconds() > (Config.SIMULATION_TIMEOUT_HOURS * 3600)
+        except Exception:
+            return False
+
+    async def _reconcile_active_simulations(self):
+        """Keep in-memory active map and state tracker aligned with DB reality."""
+        try:
+            db_open = await self.db.get_open_simulations()
+            open_map = {}
+            for sim in db_open:
+                self._parse_metadata(sim)
+                if self._is_stale_open(sim):
+                    await self._close_simulation_direct(sim, 'stale_recovery')
+                    continue
+                open_map[int(sim['id'])] = sim
+
+            self.active_simulations = open_map
+
+            if self.state_tracker:
+                actual_symbols = sorted({s.get('symbol', '') for s in self.active_simulations.values() if s.get('symbol')})
+                if actual_symbols != sorted(self.state_tracker.state.get('active_symbols', [])):
+                    self.state_tracker.state['active_symbols'] = actual_symbols
+                    await self.state_tracker.save_state()
+                    logger.info(f"📊 Reconciled active_symbols: {actual_symbols}")
+        except Exception as e:
+            logger.debug(f"Active simulation reconcile skipped: {e}")
+
     async def _close_simulation_direct(self, sim_data: Dict[str, Any], reason: str):
         """Close a simulation directly from its data dict (used during dedup cleanup)."""
         sim_id = sim_data.get('id')
@@ -314,13 +367,15 @@ class GhostSimulatorAgent:
             pnl = (exit_price - entry_price) * quantity if side == 'long' else (entry_price - exit_price) * quantity
             pnl_pct = (pnl / (entry_price * quantity)) * 100 if entry_price * quantity else 0.0
 
-            await self.db.update_simulation(sim_id, {
+            updated = await self.db.update_simulation(sim_id, {
                 'exit_price': exit_price,
                 'exit_time': datetime.utcnow(),
                 'pnl': pnl,
                 'pnl_pct': pnl_pct,
                 'status': 'closed'
             })
+            if not updated:
+                logger.debug(f"Skip duplicate close for sim #{sim_id} ({reason})")
         except Exception as e:
             logger.error(f"Error in _close_simulation_direct #{sim_id}: {e}")
 
@@ -354,7 +409,12 @@ class GhostSimulatorAgent:
                 'status': 'closed'
             }
 
-            await self.db.update_simulation(sim_id, update_data)
+            updated = await self.db.update_simulation(sim_id, update_data)
+            if not updated:
+                # Already closed by another cycle/process; avoid duplicate accounting/logging.
+                self.active_simulations.pop(sim_id, None)
+                logger.debug(f"Skip duplicate close for sim #{sim_id} ({reason})")
+                return
             self.total_closed += 1
             self.total_pnl += pnl
             was_correct = pnl > 0
