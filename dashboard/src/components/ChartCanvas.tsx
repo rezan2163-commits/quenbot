@@ -2,10 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createChart, IChartApi, CandlestickData, Time, CandlestickSeries, createSeriesMarkers } from "lightweight-charts";
-import { usePriceHistory, useSignals, useLivePrices, Signal } from "@/lib/api";
+import { mutate } from "swr";
+import { addWatchlistCoin, usePriceHistory, useSignals, useLivePrices, useWatchlist, Signal } from "@/lib/api";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
 const TIMEFRAMES = ["5m", "15m", "1h", "4h", "8h", "1d"] as const;
+const API = process.env.NEXT_PUBLIC_API_URL || "";
 
 const TF_SECONDS: Record<string, number> = {
   "5m": 300,
@@ -19,6 +21,10 @@ const TF_SECONDS: Record<string, number> = {
 export default function ChartCanvas() {
   const [activeSymbol, setActiveSymbol] = useState(SYMBOLS[0]);
   const [activeTf, setActiveTf] = useState<(typeof TIMEFRAMES)[number]>("5m");
+  const [symbolInput, setSymbolInput] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [message, setMessage] = useState("");
+  const { data: watchlist } = useWatchlist();
   const { data: candles } = usePriceHistory(activeSymbol, activeTf);
   const { data: signals } = useSignals();
   const { data: prices } = useLivePrices();
@@ -41,6 +47,41 @@ export default function ChartCanvas() {
   const alignToTf = (unixSec: number, tf: string) => {
     const step = TF_SECONDS[tf] || 300;
     return Math.floor(unixSec / step) * step;
+  };
+
+  const chartSymbols = Array.from(
+    new Set([
+      ...(watchlist || []).map((w) => String(w.symbol || "").toUpperCase()).filter(Boolean),
+      ...SYMBOLS,
+    ])
+  );
+
+  useEffect(() => {
+    if (!chartSymbols.includes(activeSymbol)) {
+      setActiveSymbol(chartSymbols[0] || SYMBOLS[0]);
+    }
+  }, [chartSymbols, activeSymbol]);
+
+  const handleAddCoin = async () => {
+    const raw = symbolInput.trim().toUpperCase();
+    if (!raw || adding) return;
+    setAdding(true);
+    setMessage("");
+    try {
+      await addWatchlistCoin(raw, { exchange: "both", market_type: "both" });
+      const normalized = raw.endsWith("USDT") ? raw : `${raw}USDT`;
+      await Promise.all([
+        mutate(`${API}/api/watchlist`),
+        mutate(`${API}/api/live/prices`),
+      ]);
+      setActiveSymbol(normalized);
+      setMessage(`${normalized} eklendi`);
+      setSymbolInput("");
+    } catch {
+      setMessage("Eklenemedi");
+    } finally {
+      setAdding(false);
+    }
   };
 
   // Initialize chart
@@ -153,10 +194,10 @@ export default function ChartCanvas() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Symbol tabs + price */}
+      {/* Symbol tabs + coin add + price */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-surface-border bg-surface-card/40">
         <div className="flex items-center gap-3">
-          {SYMBOLS.map((sym) => (
+          {chartSymbols.map((sym) => (
             <button
               key={sym}
               onClick={() => setActiveSymbol(sym)}
@@ -183,6 +224,28 @@ export default function ChartCanvas() {
                 {tf}
               </button>
             ))}
+          </div>
+
+          <div className="w-px h-6 bg-surface-border" />
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-gray-500 uppercase">Coin Ekle</span>
+            <input
+              value={symbolInput}
+              onChange={(e) => setSymbolInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void handleAddCoin();
+              }}
+              placeholder="BTC veya BTCUSDT"
+              className="h-7 w-[120px] rounded border border-surface-border bg-surface px-2 text-xs text-gray-200 placeholder:text-gray-600 focus:outline-none"
+            />
+            <button
+              onClick={() => void handleAddCoin()}
+              disabled={adding || !symbolInput.trim()}
+              className="h-7 rounded bg-accent px-2.5 text-[11px] font-medium text-white disabled:opacity-50"
+            >
+              {adding ? "..." : "Ekle"}
+            </button>
+            {message && <span className="text-[10px] text-gray-400">{message}</span>}
           </div>
         </div>
 
