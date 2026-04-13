@@ -49,7 +49,7 @@ def _get_llm_bridge():
 
 
 # ─── Configuration ───
-SIMILARITY_THRESHOLD = 0.40        # Minimum similarity to trigger a match
+SIMILARITY_THRESHOLD = 0.50        # Minimum similarity to trigger a match
 SCAN_INTERVAL_SECONDS = 15         # How often to scan each symbol
 VECTOR_POINTS = 60                 # N-point price vector (last N trade prices)
 MIN_HISTORICAL_SIGNATURES = 1      # Minimum signatures needed for matching
