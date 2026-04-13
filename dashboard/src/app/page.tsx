@@ -9,7 +9,7 @@ import BottomTerminal from "@/components/BottomTerminal";
 import StrategyControl from "@/components/StrategyControl";
 import ChatPanel from "@/components/ChatPanel";
 import StrategyAlert from "@/components/StrategyAlert";
-import LiveMarketFeed from "@/components/LiveMarketFeed";
+import WatchlistManager from "@/components/WatchlistManager";
 import ActiveSignals from "@/components/ActiveSignals";
 import PatternLibrary from "@/components/PatternLibrary";
 import SignalHistory from "@/components/SignalHistory";
@@ -82,7 +82,7 @@ function RightPanel() {
       </div>
       {/* Panel content */}
       <div className="flex-1 min-h-0">
-        {tab === "market" && <LiveMarketFeed />}
+        {tab === "market" && <WatchlistManager />}
         {tab === "signals" && <ActiveSignals />}
         {tab === "backtest" && <BacktestPanel />}
         {tab === "flow" && <AgentFlow />}

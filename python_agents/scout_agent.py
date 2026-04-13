@@ -651,25 +651,37 @@ class ScoutAgent:
         self.connections.clear()
 
     async def _watchlist_refresher(self):
-        """Watchlist'i periyodik olarak DB'den güncelle"""
+        """Watchlist'i periyodik olarak DB'den güncelle - eklenen ve kaldırılan coinleri yönet"""
         while self.running:
             try:
-                await asyncio.sleep(15)  # 15 saniyede bir kontrol
+                await asyncio.sleep(10)  # 10 saniyede bir kontrol (daha hızlı tepki)
                 old_watchlist = set(self._active_watchlist)
                 await self._refresh_watchlist()
                 new_watchlist = set(self._active_watchlist)
 
-                # Yeni semboller eklendiyse
+                # Eklenen semboller
                 added_symbols = new_watchlist - old_watchlist
+                # Kaldırılan semboller  
+                removed_symbols = old_watchlist - new_watchlist
+
                 if added_symbols:
-                    logger.info(f"🔄 New symbols detected: {added_symbols}")
+                    logger.info(f"➕ Watchlist'e eklendi: {added_symbols}")
                     # Yeni semboller için anında REST fetch
                     for symbol in added_symbols:
                         self.price_cache[symbol] = 0.0
                         for market_type in ['spot', 'futures']:
                             await self._fetch_binance_rest(market_type, symbol)
 
-                    # WebSocket yeniden bağlan
+                if removed_symbols:
+                    logger.info(f"➖ Watchlist'ten çıkarıldı: {removed_symbols}")
+                    # Kaldırılan sembolleri cache'den temizle
+                    for symbol in removed_symbols:
+                        self.price_cache.pop(symbol, None)
+                        self.last_rest_fetch.pop(symbol, None)
+
+                # Değişiklik varsa WebSocket yeniden bağlan
+                if added_symbols or removed_symbols:
                     await self._reconnect_websockets()
+
             except Exception as e:
                 logger.debug(f"Watchlist refresh error: {e}")

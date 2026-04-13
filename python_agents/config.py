@@ -21,10 +21,11 @@ class Config:
     BINANCE_REST_API = "https://api.binance.com"
     BYBIT_REST_API = "https://api.bybit.com"
 
-    # Trading pairs to monitor
+    # Trading pairs to monitor - Varsayılan watchlist
     TRADING_PAIRS = [
-        "BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "SOLUSDT",
-        "DOTUSDT", "LINKUSDT", "LTCUSDT", "XRPUSDT", "BCHUSDT"
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+        "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "APTUSDT", "LINKUSDT",
+        "DOTUSDT", "SUIUSDT", "OPUSDT", "ARBUSDT"
     ]
 
     WATCHLIST = TRADING_PAIRS.copy()

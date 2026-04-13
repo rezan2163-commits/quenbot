@@ -235,6 +235,25 @@ export async function addWatchlistCoin(symbol: string, opts?: { exchange?: strin
   throw new Error(lastError || "Coin eklenemedi");
 }
 
+export async function removeWatchlistCoin(symbol: string, opts?: { exchange?: string; market_type?: string }) {
+  const res = await fetch(`${API}/api/watchlist/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol,
+      exchange: opts?.exchange || "all",
+      market_type: opts?.market_type || "both",
+    }),
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `API ${res.status}`);
+  }
+
+  return res.json();
+}
+
 export function useTradeTimeline() {
   return useSWR<TradeTimeline[]>(`${API}/api/analytics/trade-timeline`, fetcher, {
     refreshInterval: 60000,
