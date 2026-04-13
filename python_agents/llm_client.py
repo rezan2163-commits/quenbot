@@ -133,6 +133,16 @@ class LLMClient:
                 available = [m.get("name", "") for m in data.get("models", [])]
                 if available:
                     logger.info(f"Ollama models available: {available}")
+                    # Prefer the configured model if present
+                    preferred = self.model
+                    if preferred:
+                        for avail in available:
+                            if avail == preferred or avail.startswith(preferred + ":"):
+                                if self.model != avail:
+                                    logger.info(f"Model selected: {avail}")
+                                self.model = avail
+                                return True
+
                     # Find best model from candidates list
                     matched = False
                     for candidate in MODEL_CANDIDATES:
