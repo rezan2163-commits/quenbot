@@ -70,10 +70,10 @@ class FeatureEngine:
             macd_cross = 0.0
             if macd_data and isinstance(macd_data, dict):
                 macd_hist = float(np.tanh(macd_data.get('histogram', 0) * 100))
-                crossover = macd_data.get('crossover', '')
-                if crossover == 'bullish':
+                # crossover/crossunder are booleans from indicators.compute_all_indicators
+                if macd_data.get('crossover'):
                     macd_cross = 1.0
-                elif crossover == 'bearish':
+                elif macd_data.get('crossunder'):
                     macd_cross = -1.0
 
             # Bollinger Bands
@@ -372,10 +372,39 @@ class InferenceEngine:
                 }
 
         if not timeframe_predictions:
+            if matches:
+                # Fallback: outcome verisi yok ama match var → snapshot fiyat yönünden tahmin yap
+                w_sum = 0.0
+                weight_total = 0.0
+                for pattern, sim in matches:
+                    w = sim ** 2
+                    pc = pattern.snapshot.price_change_pct
+                    w_sum += pc * w
+                    weight_total += w
+                if weight_total > 0 and w_sum != 0:
+                    fallback_dir = 'long' if w_sum > 0 else 'short'
+                    avg_sim = sum(s for _, s in matches) / len(matches)
+                    top3_sim = sum(s for _, s in matches[:3]) / min(len(matches), 3)
+                    # Outcome verisi olmadığı için muhafazakâr güven
+                    fallback_conf = min(avg_sim * 0.5, 0.45)
+                    return {
+                        'direction': fallback_dir,
+                        'confidence': fallback_conf,
+                        'base_confidence': fallback_conf,
+                        'regime': regime,
+                        'regime_multiplier': 1.0,
+                        'tf_agreement': 0.0,
+                        'avg_similarity': avg_sim,
+                        'top3_similarity': top3_sim,
+                        'match_count': len(matches),
+                        'timeframes': {},
+                        'avg_consistency': 0.0,
+                        'no_outcomes_fallback': True,
+                    }
             return {
                 'direction': None, 'confidence': 0.0,
                 'regime': regime, 'timeframes': {},
-                'match_count': len(matches),
+                'match_count': len(matches) if matches else 0,
             }
 
         # ── Step 2: Multi-timeframe agreement ──
