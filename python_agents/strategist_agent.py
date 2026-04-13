@@ -121,7 +121,12 @@ class StrategistAgent:
         eta_minutes: int,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        safe_target_pct = max(float(target_pct), 0.02)
+        safe_target_pct = abs(float(target_pct))
+        safe_target_pct = max(safe_target_pct, 0.02)
+        safe_target_pct = min(safe_target_pct, float(Config.STRATEGY_MAX_TARGET_PCT))
+        if direction == 'short':
+            # Prevent impossible negative target prices on short signals.
+            safe_target_pct = min(safe_target_pct, 0.95)
         safe_entry = float(entry_price)
         target_price = safe_entry * (1.0 + safe_target_pct) if direction == 'long' else safe_entry * (1.0 - safe_target_pct)
         ts = datetime.utcnow()
