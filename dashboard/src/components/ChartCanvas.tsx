@@ -194,28 +194,41 @@ export default function ChartCanvas() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Symbol tabs + coin add + price */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-surface-border bg-surface-card/40">
-        <div className="flex items-center gap-3">
-          {chartSymbols.map((sym) => (
-            <button
-              key={sym}
-              onClick={() => setActiveSymbol(sym)}
-              className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-                activeSymbol === sym
-                  ? "bg-accent/20 text-accent"
-                  : "text-gray-500 hover:text-gray-300 hover:bg-surface-hover"
-              }`}
-            >
-              {sym.replace("USDT", "")}
-            </button>
-          ))}
-          <div className="flex items-center gap-1 ml-2">
+      {/* Symbol tabs + price */}
+      <div className="px-4 py-2 border-b border-surface-border bg-surface-card/40 space-y-2">
+        <div className="flex items-center justify-between gap-3 overflow-x-auto">
+          <div className="flex items-center gap-2 min-w-0">
+            {chartSymbols.map((sym) => (
+              <button
+                key={sym}
+                onClick={() => setActiveSymbol(sym)}
+                className={`px-3 py-1.5 rounded text-xs font-medium transition-colors whitespace-nowrap ${
+                  activeSymbol === sym
+                    ? "bg-accent/20 text-accent"
+                    : "text-gray-500 hover:text-gray-300 hover:bg-surface-hover"
+                }`}
+              >
+                {sym.replace("USDT", "")}
+              </button>
+            ))}
+          </div>
+
+          {currentPrice && (
+            <div className="text-right flex-shrink-0">
+              <span className="text-lg font-bold font-mono text-gray-100">
+                ${toNumber(currentPrice.price).toLocaleString()}
+              </span>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 overflow-x-auto">
+          <div className="flex items-center gap-1 min-w-0">
             {TIMEFRAMES.map((tf) => (
               <button
                 key={tf}
                 onClick={() => setActiveTf(tf)}
-                className={`px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+                className={`px-2 py-1 rounded text-[10px] font-medium transition-colors whitespace-nowrap ${
                   activeTf === tf
                     ? "bg-accent/20 text-accent"
                     : "text-gray-500 hover:text-gray-300 hover:bg-surface-hover"
@@ -226,9 +239,8 @@ export default function ChartCanvas() {
             ))}
           </div>
 
-          <div className="w-px h-6 bg-surface-border" />
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] text-gray-500 uppercase">Coin Ekle</span>
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <span className="text-[10px] text-gray-400 uppercase font-semibold">Coin Ekle</span>
             <input
               value={symbolInput}
               onChange={(e) => setSymbolInput(e.target.value)}
@@ -236,26 +248,18 @@ export default function ChartCanvas() {
                 if (e.key === "Enter") void handleAddCoin();
               }}
               placeholder="BTC veya BTCUSDT"
-              className="h-7 w-[120px] rounded border border-surface-border bg-surface px-2 text-xs text-gray-200 placeholder:text-gray-600 focus:outline-none"
+              className="h-7 w-[140px] rounded border border-surface-border bg-surface px-2 text-xs text-gray-200 placeholder:text-gray-600 focus:outline-none"
             />
             <button
               onClick={() => void handleAddCoin()}
               disabled={adding || !symbolInput.trim()}
-              className="h-7 rounded bg-accent px-2.5 text-[11px] font-medium text-white disabled:opacity-50"
+              className="h-7 rounded bg-accent px-3 text-[11px] font-semibold text-white disabled:opacity-50"
             >
-              {adding ? "..." : "Ekle"}
+              {adding ? "Ekleniyor" : "Ekle"}
             </button>
-            {message && <span className="text-[10px] text-gray-400">{message}</span>}
+            {message && <span className="text-[10px] text-gray-400 whitespace-nowrap">{message}</span>}
           </div>
         </div>
-
-        {currentPrice && (
-          <div className="text-right">
-            <span className="text-lg font-bold font-mono text-gray-100">
-              ${toNumber(currentPrice.price).toLocaleString()}
-            </span>
-          </div>
-        )}
       </div>
 
       {/* Chart */}
