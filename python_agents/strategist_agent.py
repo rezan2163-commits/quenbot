@@ -191,7 +191,7 @@ class StrategistAgent:
                                 min_conf = 0.3 if (self.state_tracker and 
                                     self.state_tracker.get_mode() in ('BOOTSTRAP', 'LEARNING')) else 0.6
                                 if (confidence >= min_conf and
-                                        self.brain.should_generate_signal(symbol, direction, confidence)):
+                                        self.brain.should_generate_signal(symbol, direction, confidence, min_confidence=min_conf)):
 
                                     # En iyi timeframe'i seç
                                     best_tf = None
@@ -253,6 +253,34 @@ class StrategistAgent:
                                             except Exception as e:
                                                 logger.debug(f"LLM signal eval skipped: {e}")
 
+                                    elif not best_tf and prediction.get('match_count', 0) > 0:
+                                        # Henüz outcome verisi yok ama pattern eşleşmesi var → erken sinyal
+                                        last_price = float(trades[-1]['price'])
+                                        signal_type = f'brain_{direction}_{tf_key}'
+                                        if self._can_emit_signal(symbol, market_type, direction):
+                                            signal_payload = self._build_signal_payload(
+                                                market_type=market_type,
+                                                symbol=symbol,
+                                                signal_type=signal_type,
+                                                direction=direction,
+                                                confidence=confidence,
+                                                entry_price=last_price,
+                                                target_pct=0.02,
+                                                eta_minutes=60,
+                                                metadata={
+                                                    'timeframe': tf_key,
+                                                    'match_count': prediction['match_count'],
+                                                    'avg_similarity': prediction['avg_similarity'],
+                                                    'brain_analysis': True,
+                                                    'no_outcomes_fallback': True,
+                                                },
+                                            )
+                                            await self.db.insert_signal(signal_payload)
+                                            self.signals_generated += 1
+                                            logger.info(
+                                                f"🧠 Brain pattern signal [{market_type}] {symbol} {direction} "
+                                                f"tf={tf_key} conf={confidence:.2f} matches={prediction['match_count']}")
+
                             # Pattern'ı kaydet (matches olsun olmasın — library'yi doldur)
                             await self.db.insert_pattern_record({
                                 'symbol': symbol,
@@ -271,9 +299,9 @@ class StrategistAgent:
                                         ind = {}
 
                                     intel_result = self.brain.enhanced_analyze(snapshot, ind)
-                                    if intel_result and intel_result.get('direction') and intel_result.get('confidence', 0) > 0:
+                                    if intel_result and (intel_result.get('direction') or intel_result.get('match_count', 0) > 0) and intel_result.get('confidence', 0) > 0:
                                         intel_conf = intel_result['confidence']
-                                        intel_dir = intel_result['direction']
+                                        intel_dir = intel_result.get('direction')
                                         regime = intel_result.get('regime', {})
                                         regime_name = regime.get('regime', 'UNKNOWN') if isinstance(regime, dict) else 'UNKNOWN'
 
@@ -281,7 +309,7 @@ class StrategistAgent:
                                         min_intel_conf = 0.35 if (self.state_tracker and
                                             self.state_tracker.get_mode() in ('BOOTSTRAP', 'LEARNING')) else 0.55
 
-                                        if intel_conf >= min_intel_conf:
+                                        if intel_dir and intel_conf >= min_intel_conf:
                                             # En iyi timeframe seç
                                             intel_tfs = intel_result.get('timeframes', {})
                                             best_intel_tf = None
@@ -325,6 +353,37 @@ class StrategistAgent:
                                                             f"🧬 Intel signal [{market_type}] {symbol} {intel_dir} "
                                                             f"tf={best_intel_tf} conf={intel_conf:.2f} "
                                                             f"regime={regime_name} matches={intel_result.get('match_count', 0)}")
+
+                                            elif not best_intel_tf and intel_result.get('match_count', 0) > 0:
+                                                # Henüz outcome verisi yok ama match var → erken intel sinyal
+                                                last_price = float(trades[-1]['price'])
+                                                signal_type = f'intel_{intel_dir}_{tf_key}'
+                                                if self._can_emit_signal(symbol, market_type, intel_dir):
+                                                    signal_payload = self._build_signal_payload(
+                                                        market_type=market_type,
+                                                        symbol=symbol,
+                                                        signal_type=signal_type,
+                                                        direction=intel_dir,
+                                                        confidence=float(min(intel_conf, 0.95)),
+                                                        entry_price=last_price,
+                                                        target_pct=0.02,
+                                                        eta_minutes=60,
+                                                        metadata={
+                                                            'timeframe': tf_key,
+                                                            'match_count': intel_result.get('match_count', 0),
+                                                            'avg_similarity': intel_result.get('avg_similarity', 0),
+                                                            'regime': regime_name,
+                                                            'enriched_dim': intel_result.get('enriched_dim', 18),
+                                                            'intelligence_version': intel_result.get('intelligence_version', '1.0'),
+                                                            'no_outcomes_fallback': True,
+                                                        },
+                                                    )
+                                                    await self.db.insert_signal(signal_payload)
+                                                    self.signals_generated += 1
+                                                    logger.info(
+                                                        f"🧬 Intel pattern signal [{market_type}] {symbol} {intel_dir} "
+                                                        f"tf={tf_key} conf={intel_conf:.2f} regime={regime_name} "
+                                                        f"matches={intel_result.get('match_count', 0)}")
 
                                     # Pattern'ı enriched library'ye kaydet (her durumda)
                                     self.brain.record_enriched_pattern(snapshot, ind)
@@ -539,9 +598,11 @@ class StrategistAgent:
                             rsi_val = ind.get('rsi')
                             if (abs(price_change_pct) > 0.001 and trend_strength > 0.15 and
                                     rsi_val is not None and 20 < rsi_val < 80):
-                                pa_direction = 'long' if price_change_pct > 0 and trend_dir == 'bullish' else (
-                                    'short' if price_change_pct < 0 and trend_dir == 'bearish' else None
-                                )
+                                pa_direction = None
+                                if price_change_pct > 0 and trend_dir in ('bullish', 'neutral'):
+                                    pa_direction = 'long'
+                                elif price_change_pct < 0 and trend_dir in ('bearish', 'neutral'):
+                                    pa_direction = 'short'
                                 if pa_direction:
                                     pa_conf = min(abs(price_change_pct) * 20 + trend_strength * 0.3, 0.7)
                                     target_pct = max(abs(price_change_pct) * 2, 0.02)  # ≥2% target
