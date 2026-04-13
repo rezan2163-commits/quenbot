@@ -15,6 +15,7 @@ from llm_client import get_llm_client, LLMResponse
 from agent_instructions import get_agent_prompt_with_data, get_system_prompt
 from directive_store import get_directive_store
 from task_queue import get_task_queue, TaskPriority
+from event_bus import get_event_bus, Event, EventType
 
 logger = logging.getLogger("quenbot.llm_bridge")
 
@@ -30,6 +31,7 @@ class AgentLLMBridge:
         self._client = get_llm_client()
         self._store = get_directive_store()
         self._queue = get_task_queue()
+        self._event_bus = get_event_bus()
         self._enabled = True
         self._call_count = 0
 
@@ -60,6 +62,15 @@ class AgentLLMBridge:
         """
         if not self._enabled:
             return None
+
+        await self._event_bus.publish(Event(
+            type=EventType.LLM_REQUEST,
+            source=agent_name,
+            data={
+                "task": task[:160],
+                "priority": getattr(priority, "name", str(priority)),
+            },
+        ))
 
         directives = await self._store.get_full_directive(agent_name)
         system, prompt = get_agent_prompt_with_data(
@@ -96,6 +107,11 @@ class AgentLLMBridge:
             response: LLMResponse = envelope.get("result")
 
         if response is None:
+            await self._event_bus.publish(Event(
+                type=EventType.LLM_ERROR,
+                source=agent_name,
+                data={"task": task[:160], "error": "empty_response"},
+            ))
             return None
 
         self._call_count += 1
@@ -104,6 +120,11 @@ class AgentLLMBridge:
             logger.warning(
                 "LLM call failed for %s: %s", agent_name, response.error
             )
+            await self._event_bus.publish(Event(
+                type=EventType.LLM_ERROR,
+                source=agent_name,
+                data={"task": task[:160], "error": response.error or "unknown"},
+            ))
             return None
 
         result = response.as_json()
@@ -116,10 +137,28 @@ class AgentLLMBridge:
                 "LLM returned non-JSON for %s: %s",
                 agent_name, response.text[:200]
             )
+            await self._event_bus.publish(Event(
+                type=EventType.LLM_RESPONSE,
+                source=agent_name,
+                data={
+                    "task": task[:160],
+                    "parsed": False,
+                    "latency_ms": response.total_duration_ms,
+                },
+            ))
             return {"raw_text": response.text, "_parsed": False}
 
         result["_parsed"] = True
         result["_latency_ms"] = response.total_duration_ms
+        await self._event_bus.publish(Event(
+            type=EventType.LLM_RESPONSE,
+            source=agent_name,
+            data={
+                "task": task[:160],
+                "parsed": True,
+                "latency_ms": response.total_duration_ms,
+            },
+        ))
         return result
 
     def _extract_json(self, text: str) -> Optional[dict]:

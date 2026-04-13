@@ -1,5 +1,5 @@
 {
-  "master_directive": "Her pozisyon girişinde minimum %1.5 risk/reward oranı hedefle. Stop-loss mesafesi ATR x 1.5 olsun.",
+  "master_directive": "GENEL STRATEJI (QWEN 8B ANA TALIMAT):\n- Scout, borsalardan websocket ile gelen gerceklesmis alim/satim verisini surekli izler.\n- Her coin icin sure, yon ve yuzde degisimleri kaydet; fiyata yon veren bot hareketlerini tespit et.\n- %2 ve uzeri fiyat hareketlerinde 1 gun onceki alim/satim verisini kontrol et ve benzerlik analizine dahil et.\n- Tespit edilen hareketleri sistemde sakla; benzerlik %50+ oldugunda beklenen yon/target/sureyi yaz ve sinyal uret.\n- Long/Short kararinda neden, hedef, islem saati ve hedef zamanini raporla.\n- Agentler arasi komut zincirini izle, hatalari terminalde acikla.\n- Dogru/yanlis sinyallerden ders cikart; ogrenen hafizayi guncelle ve risk kurallarini uygula.\n- Qwen diger agentleri yonetir; dogal dil komutlarini calistirilabilir aksiyonlara cevir.\n- Matematiksel hesaplarda tutarli ve kanita dayali ol; veri yoksa uydurma yapma.",
   "agent_overrides": {},
   "history": [],
   "updated_at": "2026-04-10T23:07:49.503605+00:00"

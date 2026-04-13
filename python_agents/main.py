@@ -1274,6 +1274,7 @@ class AgentOrchestrator:
                     "ok": llm_healthy,
                     "model": current_model,
                 },
+                "llm_stats": self.llm_client.get_stats() if self.llm_client else {},
                 "resources": {
                     "cpu": resource.get("cpu_percent", 0),
                     "ram": resource.get("ram_percent", 0),

@@ -109,8 +109,9 @@ class PatternMatcherAgent:
                 if time.time() > self._cache_expiry:
                     await self._refresh_signature_cache()
 
-                # Tüm watchlist sembollerini tara
-                symbols = Config.WATCHLIST
+                # Tüm watchlist sembollerini tara (user watchlist)
+                symbols = await self.db.get_user_watchlist()
+                symbols = [str(w.get('symbol', '')).upper() for w in (symbols or []) if w.get('symbol')]
                 for symbol in symbols:
                     if not self.running:
                         break

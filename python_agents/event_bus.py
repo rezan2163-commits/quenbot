@@ -55,6 +55,11 @@ class EventType(str, Enum):
     # Directive events
     DIRECTIVE_UPDATED = "directive.updated"
 
+    # LLM events
+    LLM_REQUEST = "llm.request"
+    LLM_RESPONSE = "llm.response"
+    LLM_ERROR = "llm.error"
+
     # Command routing events (user -> qwen -> agents)
     COMMAND_RECEIVED = "command.received"
     COMMAND_ROUTED = "command.routed"

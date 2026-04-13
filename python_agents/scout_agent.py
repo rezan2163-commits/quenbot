@@ -35,7 +35,7 @@ MOVEMENT_TIMEFRAMES = {
 }
 
 # Minimum change to capture a historical signature
-SIGNATURE_THRESHOLD = 0.005  # 0.5%
+SIGNATURE_THRESHOLD = 0.02  # 2% (per strategy requirement)
 
 class ScoutAgent:
     def __init__(self, db: Database, brain=None):
@@ -559,6 +559,34 @@ class ScoutAgent:
                 'buy_ratio': float(pre_buy_vol / max(pre_buy_vol + pre_sell_vol, 1e-8)),
                 'trade_count': len(pre_trades),
             }
+
+            # 1-day lookback context for >= 2% moves
+            day_context = None
+            try:
+                day_start = move_start - timedelta(days=1)
+                day_trades = await self.db.get_trades_in_range(
+                    symbol, day_start, move_start, market_type=market_type)
+                if len(day_trades) >= 10:
+                    day_prices = [float(t['price']) for t in day_trades]
+                    day_start_price = day_prices[0]
+                    day_end_price = day_prices[-1]
+                    day_change_pct = (day_end_price - day_start_price) / max(day_start_price, 1e-8)
+                    day_buy = sum(float(t['quantity']) for t in day_trades if t['side'] == 'buy')
+                    day_sell = sum(float(t['quantity']) for t in day_trades if t['side'] == 'sell')
+                    day_context = {
+                        'start_price': float(day_start_price),
+                        'end_price': float(day_end_price),
+                        'change_pct': float(day_change_pct),
+                        'high': float(max(day_prices)),
+                        'low': float(min(day_prices)),
+                        'buy_ratio': float(day_buy / max(day_buy + day_sell, 1e-8)),
+                        'trade_count': len(day_trades),
+                    }
+            except Exception:
+                day_context = None
+
+            if day_context:
+                volume_profile['day_context'] = day_context
 
             sig_data = {
                 'symbol': symbol,

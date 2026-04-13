@@ -44,6 +44,7 @@ export interface SystemSummary {
   mode: string;
   health: string;
   llm: { ok: boolean; model: string };
+  llm_stats?: { total_calls?: number; total_errors?: number };
   resources: { cpu: number; ram: number; ram_mb: string; disk: number };
   state: { mode: string; trades: number; pnl: number };
   brain: { patterns: number; accuracy: number };
@@ -139,6 +140,21 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export interface DirectiveStatus {
+  master_directive: string;
+  agent_overrides: Record<string, string>;
+  updated_at?: string;
+  history_count?: number;
+}
+
+export interface LlmStatus {
+  healthy: boolean;
+  active_model?: string;
+  available_models?: string[];
+  call_count?: number;
+  llm_stats?: Record<string, any>;
+}
+
 export interface TradeTimeline {
   minute: string;
   count: number;
@@ -157,6 +173,22 @@ export function useSystemSummary() {
   return useSWR<SystemSummary>(`${API}/api/system/summary`, fetcher, {
     refreshInterval: 15000,
   });
+}
+
+export function useDirectiveStatus() {
+  return useSWR<DirectiveStatus>(`${API}/api/directives`, fetcher, {
+    refreshInterval: 30000,
+  });
+}
+
+export async function setDirective(text: string) {
+  const res = await fetch(`${API}/api/directives`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ master_directive: text }),
+  });
+  if (!res.ok) throw new Error(`Directive ${res.status}`);
+  return res.json();
 }
 
 export function useDashboardSummary() {
