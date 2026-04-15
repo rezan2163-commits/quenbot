@@ -1262,6 +1262,9 @@ class AgentOrchestrator:
                     self.db.update_heartbeat('chat_engine', 'running', {
                         'registered_agents': list(self.chat_engine.agents.keys())
                     }),
+                    self.db.update_heartbeat('orchestrator_feedback', 'running', {
+                        'role': 'simulation_feedback_receiver',
+                    }),
                 )
 
                 # ─── LLM health + degraded mode tracking ───

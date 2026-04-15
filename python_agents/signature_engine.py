@@ -17,6 +17,7 @@ A SignatureMatch carries full provenance:
   - signature_id for dashboard display
 """
 import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -346,10 +347,20 @@ async def query_signature_vault(
 
         # Volume ratio
         vol_profile = cand.get('volume_profile')
-        if isinstance(vol_profile, list) and len(vol_profile) > 0:
+        if isinstance(vol_profile, dict):
+            vol_ratio = float(vol_profile.get('buy_ratio', 0.5))
+        elif isinstance(vol_profile, list) and len(vol_profile) > 0:
             vol_ratio = float(vol_profile[-1]) / (float(np.mean(vol_profile)) + 1e-10)
         else:
-            vol_ratio = cand.get('buy_ratio', 0.5)
+            vol_ratio = 0.5
+
+        # Extract prices from pre_move_indicators if available
+        indicators = cand.get('pre_move_indicators') or {}
+        if isinstance(indicators, str):
+            try:
+                indicators = json.loads(indicators)
+            except Exception:
+                indicators = {}
 
         match = SignatureMatch(
             signature_id=generate_signature_id(symbol, timeframe, cand.get('id', 0)),
@@ -359,8 +370,8 @@ async def query_signature_vault(
             cosine_score=cos,
             poly_score=poly,
             historical_timestamp=hist_ts,
-            historical_price=float(cand.get('start_price', 0)),
-            historical_end_price=float(cand.get('end_price', 0)),
+            historical_price=float(indicators.get('price', 0)),
+            historical_end_price=0.0,
             historical_volume_ratio=vol_ratio,
             historical_direction=cand.get('direction', 'neutral'),
             historical_change_pct=float(cand.get('change_pct', 0)),
@@ -401,8 +412,8 @@ async def _fetch_db_candidates(db, symbol: str, timeframe: str) -> List[Dict]:
     """Fetch historical signatures from PostgreSQL."""
     query = """
         SELECT id, symbol, timeframe, direction, change_pct,
-               start_price, end_price, normalized_profile,
-               volume_profile, buy_ratio, created_at
+               pre_move_vector, pre_move_indicators,
+               volume_profile, created_at
         FROM historical_signatures
         WHERE symbol = $1 AND timeframe = $2
         ORDER BY created_at DESC
@@ -413,10 +424,9 @@ async def _fetch_db_candidates(db, symbol: str, timeframe: str) -> List[Dict]:
         candidates = []
         for row in rows:
             d = dict(row)
-            # Parse normalized_profile from JSON/array
-            profile = d.get('normalized_profile')
+            # Parse pre_move_vector as normalized_profile
+            profile = d.get('pre_move_vector')
             if isinstance(profile, str):
-                import json
                 try:
                     profile = json.loads(profile)
                 except Exception:
@@ -425,7 +435,6 @@ async def _fetch_db_candidates(db, symbol: str, timeframe: str) -> List[Dict]:
             # Parse volume_profile
             vp = d.get('volume_profile')
             if isinstance(vp, str):
-                import json
                 try:
                     vp = json.loads(vp)
                 except Exception:
