@@ -1,7 +1,7 @@
 // PM2 Ecosystem Configuration - QuenBot
 // Optimized for 12 vCPU (AMD) / 24 GB RAM
 // Usage: pm2 start ecosystem.config.js
-const quenbotTimeZone = process.env.QUENBOT_TIMEZONE || "Europe/Istanbul";
+const quenbotTimeZone = process.env.QUENBOT_TIMEZONE || "Europe/Vienna";
 
 module.exports = {
   apps: [
