@@ -56,11 +56,8 @@ TIMEFRAME_WINDOWS = {
 
 TARGET_HORIZONS = [
     ('15m', 15, 1.0),
-    ('1h', 60, 1.2),
-    ('2h', 120, 1.45),
+    ('1h', 60, 1.3),
     ('4h', 240, 1.8),
-    ('8h', 480, 2.1),
-    ('12h', 720, 2.35),
 ]
 
 
@@ -245,12 +242,9 @@ class StrategistAgent:
         for label, eta_minutes, multiplier in TARGET_HORIZONS:
             if eta_minutes > 15:
                 required_strength = {
-                    60: 0.35,
-                    120: 0.45,
-                    240: 0.58,
-                    480: 0.72,
-                    720: 0.82,
-                }.get(eta_minutes, 0.4)
+                    60: 0.30,
+                    240: 0.40,
+                }.get(eta_minutes, 0.30)
                 if strength < required_strength:
                     continue
 
@@ -357,6 +351,13 @@ class StrategistAgent:
         target_price = float((selected_horizon or {}).get('target_price') or (safe_entry * (1.0 + safe_target_pct) if direction == 'long' else safe_entry * (1.0 - safe_target_pct)))
         safe_target_pct = float((selected_horizon or {}).get('target_pct') or safe_target_pct)
         ts = datetime.utcnow()
+        # Ensure each horizon has initial 'active' status
+        for h in target_horizons:
+            if 'status' not in h:
+                h['status'] = 'active'
+        # Expires based on longest horizon + 5 min buffer
+        max_eta = max((int(h.get('eta_minutes', 15)) for h in target_horizons), default=240)
+        expires_at = ts + timedelta(minutes=max_eta + 5)
         base_meta = {
             'position_bias': direction,
             'market_type': market_type,
@@ -373,6 +374,7 @@ class StrategistAgent:
             'strategy_approved': True,
             'dashboard_candidate': True,
             'target_candidate': True,
+            'expires_at': expires_at.isoformat() + 'Z',
         }
         if fusion.get("ensemble"):
             base_meta['mamis_ensemble'] = fusion["ensemble"]

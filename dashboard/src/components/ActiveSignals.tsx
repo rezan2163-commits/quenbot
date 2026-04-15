@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { clearSignals, dismissSignal, useSignals } from "@/lib/api";
-import { ArrowUpCircle, ArrowDownCircle, Clock3, Target, BadgeInfo, BrainCircuit, Building2, Trash2, X } from "lucide-react";
+import { ArrowUpCircle, ArrowDownCircle, Clock3, Target, BadgeInfo, BrainCircuit, Building2, Trash2, X, CheckCircle2, XCircle, Timer, Activity, TrendingUp, Layers } from "lucide-react";
 import { formatInQuenbotTimeZone, parseQuenbotDate, toTimestampMs } from "@/lib/time";
 
 function toNumber(value: unknown, fallback = 0) {
@@ -31,6 +31,16 @@ function normalizeTargetPct(value: unknown) {
   const numeric = toNumber(value, 0);
   if (numeric <= 0) return 0;
   return numeric > 0.5 ? numeric / 100 : numeric;
+}
+
+function horizonCountdown(signalAt: Date, etaMin: number) {
+  const deadline = new Date(signalAt.getTime() + etaMin * 60000);
+  const diff = deadline.getTime() - Date.now();
+  if (diff <= 0) return null; // expired
+  const totalMin = Math.floor(diff / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return h > 0 ? `${h}s ${m}dk` : `${m}dk`;
 }
 
 function resolveTargetPct(signal: any) {
@@ -178,131 +188,224 @@ export default function ActiveSignals() {
               const reason = meta.reason || s.signal_type;
               const conf = (toNumber(s.confidence) * 100).toFixed(0);
               const signalAt = parseQuenbotDate(s.signal_time || s.timestamp);
-              const expiresAt = parseQuenbotDate(s.expires_at || meta.expires_at || signalAt.getTime() + 24 * 3600000);
-              const targetAt = new Date(signalAt.getTime() + toNumber(etaMin, 60) * 60000);
+              const expiresAt = parseQuenbotDate(s.expires_at || meta.expires_at || signalAt.getTime() + 4 * 3600000);
               const targetPct = primaryTarget.pct * 100;
               const source = s.source || meta.source || meta.signal_provider || "unknown";
               const sourceModel = s.source_model || meta.source_model || "unknown";
-              const horizons = Array.isArray(meta.target_horizons) ? meta.target_horizons.slice(0, 3) : [];
+              const horizons = Array.isArray(meta.target_horizons) ? meta.target_horizons : [];
+              const similarity = toNumber(meta.avg_similarity ?? meta.similarity, 0);
+              const matchCount = toNumber(meta.match_count, 0);
+              const quality = toNumber(meta.quality_score, 0);
+              const density = toNumber(meta.data_density, 0);
+              const mamis = meta.mamis_ensemble || meta.mamis_context || null;
+              const tfPreds = meta.timeframe_predictions || {};
 
               return (
                 <div
                   key={s.id}
-                  className={`rounded-xl border p-2 transition-colors shadow-[0_8px_24px_rgba(0,0,0,0.16)] ${
+                  className={`rounded-xl border p-2.5 transition-colors shadow-[0_8px_24px_rgba(0,0,0,0.16)] ${
                     isLong
                       ? "border-emerald-400/25 bg-[linear-gradient(135deg,rgba(16,185,129,0.18),rgba(15,23,42,0.55))] hover:bg-[linear-gradient(135deg,rgba(16,185,129,0.24),rgba(15,23,42,0.62))]"
                       : "border-rose-400/25 bg-[linear-gradient(135deg,rgba(244,63,94,0.16),rgba(15,23,42,0.55))] hover:bg-[linear-gradient(135deg,rgba(244,63,94,0.22),rgba(15,23,42,0.62))]"
                   }`}
                 >
-                  <div className="mb-1.5 flex items-start justify-between gap-2">
+                  {/* ── HEADER: Symbol + Direction + Badges ── */}
+                  <div className="mb-2 flex items-start justify-between gap-2">
                     <div className="flex items-start gap-2">
                       {isLong ? (
-                        <ArrowUpCircle size={14} className="text-emerald-300 mt-0.5" />
+                        <ArrowUpCircle size={16} className="text-emerald-300 mt-0.5" />
                       ) : (
-                        <ArrowDownCircle size={14} className="text-rose-300 mt-0.5" />
+                        <ArrowDownCircle size={16} className="text-rose-300 mt-0.5" />
                       )}
                       <div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[12px] font-semibold text-white tracking-wide">{s.symbol}</span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[13px] font-bold text-white tracking-wide">{s.symbol}</span>
                           <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${isLong ? "text-emerald-200 bg-emerald-400/15" : "text-rose-200 bg-rose-400/15"}`}>
-                            {isLong ? "YÜKSELİŞ" : "DÜŞÜŞ"}
+                            {isLong ? "LONG" : "SHORT"}
                           </span>
-                          <span className="text-[9px] px-1.5 py-0.5 rounded-full border border-white/10 text-gray-300 uppercase">{s.exchange || "mixed"}</span>
-                          <span className="text-[9px] px-1.5 py-0.5 rounded-full border border-white/10 text-gray-400 uppercase">{s.market_type || "spot"}</span>
+                          <span className="text-[8px] px-1 py-0.5 rounded-full border border-white/10 text-gray-400 uppercase">{s.market_type || "spot"}</span>
+                          <span className="text-[8px] px-1 py-0.5 rounded-full border border-white/10 text-gray-400 uppercase">{s.exchange || "mixed"}</span>
                         </div>
-                        <div className="mt-0.5 line-clamp-1 text-[9px] text-gray-400">{reason}</div>
+                        <div className="mt-0.5 text-[9px] text-gray-500">{reason}</div>
                       </div>
                     </div>
                     <div className="flex items-start gap-2">
                       <div className="text-right">
-                        <div className="text-[10px] text-amber-300 font-semibold">Güven {conf}%</div>
-                        <div className="text-[9px] text-gray-400">Hedef {targetPct.toFixed(2)}%</div>
+                        <div className="text-[11px] text-amber-300 font-bold">%{conf} Güven</div>
+                        <div className="text-[9px] text-gray-400">Hedef %{targetPct.toFixed(1)}</div>
                       </div>
                       <button
                         onClick={() => void handleDismiss(s.id)}
                         disabled={busy.includes(s.id)}
                         className="rounded-full border border-white/10 bg-black/20 p-1 text-gray-300 hover:text-white disabled:opacity-40"
-                        aria-label={`${s.symbol} sinyalini kaldır`}
                       >
                         <X size={12} />
                       </button>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-1 text-[9px] text-gray-300">
-                    <div className="rounded-lg bg-black/20 border border-white/5 px-2 py-1.5">
-                      <div className="text-[10px] text-gray-500">Sinyal Fiyatı</div>
-                      <div className="font-mono text-white mt-0.5">${formatPrice(currentAtSignal)}</div>
+                  {/* ── FİYAT BİLGİLERİ ── */}
+                  <div className="grid grid-cols-3 gap-1 text-[9px] text-gray-300 mb-2">
+                    <div className="rounded-lg bg-black/25 border border-white/5 px-2 py-1.5">
+                      <div className="text-[8px] text-gray-500">Sinyal Fiyatı</div>
+                      <div className="font-mono text-white mt-0.5 text-[10px]">${formatPrice(currentAtSignal)}</div>
                     </div>
-                    <div className="rounded-lg bg-black/20 border border-white/5 px-2 py-1.5">
-                      <div className="text-[10px] text-gray-500 flex items-center gap-1"><Target size={9} /> Hedef</div>
-                      <div className="font-mono text-white mt-0.5">${formatPrice(target)}</div>
+                    <div className="rounded-lg bg-black/25 border border-white/5 px-2 py-1.5">
+                      <div className="text-[8px] text-gray-500">Giriş</div>
+                      <div className="font-mono text-white mt-0.5 text-[10px]">${formatPrice(entry)}</div>
                     </div>
-                    <div className="rounded-lg bg-black/20 border border-white/5 px-2 py-1.5">
-                      <div className="text-[10px] text-gray-500">Giriş</div>
-                      <div className="font-mono text-white mt-0.5">${formatPrice(entry)}</div>
-                    </div>
-                    <div className="col-span-3 rounded-lg bg-black/20 border border-white/5 px-2 py-1.5">
-                      <div className="text-[10px] text-gray-500">Beklenen Hedef Zamanı</div>
-                      <div className="text-white mt-0.5">{formatInQuenbotTimeZone(targetAt, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</div>
+                    <div className="rounded-lg bg-black/25 border border-white/5 px-2 py-1.5">
+                      <div className="text-[8px] text-gray-500 flex items-center gap-0.5"><Target size={8} />Hedef</div>
+                      <div className="font-mono text-white mt-0.5 text-[10px]">${formatPrice(target)}</div>
                     </div>
                   </div>
 
-                  <div className="mt-1.5 grid grid-cols-1 gap-1 text-[9px] text-gray-300">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/5 border border-white/10">
-                        <Clock3 size={9} className="text-sky-300" />
-                        {formatInQuenbotTimeZone(signalAt, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-                      </span>
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/5 border border-white/10">
-                        <BadgeInfo size={9} className="text-amber-300" />
-                        ETA {toNumber(etaMin)} dk
-                      </span>
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/5 border border-white/10">
-                        <Building2 size={9} className="text-violet-300" />
-                        24s TTL kalan: {formatCountdown(expiresAt)}
-                      </span>
-                      {learningProfile ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-emerald-400/10 border border-emerald-300/20 text-emerald-200">
-                          Ogrenme skoru {(toNumber(learningProfile.score) * 100).toFixed(0)}
-                        </span>
-                      ) : null}
-                      {primaryTarget.selected?.label ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-cyan-400/10 border border-cyan-300/20 text-cyan-200">
-                          Ana ufuk {String(primaryTarget.selected.label)}
-                        </span>
-                      ) : null}
-                    </div>
-
-                    {horizons.length > 0 ? (
-                      <div className="flex items-center gap-2 flex-wrap mt-1">
-                        {horizons.map((h: any) => (
-                          <span key={`${s.id}-${String(h.label)}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] text-gray-300">
-                            {String(h.label)} • %{(normalizeTargetPct(h.target_pct) * 100).toFixed(1)}
-                          </span>
-                        ))}
+                  {/* ── 🎯 HEDEF ZAMANLARI (15m / 1h / 4h) ── */}
+                  {horizons.length > 0 && (
+                    <div className="mb-2 rounded-lg bg-black/30 border border-white/8 p-2">
+                      <div className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+                        <Target size={10} className="text-cyan-300" /> Hedef Zamanları
                       </div>
-                    ) : null}
+                      <div className="space-y-1">
+                        {horizons.map((h: any) => {
+                          const hStatus = h.status || "active";
+                          const hTargetPct = normalizeTargetPct(h.target_pct) * 100;
+                          const hTargetPrice = toNumber(h.target_price, 0);
+                          const remaining = horizonCountdown(signalAt, toNumber(h.eta_minutes, 15));
+                          const actualChange = toNumber(h.actual_change_pct, 0) * 100;
+                          const actualPrice = toNumber(h.actual_price, 0);
 
-                    <div className="rounded-lg bg-black/20 border border-white/5 px-2 py-1.5">
-                      <div className="text-[10px] text-gray-500 flex items-center gap-1"><BrainCircuit size={9} /> Kaynak / Model</div>
-                      <div className="mt-0.5 text-white font-medium">{String(source).replaceAll("_", " ")}</div>
-                      <div className="text-gray-400 mt-0.5">{sourceModel}</div>
-                    </div>
-
-                    {learningProfile ? (
-                      <div className="rounded-lg bg-emerald-400/8 border border-emerald-300/10 px-2 py-1.5">
-                        <div className="text-[10px] text-emerald-200 flex items-center gap-1"><BrainCircuit size={9} /> Ogrenilmis Coin Profili</div>
-                        <div className="mt-0.5 text-white">
-                          Dogruluk %{(toNumber(learningProfile.accuracy) * 100).toFixed(0)} • {toNumber(learningProfile.correct)} / {toNumber(learningProfile.total)} isabet
-                        </div>
-                        <div className="text-gray-300 mt-0.5">Ort. PnL %{toNumber(learningProfile.avg_pnl).toFixed(2)} • Durum {String(learningProfile.status || "cold")}</div>
-                        {Array.isArray(learningProfile.recent_reasons) && learningProfile.recent_reasons.length > 0 ? (
-                          <div className="text-gray-400 mt-0.5 line-clamp-2">Son ders: {String(learningProfile.recent_reasons[0])}</div>
-                        ) : null}
+                          return (
+                            <div
+                              key={`hz-${s.id}-${h.label}`}
+                              className={`flex items-center justify-between rounded-md px-2 py-1.5 text-[10px] ${
+                                hStatus === "hit"
+                                  ? "bg-emerald-400/12 border border-emerald-400/20"
+                                  : hStatus === "missed"
+                                  ? "bg-rose-400/10 border border-rose-400/20"
+                                  : "bg-white/4 border border-white/8"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                {hStatus === "hit" ? (
+                                  <CheckCircle2 size={12} className="text-emerald-400" />
+                                ) : hStatus === "missed" ? (
+                                  <XCircle size={12} className="text-rose-400" />
+                                ) : (
+                                  <Timer size={12} className="text-cyan-300 animate-pulse" />
+                                )}
+                                <span className="font-bold text-white w-8">{h.label}</span>
+                                <span className="text-gray-400">%{hTargetPct.toFixed(1)}</span>
+                                <span className="text-gray-500">→ ${formatPrice(hTargetPrice)}</span>
+                              </div>
+                              <div className="text-right">
+                                {hStatus === "active" && remaining ? (
+                                  <span className="text-cyan-300 font-medium">{remaining} kaldı</span>
+                                ) : hStatus === "active" ? (
+                                  <span className="text-amber-300">Değerlendiriliyor...</span>
+                                ) : hStatus === "hit" ? (
+                                  <span className="text-emerald-300 font-medium">İSABET +{actualChange.toFixed(2)}%</span>
+                                ) : (
+                                  <span className="text-rose-300">ISKALANDI {actualChange >= 0 ? "+" : ""}{actualChange.toFixed(2)}%</span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
-                    ) : null}
+                    </div>
+                  )}
+
+                  {/* ── 📊 ANALİZ BİLGİLERİ ── */}
+                  <div className="grid grid-cols-2 gap-1 mb-2 text-[9px]">
+                    {similarity > 0 && (
+                      <div className="rounded-md bg-black/20 border border-white/5 px-2 py-1">
+                        <span className="text-gray-500">Benzerlik</span>
+                        <span className="text-white font-medium ml-1">%{(similarity * 100).toFixed(0)}</span>
+                      </div>
+                    )}
+                    {matchCount > 0 && (
+                      <div className="rounded-md bg-black/20 border border-white/5 px-2 py-1">
+                        <span className="text-gray-500">Eşleşme</span>
+                        <span className="text-white font-medium ml-1">{matchCount} pattern</span>
+                      </div>
+                    )}
+                    {quality > 0 && (
+                      <div className="rounded-md bg-black/20 border border-white/5 px-2 py-1">
+                        <span className="text-gray-500">Kalite</span>
+                        <span className="text-white font-medium ml-1">%{(quality * 100).toFixed(0)}</span>
+                      </div>
+                    )}
+                    {density > 0 && (
+                      <div className="rounded-md bg-black/20 border border-white/5 px-2 py-1">
+                        <span className="text-gray-500">Veri</span>
+                        <span className="text-white font-medium ml-1">%{(density * 100).toFixed(0)}</span>
+                      </div>
+                    )}
+                    {mamis && (
+                      <div className={`col-span-2 rounded-md border px-2 py-1 ${
+                        mamis.aligned ? "bg-emerald-400/8 border-emerald-400/15 text-emerald-200"
+                          : mamis.opposite ? "bg-rose-400/8 border-rose-400/15 text-rose-200"
+                          : "bg-white/5 border-white/10 text-gray-300"
+                      }`}>
+                        <Activity size={9} className="inline mr-1" />
+                        MAMIS: {mamis.direction || mamis.mamis_direction || "—"} {mamis.aligned ? "✓ Uyumlu" : mamis.opposite ? "✗ Çelişkili" : "Nötr"}
+                        {toNumber(mamis.confidence ?? mamis.mamis_confidence, 0) > 0 && (
+                          <span className="ml-1 text-gray-400">(%{(toNumber(mamis.confidence ?? mamis.mamis_confidence) * 100).toFixed(0)})</span>
+                        )}
+                      </div>
+                    )}
                   </div>
+
+                  {/* ── ZAMAN + KAYNAK ── */}
+                  <div className="flex items-center gap-1.5 flex-wrap text-[9px] text-gray-300 mb-1.5">
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-white/5 border border-white/8">
+                      <Clock3 size={8} className="text-sky-300" />
+                      {formatInQuenbotTimeZone(signalAt, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                    </span>
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-white/5 border border-white/8">
+                      <Timer size={8} className="text-amber-300" />
+                      TTL: {formatCountdown(expiresAt)}
+                    </span>
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-violet-400/10 border border-violet-300/15 text-violet-200">
+                      <Layers size={8} />
+                      {String(source).replace(/_/g, " ")}
+                    </span>
+                  </div>
+
+                  {/* ── KAYNAK MODEL ── */}
+                  <div className="rounded-md bg-black/20 border border-white/5 px-2 py-1 text-[9px]">
+                    <span className="text-gray-500"><BrainCircuit size={9} className="inline mr-1" />Model:</span>
+                    <span className="text-white ml-1">{sourceModel}</span>
+                  </div>
+
+                  {/* ── TIMEFRAME TAHMİNLERİ ── */}
+                  {Object.keys(tfPreds).length > 0 && (
+                    <div className="mt-1.5 flex items-center gap-1 flex-wrap">
+                      {Object.entries(tfPreds).map(([tf, pred]: [string, any]) => (
+                        <span key={`tf-${s.id}-${tf}`} className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[8px] border ${
+                          pred.direction === "long" ? "border-emerald-400/20 bg-emerald-400/8 text-emerald-200" : "border-rose-400/20 bg-rose-400/8 text-rose-200"
+                        }`}>
+                          <TrendingUp size={8} />
+                          {tf}: {pred.direction} %{(Math.abs(toNumber(pred.avg_change_pct)) * 100).toFixed(1)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* ── ÖĞRENİLMİŞ PROFİL ── */}
+                  {learningProfile && (
+                    <div className="mt-1.5 rounded-lg bg-emerald-400/8 border border-emerald-300/10 px-2 py-1.5 text-[9px]">
+                      <div className="text-emerald-200 flex items-center gap-1 font-medium"><BrainCircuit size={9} />Öğrenilmiş Profil</div>
+                      <div className="text-white mt-0.5">
+                        Doğruluk %{(toNumber(learningProfile.accuracy) * 100).toFixed(0)} • {toNumber(learningProfile.correct)}/{toNumber(learningProfile.total)} isabet
+                      </div>
+                      <div className="text-gray-300 mt-0.5">Ort. PnL %{toNumber(learningProfile.avg_pnl).toFixed(2)}</div>
+                      {Array.isArray(learningProfile.recent_reasons) && learningProfile.recent_reasons.length > 0 && (
+                        <div className="text-gray-400 mt-0.5 line-clamp-1">Son ders: {String(learningProfile.recent_reasons[0])}</div>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}

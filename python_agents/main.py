@@ -1038,6 +1038,7 @@ class AgentOrchestrator:
             self._resilient_task("HealthMonitor", self._health_monitor),
             self._resilient_task("DirectiveAPI", self._directive_api_server),
             self._resilient_task("SelfCorrection", self._self_correction_loop),
+            self._resilient_task("HorizonTracker", self._horizon_outcome_tracker),
         ]
 
         if self.efom:
@@ -1201,6 +1202,193 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.error(f"Self-correction loop error: {e}")
                 await asyncio.sleep(60)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # HORIZON OUTCOME TRACKER — 15m/1h/4h hedef süre takibi
+    # ═══════════════════════════════════════════════════════════════════
+    async def _horizon_outcome_tracker(self):
+        """
+        Periyodik olarak aktif sinyallerin hedef zaman dilimlerini (15m/1h/4h) kontrol eder.
+        Süresi dolan horizon'lar değerlendirilir (hit/missed), sonuçlar Brain'e öğrenme
+        verisi olarak gönderilir. Tüm horizon'lar tamamlandığında sinyal tahtadan kaldırılır.
+        """
+        logger.info("🎯 Horizon outcome tracker started — monitoring 15m/1h/4h targets")
+        while self.running:
+            try:
+                await asyncio.sleep(30)
+                signals = await self.db.get_signals_for_horizon_check()
+                if not signals:
+                    continue
+
+                tracker = get_market_tracker()
+                now = datetime.utcnow()
+
+                for signal in signals:
+                    try:
+                        await self._evaluate_signal_horizons(signal, tracker, now)
+                    except Exception as e:
+                        logger.debug(f"Horizon eval error signal #{signal.get('id')}: {e}")
+
+            except Exception as e:
+                logger.error(f"Horizon tracker cycle error: {e}")
+                await asyncio.sleep(30)
+
+    async def _evaluate_signal_horizons(self, signal: dict, tracker, now: datetime):
+        """Tek bir sinyalin tüm horizon'larını değerlendir."""
+        metadata = signal.get('metadata', {})
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except (json.JSONDecodeError, TypeError):
+                return
+
+        horizons = metadata.get('target_horizons', [])
+        if not horizons:
+            return
+
+        signal_time = signal.get('timestamp')
+        if isinstance(signal_time, str):
+            signal_time = datetime.fromisoformat(signal_time.replace('Z', '+00:00')).replace(tzinfo=None)
+        if not signal_time:
+            return
+
+        entry_price = float(metadata.get('entry_price', 0) or signal.get('price', 0))
+        if entry_price <= 0:
+            return
+
+        direction = metadata.get('position_bias', 'long')
+        symbol = signal['symbol']
+        current_price = tracker.get_price(symbol)
+        if not current_price or current_price <= 0:
+            return
+
+        updated = False
+        all_evaluated = True
+
+        for h in horizons:
+            if h.get('status', 'active') != 'active':
+                continue  # already evaluated
+
+            eta = int(h.get('eta_minutes', 15))
+            deadline = signal_time + timedelta(minutes=eta)
+
+            if now < deadline:
+                all_evaluated = False
+                continue
+
+            # ── Horizon süresi doldu — değerlendir ──
+            target_price = float(h.get('target_price', 0))
+            if direction == 'long':
+                actual_change_pct = (current_price - entry_price) / max(entry_price, 1e-8)
+                hit = current_price >= target_price
+            else:
+                actual_change_pct = (entry_price - current_price) / max(entry_price, 1e-8)
+                hit = current_price <= target_price
+
+            h['status'] = 'hit' if hit else 'missed'
+            h['evaluated_at'] = now.isoformat() + 'Z'
+            h['actual_price'] = float(current_price)
+            h['actual_change_pct'] = round(actual_change_pct, 6)
+            updated = True
+
+            # Brain'e per-horizon öğrenme verisi
+            if self.brain:
+                signal_type = f"{signal.get('signal_type', 'unknown')}_{h['label']}"
+                self.brain.update_learning(signal_type, hit, actual_change_pct * 100)
+
+            emoji = "✅" if hit else "❌"
+            logger.info(
+                f"🎯 Horizon {h['label']} {emoji} | {symbol} {direction} "
+                f"| hedef=${target_price:,.2f} gerçek=${current_price:,.2f} "
+                f"| değişim={actual_change_pct*100:+.2f}%"
+            )
+
+        if not updated:
+            return
+
+        patch = {'target_horizons': horizons}
+
+        if all_evaluated:
+            # Tüm horizon'lar değerlendirildi — sinyal tahtadan kaldırılır
+            hits = sum(1 for h in horizons if h.get('status') == 'hit')
+            total = len(horizons)
+            patch['horizons_complete'] = True
+            patch['horizon_summary'] = {
+                'hits': hits,
+                'total': total,
+                'hit_rate': round(hits / max(total, 1), 2),
+                'completed_at': now.isoformat() + 'Z',
+            }
+            await self.db.update_signal_status(signal['id'], 'expired')
+            logger.info(
+                f"🏁 Signal #{signal['id']} {symbol} tüm hedefler tamamlandı: "
+                f"{hits}/{total} isabet — tahtadan kaldırıldı"
+            )
+
+            # Brain'e genel analiz + neden kar/zarar olduğunu analiz et
+            await self._analyze_horizon_outcomes(signal, horizons)
+
+        await self.db.update_signal_metadata(signal['id'], patch)
+
+    async def _analyze_horizon_outcomes(self, signal: dict, horizons: list):
+        """Brain'e horizon sonuçlarını raporla — neden kar/zarar olduğunu analiz et"""
+        try:
+            metadata = signal.get('metadata', {})
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+
+            symbol = signal['symbol']
+            direction = metadata.get('position_bias', 'long')
+            hits = [h for h in horizons if h.get('status') == 'hit']
+            misses = [h for h in horizons if h.get('status') == 'missed']
+            was_correct = len(hits) > len(misses)
+            best_actual = max((abs(h.get('actual_change_pct', 0)) for h in horizons), default=0) * 100
+
+            # DB'ye öğrenme kaydı
+            await self.db.insert_learning_log(
+                signal_type=signal.get('signal_type', 'unknown'),
+                was_correct=was_correct,
+                pnl_pct=best_actual if was_correct else -best_actual,
+                context={
+                    'symbol': symbol,
+                    'direction': direction,
+                    'entry_price': float(metadata.get('entry_price', 0)),
+                    'confidence': float(signal.get('confidence', 0)),
+                    'signal_type': signal.get('signal_type', 'unknown'),
+                    'horizons_hit': len(hits),
+                    'horizons_missed': len(misses),
+                    'horizon_details': horizons,
+                    'analysis_type': 'horizon_complete',
+                },
+            )
+
+            # LLM ile neden kar/zarar olduğunu analiz ettir
+            bridge = get_llm_bridge()
+            if bridge and await bridge.is_available():
+                try:
+                    analysis = await bridge.ghost_post_trade_analysis({
+                        "symbol": symbol,
+                        "side": direction,
+                        "entry_price": float(metadata.get('entry_price', 0)),
+                        "exit_price": float(horizons[-1].get('actual_price', 0)),
+                        "pnl_pct": best_actual if was_correct else -best_actual,
+                        "close_reason": "horizon_complete",
+                        "metadata": {
+                            'horizon_outcomes': horizons,
+                            'confidence': float(signal.get('confidence', 0)),
+                            'similarity': float(metadata.get('avg_similarity', 0) or metadata.get('similarity', 0)),
+                        },
+                        "holding_time_min": int(horizons[-1].get('eta_minutes', 240)),
+                    })
+                    if analysis and analysis.get("_parsed"):
+                        lesson = analysis.get("lesson", "")
+                        if lesson:
+                            logger.info(f"🧠 Brain horizon analiz [{symbol}]: {lesson[:150]}")
+                except Exception as e:
+                    logger.debug(f"Horizon LLM analysis skipped: {e}")
+
+        except Exception as e:
+            logger.debug(f"Horizon analysis error: {e}")
 
     async def _chat_processor(self):
         """Chat mesajlarını kontrol et ve cevapla — DB polling azaltıldı"""

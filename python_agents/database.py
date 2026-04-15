@@ -1726,6 +1726,30 @@ class Database:
                 WHERE id = $2
             """, outcome_pct, match_id)
 
+    async def update_signal_metadata(self, signal_id: int, metadata_patch: Dict[str, Any]) -> bool:
+        """Merge a JSON patch into an existing signal's metadata."""
+        async with self.pool.acquire() as conn:
+            result = await conn.execute("""
+                UPDATE signals
+                SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+                WHERE id = $1
+            """, int(signal_id), _dumps(metadata_patch))
+            return result == 'UPDATE 1'
+
+    async def get_signals_for_horizon_check(self) -> List[Dict[str, Any]]:
+        """Get active signals that have target_horizons for periodic evaluation."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, symbol, signal_type, confidence, price, timestamp, status, metadata, market_type
+                FROM signals
+                WHERE status IN ('pending', 'active', 'open')
+                  AND timestamp >= NOW() - INTERVAL '5 hours'
+                  AND metadata->>'target_horizons' IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 100
+            """)
+            return [dict(row) for row in rows]
+
     # Generic query helpers for chat interface and other uses
     async def execute(self, query: str, *args) -> None:
         """Execute a query without returning results"""

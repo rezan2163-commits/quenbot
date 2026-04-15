@@ -129,9 +129,13 @@ function isVisibleSignalHistory(signal: any) {
 function normalizeSignalRow(row: any) {
   const timestamp = normalizeTimestamp(row.timestamp) ?? row.timestamp;
   const signalTime = timestamp ?? normalizeTimestamp(row.signal_time) ?? row.signal_time;
-  const expiresAt = timestamp
-    ? new Date(new Date(timestamp).getTime() + 24 * 3600 * 1000).toISOString()
-    : normalizeTimestamp(row.expires_at) ?? row.expires_at;
+  const meta = normalizeSignalMetadata(row.metadata) || {};
+  // Prefer metadata expires_at (horizon-based), fall back to DB column, then 24h default
+  const metaExpires = normalizeTimestamp(meta.expires_at);
+  const expiresAt = metaExpires
+    ?? (timestamp ? new Date(new Date(timestamp).getTime() + 24 * 3600 * 1000).toISOString() : null)
+    ?? normalizeTimestamp(row.expires_at)
+    ?? row.expires_at;
 
   return {
     ...row,
@@ -139,7 +143,7 @@ function normalizeSignalRow(row: any) {
     signal_time: signalTime,
     expires_at: expiresAt,
     metadata: {
-      ...(normalizeSignalMetadata(row.metadata) || {}),
+      ...meta,
       signal_time: signalTime,
       expires_at: expiresAt,
     },
