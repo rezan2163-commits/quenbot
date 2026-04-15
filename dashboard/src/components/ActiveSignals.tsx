@@ -73,23 +73,23 @@ export default function ActiveSignals() {
   const { data: signals, mutate } = useSignals();
   const [busy, setBusy] = useState<number[]>([]);
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Server-side filter (isActionableTargetCard) already enforces:
+  // status IN (pending/active/open), confidence >= 0.62, quality >= 0.64,
+  // targetPct >= 0.02, age < 24h, source strategist/pattern_matcher
+  // Client only filters dismissed/risk statuses as safety net
   const active = (signals || [])
     .filter((s) => {
-      const signalTime = parseQuenbotDate(s.signal_time || s.timestamp);
-      const ageHours = (Date.now() - signalTime.getTime()) / 3600000;
-      const targetPct = resolveTargetPct(s);
       const normalizedStatus = String(s.status || "").toLowerCase();
-      const visible = !["failed", "expired", "closed", "dismissed"].includes(normalizedStatus) && !normalizedStatus.startsWith("risk_");
-      return visible && ageHours < 24 && targetPct >= 0.02;
+      return !["failed", "expired", "closed", "dismissed"].includes(normalizedStatus) && !normalizedStatus.startsWith("risk_");
     })
     .sort((a, b) => toTimestampMs(b.signal_time || b.timestamp) - toTimestampMs(a.signal_time || a.timestamp));
   const movementList = [...active]
     .sort((a, b) => {
-      const aScore = resolveTargetPct(a) * 100 + toNumber(a.confidence) * 10;
-      const bScore = resolveTargetPct(b) * 100 + toNumber(b.confidence) * 10;
+      const aScore = toNumber(a.target_pct, 0) * 100 + toNumber(a.confidence) * 10;
+      const bScore = toNumber(b.target_pct, 0) * 100 + toNumber(b.confidence) * 10;
       return bScore - aScore;
     })
-    .slice(0, 10);
+    .slice(0, 12);
 
   async function handleDismiss(signalId: number) {
     setBusy((prev) => [...prev, signalId]);

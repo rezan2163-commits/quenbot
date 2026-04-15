@@ -6,6 +6,7 @@ import dynamic from "next/dynamic";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
 import BottomTerminal from "@/components/BottomTerminal";
+import SystemOverview from "@/components/SystemOverview";
 import StrategyControl from "@/components/StrategyControl";
 import ChatPanel from "@/components/ChatPanel";
 import CodeOperatorPanel from "@/components/CodeOperatorPanel";
@@ -23,8 +24,7 @@ import MobileLiteDashboard from "@/components/MobileLiteDashboard";
 import { swrConfig } from "@/lib/api";
 import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain, TerminalSquare, Radar, Activity, PanelLeft, X, Fingerprint } from "lucide-react";
 
-// Heavy components with lightweight-charts — lazy load
-const ChartCanvas = dynamic(() => import("@/components/ChartCanvas"), { ssr: false, loading: () => <div className="flex-1 bg-surface animate-pulse" /> });
+// Heavy components — lazy load
 const BacktestPanel = dynamic(() => import("@/components/BacktestPanel"), { ssr: false, loading: () => <div className="p-4 text-gray-600 text-xs">Yükleniyor...</div> });
 const AgentFlow = dynamic(() => import("@/components/AgentFlow"), { ssr: false, loading: () => <div className="p-4 text-gray-600 text-xs">Yükleniyor...</div> });
 
@@ -139,9 +139,9 @@ export default function Home() {
               <ErrorBoundary fallback="TopBar Hatası">
                 <TopBar />
               </ErrorBoundary>
-              <div className="h-[42svh] min-h-[18rem] lg:flex-[3] lg:min-h-0">
-                <ErrorBoundary fallback="Grafik Hatası">
-                  <ChartCanvas />
+              <div className="lg:flex-[3] lg:min-h-0 min-h-[18rem]">
+                <ErrorBoundary fallback="Genel Bakış Hatası">
+                  <SystemOverview />
                 </ErrorBoundary>
               </div>
               <div className="h-[28rem] min-h-[16rem] lg:flex-[2] lg:min-h-0">
