@@ -92,7 +92,7 @@ function resolveSignalSource(signal: any) {
 
 function isActionableTargetCard(signal: any) {
   const status = String(signal.status || "").toLowerCase();
-  if (!['pending', 'active', 'open'].includes(status)) return false;
+  if (!['pending', 'active', 'open', 'processed', 'risk_rejected'].includes(status)) return false;
 
   const confidence = toFiniteNumber(signal.confidence, 0);
   const targetPct = resolveSignalTargetPct(signal);
@@ -640,7 +640,7 @@ app.get("/api/signals", async (req, res) => {
         COALESCE(metadata->>'exchange', 'binance') AS exchange,
         market_type
       FROM signals
-      WHERE status IN ('pending', 'active', 'open')
+      WHERE status IN ('pending', 'active', 'open', 'processed', 'risk_rejected')
         AND timestamp >= NOW() - INTERVAL '24 hours'
         AND COALESCE(metadata->>'source', metadata->>'signal_provider', 'unknown') IN ('strategist', 'pattern_matcher')
         AND GREATEST(

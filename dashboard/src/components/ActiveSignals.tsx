@@ -84,13 +84,13 @@ export default function ActiveSignals() {
   const [busy, setBusy] = useState<number[]>([]);
   const [bulkBusy, setBulkBusy] = useState(false);
   // Server-side filter (isActionableTargetCard) already enforces:
-  // status IN (pending/active/open), confidence >= 0.62, quality >= 0.64,
+  // status IN (pending/active/open/processed/risk_rejected), confidence >= 0.62, quality >= 0.64,
   // targetPct >= 0.02, age < 24h, source strategist/pattern_matcher
-  // Client only filters dismissed/risk statuses as safety net
+  // Client only filters dismissed statuses as safety net
   const active = (signals || [])
     .filter((s) => {
       const normalizedStatus = String(s.status || "").toLowerCase();
-      return !["failed", "expired", "closed", "dismissed"].includes(normalizedStatus) && !normalizedStatus.startsWith("risk_");
+      return !["failed", "expired", "closed", "dismissed", "filtered_duplicate", "filtered_noise"].includes(normalizedStatus);
     })
     .sort((a, b) => toTimestampMs(b.signal_time || b.timestamp) - toTimestampMs(a.signal_time || a.timestamp));
   const movementList = [...active]

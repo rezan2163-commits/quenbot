@@ -91,14 +91,14 @@ export default function Sidebar() {
       {/* Resource bars */}
       {sys && (
         <div className="px-4 py-3 border-b border-surface-border space-y-2">
-          <ResourceBar icon={Cpu} label="CPU" value={sys.resources.cpu} />
-          <ResourceBar icon={MemoryStick} label="RAM" value={sys.resources.ram} extra={sys.resources.ram_mb} />
-          <ResourceBar icon={HardDrive} label="Disk" value={sys.resources.disk} />
+          <ResourceBar icon={Cpu} label="CPU" value={sys.resources?.cpu ?? 0} />
+          <ResourceBar icon={MemoryStick} label="RAM" value={sys.resources?.ram ?? 0} extra={sys.resources?.ram_mb} />
+          <ResourceBar icon={HardDrive} label="Disk" value={sys.resources?.disk ?? 0} />
           <div className="flex items-center justify-between text-[11px] text-gray-500 pt-1">
-            <span>LLM: {sys.llm.ok ? "✓" : "✗"} {sys.llm.model}</span>
+            <span>LLM: {sys.llm?.ok ? "✓" : "✗"} {sys.llm?.model ?? "—"}</span>
           </div>
           <div className="flex items-center justify-between text-[11px] text-gray-500">
-            <span>Uptime: {formatUptime(sys.uptime)}</span>
+            <span>Uptime: {formatUptime(sys.uptime ?? 0)}</span>
           </div>
         </div>
       )}
@@ -124,11 +124,11 @@ export default function Sidebar() {
           <div className="text-[11px] text-gray-500 space-y-1">
             <div className="flex justify-between">
               <span>Pattern</span>
-              <span className="text-gray-300">{sys.brain.patterns}</span>
+              <span className="text-gray-300">{sys.brain?.patterns ?? 0}</span>
             </div>
             <div className="flex justify-between">
               <span>Doğruluk</span>
-              <span className="text-accent">%{sys.brain.accuracy}</span>
+              <span className="text-accent">%{sys.brain?.accuracy ?? 0}</span>
             </div>
           </div>
         </div>

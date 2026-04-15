@@ -13,7 +13,7 @@ module.exports = {
       interpreter: "none",
       env: {
         NODE_ENV: "production",
-        TZ: quenbotTimeZone,
+        TZ: "UTC",
         QUENBOT_TIMEZONE: quenbotTimeZone,
         PORT: 3001,
         DATABASE_URL: process.env.DATABASE_URL || "postgres://user:password@localhost:5432/trade_intel",
