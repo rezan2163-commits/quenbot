@@ -21,6 +21,7 @@ class EventType(str, Enum):
     SCOUT_ANOMALY = "scout.anomaly"
     SCOUT_PRICE_UPDATE = "scout.price_update"
     SCOUT_DATA_GAP = "scout.data_gap"
+    ORDER_BOOK_UPDATE = "scout.order_book_update"
 
     # Strategist events
     SIGNAL_GENERATED = "strategist.signal"
@@ -51,6 +52,7 @@ class EventType(str, Enum):
     # Pattern Matcher events
     PATTERN_MATCH = "pattern.match"
     PATTERN_NO_MATCH = "pattern.no_match"
+    PATTERN_DETECTED = "pattern.detected"
 
     # Directive events
     DIRECTIVE_UPDATED = "directive.updated"
@@ -65,6 +67,19 @@ class EventType(str, Enum):
     COMMAND_ROUTED = "command.routed"
     COMMAND_EXECUTED = "command.executed"
     COMMAND_FAILED = "command.failed"
+
+    # Decision core / learning events
+    DECISION_MADE = "decision.made"
+    EXPERIENCE_RECORDED = "learning.experience_recorded"
+    ERROR_OBSERVED = "learning.error_observed"
+    CLEANUP_COMPLETED = "system.cleanup_completed"
+    REDIS_MESSAGE = "system.redis_message"
+
+    # MAMIS microstructure events
+    MICROSTRUCTURE_BAR = "mamis.bar"
+    MICROSTRUCTURE_ALERT = "mamis.alert"
+    MICROSTRUCTURE_CLASSIFIED = "mamis.classified"
+    MICROSTRUCTURE_SIGNAL = "mamis.signal"
 
 
 @dataclass
@@ -81,6 +96,7 @@ class EventBus:
 
     def __init__(self, max_history: int = 200):
         self._subscribers: dict[str, list[Callable]] = {}
+        self._mirrors: list[Callable[..., Coroutine]] = []
         self._history: list[dict] = []
         self._max_history = max_history
         self._event_count = 0
@@ -113,6 +129,10 @@ class EventBus:
         if key in self._subscribers:
             self._subscribers[key] = [h for h in self._subscribers[key] if h != handler]
 
+    def register_mirror(self, handler: Callable[..., Coroutine]):
+        if handler not in self._mirrors:
+            self._mirrors.append(handler)
+
     async def publish(self, event: Event):
         """Publish an event to all subscribers. Non-blocking fire-and-forget."""
         key = event.type.value
@@ -131,14 +151,17 @@ class EventBus:
             self._history = self._history[-self._max_history:]
 
         handlers = self._subscribers.get(key, [])
-        if not handlers:
-            return
-
         for handler in handlers:
             try:
                 asyncio.create_task(handler(event))
             except Exception as e:
                 logger.error(f"Event handler error for {key}: {e}")
+
+        for mirror in self._mirrors:
+            try:
+                asyncio.create_task(mirror(event))
+            except Exception as e:
+                logger.error(f"Event mirror error for {key}: {e}")
 
     def get_stats(self) -> dict:
         return {

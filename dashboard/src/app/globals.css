@@ -10,6 +10,12 @@ body {
   @apply bg-surface text-gray-100 font-sans;
 }
 
+html,
+body {
+  min-height: 100%;
+  overflow-x: hidden;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

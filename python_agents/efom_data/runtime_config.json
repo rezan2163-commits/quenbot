@@ -1,0 +1,18 @@
+{
+  "bayesian_best": {},
+  "entry_filters": {
+    "entropy_max": 0.68,
+    "fdi_max": 1.52,
+    "hurst_min": 0.55,
+    "volatility_max": 0.025,
+    "vpin_max": 0.58
+  },
+  "generated_at": "2026-04-13T20:37:41.551001+00:00",
+  "runtime_overrides": {
+    "QUENBOT_ERIFE_ENTROPY_THRESHOLD": "0.68",
+    "QUENBOT_ERIFE_FDI_THRESHOLD": "1.52",
+    "QUENBOT_ERIFE_HURST_THRESHOLD": "0.55",
+    "QUENBOT_MAMIS_BASE_POSITION_SIZE": "250"
+  },
+  "version": 1
+}

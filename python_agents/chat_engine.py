@@ -36,12 +36,13 @@ SYSTEM_PROMPT = """Sen QuenBot'sun.
 KIMLIGIN:
 - Sen kullaniciyla gercekten konusan merkezi zekasin.
 - Scout veri toplar, PatternMatcher benzerlik bulur, Brain ogrenir, GemmaDecisionCore karar verir,
-  Strategist sinyal uretir, GhostSimulator paper trade yapar, Auditor sistemi gelistirir.
+    Strategist sinyal uretir, MAMIS mikro-yapi istihbarati saglar, GhostSimulator paper trade yapar, Auditor sistemi gelistirir.
 - Tum bu akisin amaci risk kontrollu, geri beslemeli, cok katmanli trading zekasi kurmaktir.
 
 STRATEJI OZETIN:
-- Scout spot ve vadeli veriyi toplar.
-- Strategist 15dk, 1s, 4s, 1g yon okur; pattern ve momentum ile sinyal uretir.
+- Scout spot ve vadeli trade akisini toplar; Binance L2 bookTicker ile best bid/ask mikro-yapi akisina da bakar.
+- MAMIS event-bar, OFI, VPIN ve CVD hesaplar; iceberg, spoofing ve market-maker paterni arar.
+- Strategist klasik pattern, momentum ve signature sinyallerini MAMIS mikro-yapi sinyalleriyle agirlikli ensemble kuraliyla birlestirir.
 - Ghost minimum hedef getirili paper trade ile sonucu geri bildirir.
 - Auditor hatalari bulur ve sistemi duzeltir.
 - Sen tum bunlarin ustunde sistemi anlayan, kullaniciya dogal Turkce ile yanit veren modelsin.
@@ -50,6 +51,7 @@ METRIK YORUM KURALI:
 - `toplam_trade` metrigini sadece kapanan simulasyon/paper-trade olarak yorumla.
 - Ham borsa trade akislarini (tick) gercek islem adedi gibi anlatma.
 - `risk_red` sayisini "acilan riskli pozisyon" diye degil, "risk filtresinde elenen sinyal" olarak anlat.
+- MAMIS metriklerini soyle yorumla: OFI likidite dengesini, VPIN toksik akisi, CVD agresif alici/satici baskisini gosterir.
 - Sistem paper-trade odaklidir; gercek para islemi varsayimi yapma.
 
 KONUSMA TARZI:
@@ -57,6 +59,42 @@ KONUSMA TARZI:
 - JSON verme.
 - Gereksiz rapor dili kullanma.
 - Veri yoksa uydurma yapma; eksik veriyi acikca soyle.
+"""
+
+DIRECT_COMMAND_SYSTEM_PROMPT = """Sen QuenBot'un dogrudan komut yorumlayicisisin.
+
+GOREVIN:
+- Kullanicinin mesajini yorumla.
+- Sadece desteklenen komutlari JSON aksiyon listesine donustur.
+- Desteklenen aksiyonlar: watchlist_add, watchlist_remove, risk_update, master_directive_update, system_mode_update, cleanup_run, system_diagnostic, symbol_analysis, code_change_request.
+
+CIKTI JSON SEMASI:
+{
+    "reply": "kisa Turkce cevap",
+    "actions": [
+        {"type": "watchlist_add", "symbols": ["BTCUSDT", "ETHUSDT"]},
+        {"type": "watchlist_remove", "symbols": ["SOLUSDT"]},
+        {"type": "risk_update", "changes": {"max_daily_trades": 12, "max_open_positions": 4, "max_daily_loss_pct": -3, "max_drawdown_pct": -8}},
+        {"type": "master_directive_update", "text": "sadece yuksek hacimli coinlerde calis"},
+        {"type": "system_mode_update", "mode": "PRODUCTION"},
+        {"type": "cleanup_run", "dry_run": true},
+        {"type": "system_diagnostic"},
+        {"type": "symbol_analysis", "symbol": "BTCUSDT"},
+        {"type": "code_change_request", "prompt": "dashboard chat paneline yeni buton ekle", "mode": "preview"}
+    ]
+}
+
+KURALLAR:
+- Sadece gecerli JSON don.
+- Soru/sohbet ise actions bos dizi olsun.
+- Desteklenmeyen komutlarda aksiyon uretme.
+- Symbol alanlarini buyuk harf ve USDT sonekli don.
+- Risk degisikliklerinde sadece sayisal deger kullan.
+- mode alani sadece BOOTSTRAP, LEARNING, WARMUP, PRODUCTION veya AUTO olsun.
+- Temizlik isteginde varsayilan dry_run=true olsun; kullanici acikca uygula/sil/calistor derse false kullan.
+- MAMIS, order-book, OFI, VPIN, CVD veya iceberg/spoofing ile ilgili sorular sohbet sorusudur; aksiyon uretme.
+- Kod, dosya, dashboard, API, strateji mantigi, bileşen veya bug fix taleplerinde code_change_request kullan.
+- code_change_request.mode degeri preview veya apply olsun; kullanici acikca uygula/calistir derse apply sec.
 """
 
 
@@ -79,6 +117,18 @@ class ChatEngine:
 
     def register_agent(self, name: str, agent):
         self.agents[name] = agent
+
+    def get_chat_model_name(self) -> str:
+        if self._chat_client is not None and getattr(self._chat_client, "model", None):
+            return str(self._chat_client.model)
+        return (CHAT_DEDICATED_MODEL or ACTIVE_LLM_MODEL).strip() or ACTIVE_LLM_MODEL
+
+    def get_assistant_identity(self) -> Dict[str, str]:
+        return {
+            "name": "Qwen Command",
+            "model": self.get_chat_model_name(),
+            "role": "direct_operator",
+        }
 
     def _get_chat_client(self):
         """Return (and lazily create) a dedicated LLMClient for chat.
@@ -108,7 +158,7 @@ class ChatEngine:
             )
         return self._chat_client
 
-    async def respond(self, message: str) -> str:
+    async def respond(self, message: str, routed_actions: List[Dict[str, Any]] | None = None) -> str:
         msg = message.strip()
         if not msg:
             return "Mesaj bos."
@@ -117,6 +167,8 @@ class ChatEngine:
             t0 = time.monotonic()
             lightweight = self._is_lightweight_message(msg)
             context = await self._collect_context(msg, lightweight=lightweight)
+            if routed_actions:
+                context = f"{context}\n\nUYGULANAN KOMUTLAR:\n{self._format_routed_actions(routed_actions)}"
             elapsed = time.monotonic() - t0
             budget_left = max(2.0, CHAT_MAX_TOTAL_LATENCY - elapsed)
             return await self._ask_gemma(
@@ -128,6 +180,103 @@ class ChatEngine:
         except Exception as exc:
             logger.error("Chat error: %s", exc)
             return "Modelden yanit alirken teknik bir sorun oldu. Lutfen tekrar dener misin?"
+
+    async def interpret_direct_command(self, message: str) -> Dict[str, Any]:
+        msg = (message or "").strip()
+        if not msg:
+            return {"reply": "", "actions": []}
+
+        client = self._get_chat_client()
+        response = await client.generate(
+            prompt=(
+                f"Kullanici mesaji:\n{msg}\n\n"
+                "Mesaji desteklenen QuenBot aksiyonlarina cevir."
+            ),
+            system=DIRECT_COMMAND_SYSTEM_PROMPT,
+            temperature=0.05,
+            json_mode=True,
+            timeout_override=10,
+            prefer_fast_fail=False,
+            max_tokens_override=220,
+            max_retries_override=0,
+        )
+
+        if not response.success:
+            return {"reply": "", "actions": []}
+
+        data = response.as_json() or {}
+        if not isinstance(data, dict):
+            return {"reply": "", "actions": []}
+
+        actions = data.get("actions", [])
+        if not isinstance(actions, list):
+            actions = []
+
+        reply = data.get("reply", "")
+        if not isinstance(reply, str):
+            reply = ""
+
+        return {"reply": reply.strip(), "actions": actions[:8]}
+
+    def build_command_response(self, routed_actions: List[Dict[str, Any]]) -> str:
+        if not routed_actions:
+            return "Komut uygulanmadi."
+
+        lines: List[str] = []
+        for action in routed_actions[:5]:
+            action_type = action.get("type")
+            if action_type == "watchlist_add":
+                lines.append(f"Watchlist'e eklendi: {', '.join(action.get('symbols', [])[:8])}.")
+            elif action_type == "watchlist_remove":
+                lines.append(f"Watchlist'ten cikarildi: {', '.join(action.get('symbols', [])[:8])}.")
+            elif action_type == "risk_update":
+                changes = action.get("changes", {})
+                rendered = ", ".join(f"{k}={v}" for k, v in changes.items())
+                lines.append(f"Risk limitleri guncellendi: {rendered}.")
+            elif action_type == "master_directive_update":
+                lines.append(f"Ana direktif guncellendi: {str(action.get('text', ''))[:120]}.")
+            elif action_type == "system_mode_update":
+                forced = "kilitlendi" if action.get("forced") else "otomatikte"
+                lines.append(f"Sistem modu {action.get('mode', '?')} olarak ayarlandi, mod {forced}.")
+            elif action_type == "cleanup_run":
+                if action.get("dry_run", True):
+                    lines.append(
+                        f"Temizlik raporu hazir: {action.get('stale_count', 0)} stale manifest bulundu, silme yapilmadi."
+                    )
+                else:
+                    lines.append(
+                        f"Temizlik calisti: {action.get('deleted_count', 0)} manifest silindi, {action.get('stale_count', 0)} stale kayit tarandi."
+                    )
+            elif action_type == "system_diagnostic":
+                summary = action.get("summary", {})
+                components = action.get("components", {})
+                healthy_count = sum(1 for ok in components.values() if ok)
+                lines.append(
+                    f"Diagnostik tamam: mod={action.get('system_mode', '?')}, LLM={action.get('llm_model', '?')}, saglikli bilesen={healthy_count}/{len(components)}. Aktif sinyal={summary.get('active_signals', 0)}, acik simulasyon={summary.get('open_simulations', 0)}."
+                )
+            elif action_type == "symbol_analysis":
+                overall = action.get("overall_signal", {})
+                direction = overall.get("direction", "neutral")
+                confidence = overall.get("confidence", 0)
+                lines.append(
+                    f"{action.get('symbol', '?')} analizi hazir: yon={direction}, guven={confidence}, fiyat={action.get('latest_price', 0)}. Son 24 saatte {action.get('recent_movement_count', 0)} hareket kaydi bulundu."
+                )
+            elif action_type == "code_change_request":
+                extra = []
+                if action.get("status"):
+                    extra.append(f"durum={action.get('status')}")
+                if action.get("selected_files"):
+                    extra.append(f"dosya={', '.join(action.get('selected_files', [])[:4])}")
+                if action.get("clarification"):
+                    extra.append(f"not={str(action.get('clarification'))[:120]}")
+                extra_text = (" " + " | ".join(extra)) if extra else ""
+                lines.append(
+                    f"Kod operatoru gorevi olusturuldu: {str(action.get('task_id', '?'))} mod={str(action.get('mode', 'preview'))}.{extra_text} {str(action.get('summary', ''))[:160]}"
+                )
+            else:
+                lines.append(f"Komut uygulandi: {action_type}.")
+
+        return " ".join(lines)
 
     async def _collect_context(self, user_msg: str, lightweight: bool = False) -> str:
         snapshot = await self._get_snapshot(user_msg, lightweight=lightweight)
@@ -319,6 +468,37 @@ class ChatEngine:
             if alias in text and symbol not in found:
                 found.append(symbol)
         return found[:4]
+
+    def _format_routed_actions(self, routed_actions: List[Dict[str, Any]]) -> str:
+        lines: List[str] = []
+        for action in routed_actions[:6]:
+            action_type = action.get("type", "?")
+            if action_type in {"watchlist_add", "watchlist_remove"}:
+                lines.append(f"- {action_type}: {', '.join(action.get('symbols', [])[:8])}")
+            elif action_type == "risk_update":
+                changes = action.get("changes", {})
+                lines.append(f"- risk_update: {', '.join(f'{k}={v}' for k, v in changes.items())}")
+            elif action_type == "master_directive_update":
+                lines.append(f"- master_directive_update: {str(action.get('text', ''))[:120]}")
+            elif action_type == "system_mode_update":
+                lines.append(f"- system_mode_update: {action.get('mode', '?')}")
+            elif action_type == "cleanup_run":
+                lines.append(
+                    f"- cleanup_run: dry_run={action.get('dry_run', True)} stale={action.get('stale_count', 0)} deleted={action.get('deleted_count', 0)}"
+                )
+            elif action_type == "system_diagnostic":
+                summary = action.get("summary", {})
+                lines.append(
+                    f"- system_diagnostic: mode={action.get('system_mode', '?')} active={summary.get('active_signals', 0)} open={summary.get('open_simulations', 0)}"
+                )
+            elif action_type == "symbol_analysis":
+                overall = action.get("overall_signal", {})
+                lines.append(
+                    f"- symbol_analysis: {action.get('symbol', '?')} dir={overall.get('direction', 'neutral')} conf={overall.get('confidence', 0)} price={action.get('latest_price', 0)}"
+                )
+            else:
+                lines.append(f"- {action_type}")
+        return "\n".join(lines) if lines else "- yok"
 
     async def _ask_gemma(
         self,

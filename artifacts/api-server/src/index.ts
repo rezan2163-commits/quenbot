@@ -1,10 +1,159 @@
 import express from "express";
 import cors from "cors";
 import compression from "compression";
+import fs from "fs/promises";
+import path from "path";
 import { connectDatabase, createTables, sql } from "./db";
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
+const EFOM_BASE_DIR = process.env.QUENBOT_EFOM_DIR || path.resolve(process.cwd(), "../../python_agents/efom_data");
+const EFOM_REPORTS_DIR = path.join(EFOM_BASE_DIR, "reports");
+const TARGET_CARD_MIN_CONFIDENCE = Number(process.env.QUENBOT_TARGET_CARD_MIN_CONF || 0.62);
+const TARGET_CARD_MIN_QUALITY = Number(process.env.QUENBOT_TARGET_CARD_MIN_QUALITY || 0.64);
+const MAMIS_TARGET_CARD_MIN_CONFIDENCE = Number(process.env.QUENBOT_MAMIS_TARGET_CARD_MIN_CONF || 0.72);
+const MAMIS_TARGET_CARD_MIN_VOLATILITY = Number(process.env.QUENBOT_MAMIS_TARGET_CARD_MIN_VOLATILITY || 0.0035);
+
+function normalizeTimestamp(value: unknown): string | null {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "number") return new Date(value < 1_000_000_000_000 ? value * 1000 : value).toISOString();
+  if (typeof value !== "string") return String(value);
+
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^\d+$/.test(trimmed)) {
+    const numeric = Number(trimmed);
+    return new Date(numeric < 1_000_000_000_000 ? numeric * 1000 : numeric).toISOString();
+  }
+
+  const normalized = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(trimmed)
+    ? trimmed
+    : `${trimmed.replace(" ", "T")}Z`;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? trimmed : date.toISOString();
+}
+
+function hasExplicitTimezone(value: unknown) {
+  return typeof value === "string" && /[zZ]$|[+-]\d{2}:?\d{2}$/.test(value.trim());
+}
+
+function normalizeSignalMetadata(metadata: any) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return metadata;
+  return {
+    ...metadata,
+    signal_time: normalizeTimestamp(metadata.signal_time) ?? metadata.signal_time ?? null,
+    expires_at: normalizeTimestamp(metadata.expires_at) ?? metadata.expires_at ?? null,
+    dismissed_at: normalizeTimestamp(metadata.dismissed_at) ?? metadata.dismissed_at ?? null,
+    expired_at: normalizeTimestamp(metadata.expired_at) ?? metadata.expired_at ?? null,
+  };
+}
+
+function toFiniteNumber(value: unknown, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function normalizeTargetPct(value: unknown) {
+  const numeric = Math.abs(toFiniteNumber(value, 0));
+  if (numeric <= 0) return 0;
+  return numeric > 0.5 ? numeric / 100 : numeric;
+}
+
+function resolveSignalTargetPct(signal: any) {
+  const metadata = signal.metadata || {};
+  const direct = normalizeTargetPct(signal.target_pct ?? metadata.target_pct ?? metadata.predicted_magnitude);
+  if (direct > 0) return direct;
+  const entry = toFiniteNumber(signal.entry_price ?? metadata.entry_price ?? signal.price, 0);
+  const target = toFiniteNumber(signal.target_price ?? metadata.target_price, 0);
+  if (entry > 0 && target > 0) return Math.abs((target - entry) / entry);
+  return 0;
+}
+
+const INTEGRATION_STRATEGIC_SOURCES = new Set(["strategist", "pattern_matcher"]);
+
+function isIntegrationStrategicSource(source: unknown): boolean {
+  return INTEGRATION_STRATEGIC_SOURCES.has(String(source || "").trim().toLowerCase());
+}
+
+function resolveSignalQuality(signal: any) {
+  const targetPct = resolveSignalTargetPct(signal);
+  const confidence = Math.min(Math.max(toFiniteNumber(signal.confidence, 0), 0), 1);
+  const explicit = toFiniteNumber(signal.metadata?.quality_score, Number.NaN);
+  if (Number.isFinite(explicit)) return explicit;
+  const ideal = 0.025;
+  const targetComponent = 1 - Math.min(Math.abs(targetPct - ideal) / 0.03, 1);
+  return Math.min(Math.max(confidence * 0.8 + targetComponent * 0.2, 0), 1);
+}
+
+function resolveSignalSource(signal: any) {
+  return String(signal.source || signal.metadata?.source || signal.metadata?.signal_provider || "unknown").toLowerCase();
+}
+
+function isActionableTargetCard(signal: any) {
+  const status = String(signal.status || "").toLowerCase();
+  if (!['pending', 'active', 'open'].includes(status)) return false;
+
+  const confidence = toFiniteNumber(signal.confidence, 0);
+  const targetPct = resolveSignalTargetPct(signal);
+  const quality = resolveSignalQuality(signal);
+  const source = resolveSignalSource(signal);
+  const explicitCandidate = String(signal.metadata?.dashboard_candidate || "").toLowerCase() === 'true';
+
+  if (targetPct < 0.02) return false;
+
+  if (!['strategist', 'pattern_matcher'].includes(source)) return false;
+
+  return explicitCandidate || (
+    confidence >= TARGET_CARD_MIN_CONFIDENCE
+    && quality >= TARGET_CARD_MIN_QUALITY
+  );
+}
+
+function isVisibleSignalHistory(signal: any) {
+  const status = String(signal.status || '').toLowerCase();
+  const source = resolveSignalSource(signal);
+
+  if (status === 'dismissed' || status === 'filtered_duplicate' || status === 'filtered_noise') {
+    return false;
+  }
+  if (status.startsWith('risk_')) {
+    return false;
+  }
+  if (!['strategist', 'pattern_matcher'].includes(source)) {
+    return false;
+  }
+  return true;
+}
+
+function normalizeSignalRow(row: any) {
+  const timestamp = normalizeTimestamp(row.timestamp) ?? row.timestamp;
+  const signalTime = timestamp ?? normalizeTimestamp(row.signal_time) ?? row.signal_time;
+  const expiresAt = timestamp
+    ? new Date(new Date(timestamp).getTime() + 24 * 3600 * 1000).toISOString()
+    : normalizeTimestamp(row.expires_at) ?? row.expires_at;
+
+  return {
+    ...row,
+    timestamp,
+    signal_time: signalTime,
+    expires_at: expiresAt,
+    metadata: {
+      ...(normalizeSignalMetadata(row.metadata) || {}),
+      signal_time: signalTime,
+      expires_at: expiresAt,
+    },
+  };
+}
+
+async function readJsonFileOrNull(filePath: string) {
+  try {
+    const raw = await fs.readFile(filePath, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 type SummaryCache = {
   total_trades: number;
@@ -45,6 +194,112 @@ const moversCache: { data: any[]; updatedAt: number; refreshing: boolean } = {
   updatedAt: 0,
   refreshing: false,
 };
+const exchangeFreshnessCache: { data: any[]; updatedAt: number; refreshing: boolean } = {
+  data: [],
+  updatedAt: 0,
+  refreshing: false,
+};
+
+async function buildLocalChatFallback() {
+  try {
+    await refreshSummaryCache();
+    const summary = summaryCache.data;
+    const latestSignals = await sql`
+      SELECT symbol
+      FROM signals
+      WHERE status IN ('pending', 'active', 'open')
+        AND COALESCE(target_pct, 0) >= 0.02
+        AND LOWER(COALESCE(source, '')) IN ('strategist', 'pattern_matcher')
+      ORDER BY timestamp DESC, confidence DESC
+      LIMIT 3
+    `;
+
+    const symbols = latestSignals
+      .map((row) => String(row.symbol || '').trim())
+      .filter(Boolean)
+      .join(', ');
+
+    return {
+      success: true,
+      status: 'chat_timeout_fallback_local',
+      message: [
+        'Sistem aktif ama chat modeli su an yogun.',
+        `Bekleyen sinyal: ${summary.active_signals}`,
+        `Acik simulasyon: ${summary.open_simulations}`,
+        `Win rate: %${Number(summary.win_rate || 0).toFixed(1)}`,
+        symbols ? `Gorunen hedef kartlari: ${symbols}` : 'Hedef kartlari canli akista izleniyor.',
+        'Istersen soruyu daha kisa gonder veya kod gorevini dogrudan Code Operator panelinden ver.'
+      ].join(' | '),
+      assistant: {
+        name: 'Qwen Command',
+        model: 'fallback-status',
+        role: 'direct_operator',
+      },
+      routed_actions: [],
+      timestamp: new Date().toISOString(),
+    };
+  } catch (error) {
+    console.warn('Local chat fallback build failed:', error);
+    return {
+      success: true,
+      status: 'chat_timeout_fallback_local',
+      message: 'Sistem aktif ama chat modeli su an yogun. Birazdan tekrar deneyin veya gorevi Code Operator panelinden iletin.',
+      assistant: {
+        name: 'Qwen Command',
+        model: 'fallback-status',
+        role: 'direct_operator',
+      },
+      routed_actions: [],
+      timestamp: new Date().toISOString(),
+    };
+  }
+}
+
+async function refreshExchangeFreshnessCache() {
+  if (exchangeFreshnessCache.refreshing) return;
+  exchangeFreshnessCache.refreshing = true;
+  try {
+    const rows = await sql`
+      SELECT
+        exchange,
+        market_type,
+        MAX(timestamp) AS last_trade_at,
+        COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '5 minutes')::int AS trades_5m,
+        COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '1 hour')::int AS trades_1h,
+        EXTRACT(EPOCH FROM (NOW() - MAX(timestamp)))::double precision AS age_seconds
+      FROM trades
+      WHERE timestamp >= NOW() - INTERVAL '24 hours'
+      GROUP BY exchange, market_type
+      ORDER BY exchange, market_type
+    `;
+    exchangeFreshnessCache.data = rows;
+    exchangeFreshnessCache.updatedAt = Date.now();
+  } catch (error) {
+    console.error("Exchange freshness cache refresh failed:", error);
+  } finally {
+    exchangeFreshnessCache.refreshing = false;
+  }
+}
+
+function buildExchangeFallback(agentRows: Array<{ name: string; age_seconds: number; last_heartbeat: string | null; metadata?: any }>) {
+  const scout = agentRows.find((row) => row.name === "scout");
+  const lastTradeAt = normalizeTimestamp(scout?.metadata?.last_activity) ?? normalizeTimestamp(scout?.last_heartbeat) ?? new Date().toISOString();
+  const ageSeconds = Math.max(0, Number(scout?.age_seconds || 0));
+  const feeds = [
+    { exchange: "binance", market_type: "futures" },
+    { exchange: "binance", market_type: "spot" },
+    { exchange: "bybit", market_type: "futures" },
+    { exchange: "bybit", market_type: "spot" },
+  ];
+
+  return feeds.map((feed) => ({
+    ...feed,
+    last_trade_at: lastTradeAt,
+    trades_5m: 0,
+    trades_1h: 0,
+    age_seconds: ageSeconds,
+  }));
+}
 
 async function refreshSummaryCache() {
   if (summaryCache.refreshing) return;
@@ -174,6 +429,20 @@ app.use(express.json());
 
 const AGENT_STALE_SECONDS = Number(process.env.AGENT_STALE_SECONDS || 600);
 
+async function fetchJsonOrNull(url: string, timeoutMs = 4000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function buildAgentStatusResponse() {
   const heartbeats = await sql`
     SELECT agent_name, status, last_heartbeat, metadata,
@@ -195,7 +464,7 @@ async function buildAgentStatusResponse() {
   }
 
   if (Object.keys(agents).length === 0) {
-    for (const name of ['scout', 'strategist', 'ghost_simulator', 'auditor', 'brain', 'chat_engine']) {
+    for (const name of ['scout', 'strategist', 'ghost_simulator', 'auditor', 'brain', 'decision_core', 'efom', 'chat_engine']) {
       agents[name] = { status: "unknown", source_status: null, last_heartbeat: null, age_seconds: null, metadata: null };
     }
   }
@@ -358,20 +627,122 @@ app.get("/api/signals", async (req, res) => {
           END, 0.02
         ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes,
+        COALESCE(metadata->>'source', metadata->>'signal_provider', 'unknown') AS source,
+        COALESCE(metadata->>'source_model', 'unknown') AS source_model,
+        COALESCE(metadata->>'expires_at', (timestamp + INTERVAL '24 hours')::text) AS expires_at,
         status,
         timestamp,
         metadata,
         COALESCE(metadata->>'exchange', 'binance') AS exchange,
         market_type
       FROM signals
-      WHERE NOT (
-        (status = 'failed' OR status LIKE 'risk_%')
-        AND timestamp < NOW() - INTERVAL '24 hours'
-      )
-      ORDER BY confidence DESC, timestamp DESC
-      LIMIT 100
+      WHERE status IN ('pending', 'active', 'open')
+        AND timestamp >= NOW() - INTERVAL '24 hours'
+        AND COALESCE(metadata->>'source', metadata->>'signal_provider', 'unknown') IN ('strategist', 'pattern_matcher')
+        AND GREATEST(
+          CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
+            THEN COALESCE((metadata->>'target_pct')::double precision, 0.02) / 100.0
+            ELSE COALESCE((metadata->>'target_pct')::double precision, 0.02)
+          END, 0.02
+        ) >= 0.02
+      ORDER BY timestamp DESC, confidence DESC
+      LIMIT 200
     `;
-    res.json(signals);
+    res.json(signals.map(normalizeSignalRow).filter(isActionableTargetCard));
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/signals/:id/dismiss", async (req, res) => {
+  try {
+    const signalId = Number(req.params.id || 0);
+    if (!Number.isInteger(signalId) || signalId <= 0) {
+      res.status(400).json({ error: "invalid_signal_id" });
+      return;
+    }
+
+    const updated = await sql`
+      UPDATE signals
+      SET status = 'dismissed',
+          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+            'dismissed_at', NOW()::text,
+            'dismissed_from', 'dashboard'
+          )
+      WHERE id = ${signalId}
+      RETURNING id
+    `;
+
+    if (!updated.length) {
+      res.status(404).json({ error: "signal_not_found" });
+      return;
+    }
+
+    res.json({ ok: true, id: signalId });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/signals/clear", async (req, res) => {
+  try {
+    const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const ids = rawIds.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0);
+    if (!ids.length) {
+      res.status(400).json({ error: "no_signal_ids" });
+      return;
+    }
+
+    let updatedCount = 0;
+    await Promise.all(ids.map(async (signalId: number) => {
+      const updated = await sql`
+        UPDATE signals
+        SET status = 'dismissed',
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+              'dismissed_at', NOW()::text,
+              'dismissed_from', 'dashboard_bulk'
+            )
+        WHERE id = ${signalId}
+        RETURNING id
+      `;
+      updatedCount += updated.length;
+    }));
+
+    res.json({ ok: true, updated: updatedCount });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/efom/overview", async (_req, res) => {
+  try {
+    const [postMortem, optunaTrials, runtimeConfig] = await Promise.all([
+      readJsonFileOrNull(path.join(EFOM_REPORTS_DIR, "post_mortem_report.json")),
+      readJsonFileOrNull(path.join(EFOM_REPORTS_DIR, "optuna_trials.json")),
+      readJsonFileOrNull(path.join(EFOM_BASE_DIR, "runtime_config.json")),
+    ]);
+
+    const trials = Array.isArray(optunaTrials) ? optunaTrials : [];
+    const bestTrial = trials.reduce<any | null>((best, trial) => {
+      if (!trial || typeof trial !== "object") return best;
+      if (typeof trial.value !== "number") return best;
+      if (!best || trial.value > best.value) return trial;
+      return best;
+    }, null);
+
+    res.json({
+      ok: true,
+      generated_at: new Date().toISOString(),
+      reports_path: EFOM_REPORTS_DIR,
+      runtime_config_path: path.join(EFOM_BASE_DIR, "runtime_config.json"),
+      post_mortem: postMortem,
+      optuna: {
+        trials,
+        total_trials: trials.length,
+        best_trial: bestTrial,
+      },
+      runtime_config: runtimeConfig,
+    });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -429,7 +800,7 @@ app.get("/api/analytics/volume-by-exchange", async (req, res) => {
       GROUP BY exchange, market_type
       ORDER BY total_volume DESC
     `;
-    res.json(rows);
+    res.json(rows.map(normalizeSignalRow).filter(isVisibleSignalHistory));
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -459,7 +830,7 @@ app.get("/api/analytics/trade-timeline", async (req, res) => {
       GROUP BY minute
       ORDER BY minute ASC
     `;
-    res.json(rows);
+    res.json(rows.map(normalizeSignalRow).filter(isVisibleSignalHistory));
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -479,7 +850,7 @@ app.get("/api/analytics/order-flow", async (req, res) => {
       GROUP BY symbol
       ORDER BY symbol
     `;
-    res.json(rows);
+    res.json(rows.map(normalizeSignalRow));
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -647,6 +1018,15 @@ app.get("/api/chat/messages", async (req, res) => {
       FROM chat_messages ORDER BY created_at DESC LIMIT ${limit}
     `;
     res.json(messages.reverse());
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.delete("/api/chat/messages", async (_req, res) => {
+  try {
+    const deleted = await sql`DELETE FROM chat_messages`;
+    res.json({ success: true, deleted: deleted.count ?? 0 });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -1033,7 +1413,7 @@ app.get("/api/signals/history", async (req, res) => {
         WHERE NOT ((status = 'failed' OR status LIKE 'risk_%') AND timestamp < NOW() - INTERVAL '24 hours')
         ORDER BY timestamp DESC LIMIT ${limit}`;
     }
-    res.json(rows);
+    res.json(rows.map(normalizeSignalRow).filter(isVisibleSignalHistory));
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -1272,7 +1652,7 @@ app.get("/api/signals/summary", async (req, res) => {
 });
 
 /* ═══ LLM Directive Proxy (forwards to Python directive API on port 3002) ═══ */
-const DIRECTIVE_API = "http://localhost:3002";
+const DIRECTIVE_API = process.env.QUENBOT_DIRECTIVE_API || "http://127.0.0.1:3002";
 
 app.get("/api/directives", async (req, res) => {
   try {
@@ -1293,6 +1673,52 @@ app.delete("/api/directives", async (req, res) => {
     const r = await fetch(`${DIRECTIVE_API}/api/directives`, { method: "DELETE" });
     res.json(await r.json());
   } catch { res.json({ status: "Directive API unavailable" }); }
+});
+
+app.get("/api/code/status", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/code/status`);
+    res.status(r.status).json(await r.json());
+  } catch {
+    res.json({ enabled: false, error: "Code operator unavailable" });
+  }
+});
+
+app.get("/api/code/tasks", async (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 20);
+    const r = await fetch(`${DIRECTIVE_API}/api/code/tasks?limit=${encodeURIComponent(String(limit))}`);
+    res.status(r.status).json(await r.json());
+  } catch {
+    res.json({ items: [], error: "Code operator unavailable" });
+  }
+});
+
+app.post("/api/code/tasks", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/code/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body || {}),
+    });
+    res.status(r.status).json(await r.json());
+  } catch {
+    res.status(502).json({ error: "Code operator unavailable" });
+  }
+});
+
+app.post("/api/code/tasks/:taskId/apply", async (req, res) => {
+  try {
+    const taskId = String(req.params.taskId || "").trim();
+    const r = await fetch(`${DIRECTIVE_API}/api/code/tasks/${encodeURIComponent(taskId)}/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body || {}),
+    });
+    res.status(r.status).json(await r.json());
+  } catch {
+    res.status(502).json({ error: "Code operator unavailable" });
+  }
 });
 
 app.get("/api/llm/status", async (req, res) => {
@@ -1341,6 +1767,15 @@ app.get("/api/system/events", async (req, res) => {
     const r = await fetch(`${DIRECTIVE_API}/api/system/events`);
     res.json(await r.json());
   } catch { res.json({ total_events: 0, recent_events: [], error: "Event API unavailable" }); }
+});
+
+app.get("/api/mamis/status", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/mamis/status`);
+    res.json(await r.json());
+  } catch {
+    res.json({ health: { healthy: false }, bars: [], classifications: [], signals: [], error: "MAMIS API unavailable" });
+  }
 });
 
 /* ═══ DATA AUDIT / VALIDATION ═══ */
@@ -1398,8 +1833,8 @@ app.post("/api/chat", express.json(), async (req, res) => {
   try {
     // Forward to Python agents on port 3002 with a bounded timeout for snappy UX.
     const controller = new AbortController();
-    // 38s: allows cold model load (~10s) + inference (~20s) + buffer
-    const timeoutId = setTimeout(() => controller.abort(), 38000);
+    // Hard bound chat latency so the dashboard never appears dead.
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
 
     try {
       const agentResponse = await fetch("http://127.0.0.1:3002/api/chat", {
@@ -1415,7 +1850,10 @@ app.post("/api/chat", express.json(), async (req, res) => {
         const data = await agentResponse.json();
         return res.json({
           success: true,
-          message: data.message || "Gemma response generated",
+          message: data.message || "Qwen response generated",
+          assistant: data.assistant,
+          routed_actions: data.routed_actions || [],
+          status: data.status,
           timestamp: data.timestamp || new Date().toISOString(),
         });
       }
@@ -1424,41 +1862,7 @@ app.post("/api/chat", express.json(), async (req, res) => {
       console.warn("Agents connection attempt:", fetchError instanceof Error ? fetchError.message : "timeout");
     }
 
-    // Fast fallback: return live system snapshot instead of generic busy text.
-    try {
-      const summaryRes = await fetch("http://127.0.0.1:3002/api/system/summary", {
-        signal: AbortSignal.timeout(4000),
-      });
-      if (summaryRes.ok) {
-        const summary = await summaryRes.json();
-        const llmModel = summary?.llm?.model || "quenbot-qwen";
-        const llmOk = summary?.llm?.ok ?? true;
-        const trades = summary?.state?.trades ?? 0;
-        const patterns = summary?.brain?.patterns ?? 0;
-        const scans = summary?.pattern_matcher?.scans ?? 0;
-        const matches = summary?.pattern_matcher?.matches ?? 0;
-        const cpu = summary?.resources?.cpu ?? 0;
-        const ram = summary?.resources?.ram_mb || "?";
-        const statusNote = llmOk
-          ? "Model hazir, yanit gecikmeli geldi."
-          : "Model yogun, kisaca gonderin.";
-        return res.json({
-          success: true,
-          status: "chat_timeout_fallback",
-          message: `Sistem calisıyor — ${statusNote} Model: ${llmModel} | Islem: ${trades} | Pattern: ${patterns} | Tarama: ${scans} eslesme: ${matches} | CPU: %${Math.round(cpu)} RAM: ${ram}. Soruyu tekrar gonderin.`,
-          timestamp: new Date().toISOString(),
-        });
-      }
-    } catch {
-      // ignore and use static fallback below
-    }
-
-    res.json({
-      success: true,
-      status: "agents_unavailable",
-      message: "Sistem aktif. Sohbet motoru cok yogun, ayni soruyu hemen tekrar gonderin — bu sefer cok daha hizli cevaplayacak.",
-      timestamp: new Date().toISOString(),
-    });
+    return res.json(await buildLocalChatFallback());
   } catch (error) {
     res.status(500).json({
       error: String(error),
@@ -1492,60 +1896,42 @@ app.get("/api/backtest/scores", async (_req, res) => {
   }
 });
 
-app.get("/api/backtest/recent", async (_req, res) => {
-  try {
-    const rows = await sql`
-      SELECT
-        sim.id, sim.symbol, sim.side,
-        sim.entry_price::float, sim.exit_price::float,
-        sim.pnl::float, sim.pnl_pct::float,
-        sim.entry_time, sim.exit_time,
-        s.signal_type, s.confidence::float, s.metadata AS signal_metadata,
-        CASE WHEN sim.pnl > 0 THEN true ELSE false END AS success
-      FROM simulations sim
-      LEFT JOIN signals s ON s.id = sim.signal_id
-      WHERE sim.status = 'closed'
-      ORDER BY sim.exit_time DESC
-      LIMIT 30
-    `;
-    res.json(rows);
-  } catch (error) {
-    res.status(500).json({ error: String(error) });
-  }
-});
-
-// ─── Self-Correction Status ───
 app.get("/api/selfcorrection/status", async (_req, res) => {
   try {
-    const [corrections, recentPerf, strategyEvents, rca] = await Promise.all([
-      sql`
-        SELECT id, signal_type, failure_type, adjustment_key, adjustment_value, reason, applied, simulation_id
-        FROM correction_notes ORDER BY id DESC LIMIT 20
-      `,
+    const [recentPerf, corrections, strategyEvents, rca] = await Promise.all([
       sql`
         SELECT
           COUNT(*)::int AS recent_trades,
           SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::int AS recent_wins,
-          ROUND((SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) * 100)::numeric, 1)::float AS recent_win_rate,
+          ROUND((SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0) * 100), 1)::float AS recent_win_rate,
           ROUND(AVG(pnl_pct)::numeric, 3)::float AS avg_pnl_pct
         FROM simulations
         WHERE status = 'closed' AND exit_time > NOW() - INTERVAL '24 hours'
       `,
       sql`
-        SELECT state_value, updated_at
+        SELECT id, signal_type, failure_type, adjustment_key, adjustment_value, reason, applied
+        FROM correction_notes
+        ORDER BY created_at DESC
+        LIMIT 20
+      `,
+      sql`
+        SELECT state_key, state_value, updated_at
         FROM bot_state
         WHERE state_key IN ('strategy_mode', 'last_strategy_update', 'adaptive_params')
         ORDER BY updated_at DESC
       `,
       sql`
-        SELECT failure_type, COUNT(*)::int AS count,
+        SELECT
+          failure_type,
+          COUNT(*)::int AS count,
           ROUND(AVG(confidence)::numeric, 2)::float AS avg_confidence
         FROM rca_results
-        WHERE id > (SELECT COALESCE(MAX(id), 0) - 50 FROM rca_results)
+        WHERE id > (SELECT GREATEST(COALESCE(MAX(id), 0) - 50, 0) FROM rca_results)
         GROUP BY failure_type
         ORDER BY count DESC
       `,
     ]);
+
     const perf = recentPerf[0] || {};
     const needsCorrection = (perf.recent_win_rate ?? 100) < 50 && (perf.recent_trades ?? 0) >= 5;
     res.json({
@@ -1598,6 +1984,242 @@ app.get("/api/agents/flow", async (_req, res) => {
         ghost_simulator: { status: agents.ghost_simulator?.status || "unknown", lastBeat: agents.ghost_simulator?.last_heartbeat, recent_sims: recentSims },
         auditor: { status: agents.auditor?.status || "unknown", lastBeat: agents.auditor?.last_heartbeat },
         brain: { status: agents.brain?.status || "unknown", lastBeat: agents.brain?.last_heartbeat },
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/integration/overview", async (_req, res) => {
+  try {
+    const [heartbeats, recentSignals, sourcePerformance, learningStats, stateHistory, resourceHb, systemSummary, directives, efomOverview] = await Promise.all([
+      sql`
+        SELECT
+          agent_name,
+          status,
+          last_heartbeat,
+          metadata,
+          EXTRACT(EPOCH FROM (NOW() - last_heartbeat))::double precision AS age_seconds
+        FROM agent_heartbeat
+        ORDER BY agent_name
+      `,
+      sql`
+        SELECT
+          id,
+          symbol,
+          signal_type,
+          confidence::double precision AS confidence,
+          status,
+          timestamp,
+          COALESCE(metadata->>'source', metadata->>'signal_provider', 'unknown') AS source,
+          COALESCE(metadata->>'source_model', 'unknown') AS source_model,
+          COALESCE(metadata->>'exchange', 'binance') AS exchange,
+          COALESCE(market_type, 'spot') AS market_type
+        FROM signals
+        WHERE timestamp >= NOW() - INTERVAL '24 hours'
+        ORDER BY timestamp DESC
+        LIMIT 24
+      `,
+      sql`
+        SELECT
+          COALESCE(s.metadata->>'source', s.metadata->>'signal_provider', 'unknown') AS source,
+          COALESCE(s.metadata->>'source_model', 'unknown') AS source_model,
+          COUNT(*)::int AS total_signals,
+          COUNT(CASE WHEN s.status IN ('pending', 'active', 'open') THEN 1 END)::int AS active_signals,
+          COUNT(CASE WHEN sim.status = 'closed' THEN 1 END)::int AS closed_simulations,
+          COUNT(CASE WHEN sim.status = 'closed' AND COALESCE(sim.pnl, 0) > 0 THEN 1 END)::int AS wins,
+          COALESCE(AVG(sim.pnl_pct), 0)::double precision AS avg_pnl_pct,
+          COALESCE(MAX(s.confidence), 0)::double precision AS best_confidence,
+          MAX(s.timestamp) AS last_signal_at
+        FROM signals s
+        LEFT JOIN simulations sim ON sim.signal_id = s.id
+        WHERE s.timestamp >= NOW() - INTERVAL '7 days'
+        GROUP BY 1, 2
+        ORDER BY total_signals DESC, avg_pnl_pct DESC
+        LIMIT 12
+      `,
+      sql`
+        SELECT
+          exchange,
+          market_type,
+          MAX(timestamp) AS last_trade_at,
+          COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '5 minutes')::int AS trades_5m,
+          COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '1 hour')::int AS trades_1h,
+          EXTRACT(EPOCH FROM (NOW() - MAX(timestamp)))::double precision AS age_seconds
+        FROM trades
+        WHERE timestamp >= NOW() - INTERVAL '24 hours'
+        GROUP BY exchange, market_type
+        ORDER BY exchange, market_type
+      `,
+      sql`
+        SELECT
+          COUNT(*)::int AS total,
+          COUNT(CASE WHEN was_correct THEN 1 END)::int AS correct,
+          COALESCE(AVG(pnl_pct), 0)::double precision AS avg_pnl
+        FROM brain_learning_log
+      `,
+      sql`
+        SELECT
+          timestamp,
+          mode,
+          cumulative_pnl::double precision AS cumulative_pnl,
+          daily_pnl::double precision AS daily_pnl,
+          win_rate::double precision AS win_rate,
+          total_trades
+        FROM state_history
+        WHERE timestamp >= NOW() - INTERVAL '24 hours'
+        ORDER BY timestamp ASC
+        LIMIT 96
+      `,
+      sql`SELECT metadata FROM agent_heartbeat WHERE agent_name = 'system_resources' LIMIT 1`,
+      fetchJsonOrNull(`${DIRECTIVE_API}/api/system/summary`),
+      fetchJsonOrNull(`${DIRECTIVE_API}/api/directives`),
+      readJsonFileOrNull(path.join(EFOM_REPORTS_DIR, "post_mortem_report.json")).then(async (postMortem) => {
+        const trials = await readJsonFileOrNull(path.join(EFOM_REPORTS_DIR, "optuna_trials.json"));
+        return {
+          post_mortem: postMortem,
+          optuna_trials: Array.isArray(trials) ? trials : [],
+        };
+      })
+    ]);
+
+    const agentRows = heartbeats.map((hb: any) => {
+      const metadata = typeof hb.metadata === "string" ? JSON.parse(hb.metadata) : (hb.metadata || {});
+      const ageSeconds = Math.max(0, Math.round(Number(hb.age_seconds || 0)));
+      const status = ageSeconds <= AGENT_STALE_SECONDS ? hb.status : "stale";
+      const activityScore = Number(
+        metadata.trade_counter ??
+        metadata.scans ??
+        metadata.processed_signals ??
+        metadata.total_processed ??
+        metadata.events_processed ??
+        metadata.logged_trades ??
+        metadata.optimizations_run ??
+        metadata.total_requests ??
+        metadata.gemma_calls ??
+        metadata.patterns ??
+        0
+      );
+      return {
+        name: hb.agent_name,
+        status,
+        source_status: hb.status,
+        last_heartbeat: hb.last_heartbeat,
+        age_seconds: ageSeconds,
+        activity_score: activityScore,
+        metadata,
+      };
+    });
+
+    const modelsMap = new Map<string, { name: string; owner: string; activity: number; source: string }>();
+    const strategicRecentSignals = (recentSignals as any[]).filter((row) => isIntegrationStrategicSource(row.source));
+    const strategicPerformance = (sourcePerformance as any[]).filter((row) => isIntegrationStrategicSource(row.source));
+    if (!exchangeFreshnessCache.refreshing && Date.now() - exchangeFreshnessCache.updatedAt > 15000) {
+      void refreshExchangeFreshnessCache();
+    }
+    for (const row of strategicPerformance) {
+      const modelName = String(row.source_model || "unknown");
+      if (!modelName || modelName === "unknown") continue;
+      const existing = modelsMap.get(modelName) || { name: modelName, owner: String(row.source || "unknown"), activity: 0, source: String(row.source || "unknown") };
+      existing.activity += Number(row.total_signals || 0);
+      modelsMap.set(modelName, existing);
+    }
+
+    for (const row of agentRows) {
+      const modelName = String(
+        row.metadata?.source_model ||
+        row.metadata?.model ||
+        row.metadata?.active_model ||
+        row.metadata?.llm_model ||
+        ""
+      ).trim();
+      if (!modelName) continue;
+      const existing = modelsMap.get(modelName) || { name: modelName, owner: row.name, activity: 0, source: row.name };
+      existing.activity += Math.max(1, Number(row.activity_score || 0));
+      modelsMap.set(modelName, existing);
+    }
+
+    const resourceMetaRaw = resourceHb[0]?.metadata;
+    const resourceMeta = typeof resourceMetaRaw === "string" ? JSON.parse(resourceMetaRaw) : (resourceMetaRaw || {});
+    const learning = learningStats[0] || { total: 0, correct: 0, avg_pnl: 0 };
+    const accuracy = Number(learning.total || 0) > 0 ? (Number(learning.correct || 0) / Number(learning.total || 1)) * 100 : 0;
+    const systemSummaryData = systemSummary && typeof systemSummary === "object" && !Array.isArray(systemSummary) ? (systemSummary as any) : {};
+    const learningWeights = systemSummaryData?.brain?.learning_weights || {};
+    const decisionCore = systemSummaryData?.decision_core || {};
+    const efom = systemSummaryData?.efom || {};
+    const masterDirective = String(directives?.master_directive || "").trim();
+    const postMortem = efomOverview?.post_mortem || null;
+    const optunaTrials: Array<{ value?: number; [key: string]: any }> = Array.isArray(efomOverview?.optuna_trials) ? efomOverview.optuna_trials : [];
+    const bestTrial = optunaTrials.reduce<{ value?: number; [key: string]: any } | null>((best, trial) => {
+      if (!trial || typeof trial !== "object" || typeof trial.value !== "number") return best;
+      if (!best || typeof best.value !== "number" || trial.value > best.value) return trial;
+      return best;
+    }, null);
+
+    res.json({
+      generated_at: new Date().toISOString(),
+      agents: agentRows,
+      models: Array.from(modelsMap.values()).sort((a, b) => b.activity - a.activity).slice(0, 10),
+      signals: {
+        recent: strategicRecentSignals,
+        performance: strategicPerformance.map((row: any) => ({
+          ...row,
+          win_rate: Number(row.closed_simulations || 0) > 0 ? (Number(row.wins || 0) / Number(row.closed_simulations || 1)) * 100 : 0,
+        })),
+      },
+      exchanges: exchangeFreshnessCache.data.length > 0 ? exchangeFreshnessCache.data : buildExchangeFallback(agentRows),
+      resources: {
+        cpu_percent: Number(resourceMeta.cpu_percent || 0),
+        ram_percent: Number(resourceMeta.ram_percent || 0),
+        ram_used_mb: Number(resourceMeta.ram_used_mb || 0),
+        process_rss_mb: Number(resourceMeta.process_rss_mb || 0),
+        disk_percent: Number(resourceMeta.disk_percent || 0),
+        load_avg: [
+          Number(resourceMeta.load_avg_1m || 0),
+          Number(resourceMeta.load_avg_5m || 0),
+          Number(resourceMeta.load_avg_15m || 0),
+        ],
+      },
+      brain: {
+        total: Number(learning.total || 0),
+        correct: Number(learning.correct || 0),
+        accuracy,
+        avg_pnl: Number(learning.avg_pnl || 0),
+        history: stateHistory,
+      },
+      brain_control: {
+        mode: String(systemSummaryData?.mode || "unknown"),
+        health: String(systemSummaryData?.health || "unknown"),
+        directive_updated_at: directives?.updated_at || null,
+        directive_preview: masterDirective ? masterDirective.slice(0, 180) : null,
+        decision_core: {
+          ok: Boolean(decisionCore?.ok),
+          model: String(decisionCore?.model || systemSummaryData?.llm?.model || "unknown"),
+          approval_rate: Number(decisionCore?.approval_rate || 0),
+          total_requests: Number(decisionCore?.total_requests || 0),
+          gemma_calls: Number(decisionCore?.gemma_calls || 0),
+          fallback_calls: Number(decisionCore?.fallback_calls || 0),
+          avg_latency_ms: Number(decisionCore?.avg_latency_ms || 0),
+        },
+        learning_weights: {
+          similarity: Number(learningWeights?.similarity || 0),
+          volume_match: Number(learningWeights?.volume_match || 0),
+          direction_match: Number(learningWeights?.direction_match || 0),
+          confidence_history: Number(learningWeights?.confidence_history || 0),
+        },
+        efom: {
+          ok: Boolean(efom?.ok),
+          logged_trades: Number(efom?.logged_trades || 0),
+          optimizations_run: Number(efom?.optimizations_run || 0),
+          config_path: efom?.config_path || null,
+          latest_report_summary: postMortem?.summary || null,
+          latest_report_sample_size: Number(postMortem?.sample_size || 0),
+          failure_patterns: Array.isArray(postMortem?.failure_patterns) ? postMortem.failure_patterns : [],
+          optuna_total_trials: optunaTrials.length,
+          optuna_best_value: Number(bestTrial?.value || 0),
+          optuna_best_trial: bestTrial,
+        },
       },
     });
   } catch (error) {

@@ -2,12 +2,17 @@ import asyncpg
 import json
 import logging
 import numpy as np
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+TARGET_CARD_MIN_CONFIDENCE = float(Config.get_env('QUENBOT_TARGET_CARD_MIN_CONF', 0.62)) if hasattr(Config, 'get_env') else float(__import__('os').getenv('QUENBOT_TARGET_CARD_MIN_CONF', '0.62'))
+TARGET_CARD_MIN_QUALITY = float(Config.get_env('QUENBOT_TARGET_CARD_MIN_QUALITY', 0.68)) if hasattr(Config, 'get_env') else float(__import__('os').getenv('QUENBOT_TARGET_CARD_MIN_QUALITY', '0.68'))
+MAMIS_TARGET_CARD_MIN_CONFIDENCE = float(Config.get_env('QUENBOT_MAMIS_TARGET_CARD_MIN_CONF', 0.72)) if hasattr(Config, 'get_env') else float(__import__('os').getenv('QUENBOT_MAMIS_TARGET_CARD_MIN_CONF', '0.72'))
+MAMIS_TARGET_CARD_MIN_VOLATILITY = float(Config.get_env('QUENBOT_MAMIS_TARGET_CARD_MIN_VOLATILITY', 0.0035)) if hasattr(Config, 'get_env') else float(__import__('os').getenv('QUENBOT_MAMIS_TARGET_CARD_MIN_VOLATILITY', '0.0035'))
 
 
 def _json_serial(obj):
@@ -32,9 +37,212 @@ def _dumps(obj):
     return json.dumps(obj, default=_json_serial)
 
 
+def _utc_isoformat(value: Any) -> str:
+    if isinstance(value, datetime):
+        aware = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+        return aware.isoformat()
+    return str(value)
+
+
+def _utc_naive(value: Any) -> Any:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def _infer_signal_source(signal_type: str, metadata: Dict[str, Any]) -> str:
+    explicit = str(metadata.get('source') or metadata.get('signal_provider') or '').strip().lower()
+    if explicit:
+        return explicit
+
+    lowered = str(signal_type or '').lower()
+    if lowered.startswith('mamis_'):
+        return 'mamis'
+    if 'pattern' in lowered or 'signature' in lowered:
+        return 'pattern_matcher'
+    return 'strategist'
+
+
+def _infer_signal_model(source: str, metadata: Dict[str, Any]) -> str:
+    explicit = str(metadata.get('source_model') or '').strip()
+    if explicit:
+        return explicit
+    if metadata.get('mamis_ensemble'):
+        return 'Strategist + MAMIS Ensemble'
+    if source == 'mamis':
+        return 'MAMIS Microstructure'
+    if source == 'pattern_matcher':
+        return 'PatternMatcher + Qwen Decision Core'
+    return 'Strategist Engine'
+
+
+def _normalize_signal_target_pct(value: Any) -> float:
+    numeric = abs(float(value or 0.0))
+    if numeric > 0.5:
+        numeric /= 100.0
+    return numeric
+
+
+def _signal_quality_score(confidence: float, target_pct: float) -> float:
+    c = min(max(float(confidence or 0.0), 0.0), 1.0)
+    tp = _normalize_signal_target_pct(target_pct)
+    ideal = 0.025
+    target_component = 1.0 - min(abs(tp - ideal) / 0.03, 1.0)
+    return min(max(c * 0.8 + target_component * 0.2, 0.0), 1.0)
+
+
+def _is_target_card_candidate(signal: Dict[str, Any]) -> bool:
+    metadata = signal.get('metadata', {}) or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (json.JSONDecodeError, TypeError):
+            metadata = {}
+
+    status = str(signal.get('status', 'pending') or 'pending').lower()
+    if status not in {'pending', 'active', 'open'}:
+        return False
+
+    confidence = float(signal.get('confidence', 0.0) or 0.0)
+    source = str(metadata.get('source') or metadata.get('signal_provider') or _infer_signal_source(signal.get('signal_type', ''), metadata)).lower()
+    target_pct = _normalize_signal_target_pct(
+        metadata.get('target_pct', metadata.get('predicted_magnitude', 0.0))
+    )
+    quality = float(metadata.get('quality_score', _signal_quality_score(confidence, target_pct)) or 0.0)
+    explicit_candidate = str(metadata.get('dashboard_candidate', '')).lower() == 'true' or bool(metadata.get('dashboard_candidate') is True)
+
+    if target_pct < 0.02:
+        return False
+
+    if source not in {'strategist', 'pattern_matcher'}:
+        return False
+
+    return explicit_candidate or (
+        confidence >= TARGET_CARD_MIN_CONFIDENCE
+        and quality >= TARGET_CARD_MIN_QUALITY
+    )
+
+
+def _coerce_optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if stripped.startswith('sig:'):
+            stripped = stripped.split(':', 1)[1]
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    return None
+
+
 class Database:
     def __init__(self):
         self.pool: Optional[asyncpg.Pool] = None
+
+    async def _get_symbol_learning_profile_conn(
+        self,
+        conn: asyncpg.Connection,
+        symbol: str,
+        lookback_days: int = 21,
+    ) -> Dict[str, Any]:
+        normalized_symbol = str(symbol or '').upper().strip()
+        if not normalized_symbol:
+            return {
+                'symbol': '',
+                'total': 0,
+                'correct': 0,
+                'accuracy': 0.0,
+                'avg_pnl': 0.0,
+                'score': 0.0,
+                'status': 'cold',
+                'last_learning_at': None,
+                'recent_reasons': [],
+            }
+
+        cutoff = datetime.utcnow() - timedelta(days=max(1, int(lookback_days)))
+        aggregate = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE was_correct = TRUE)::int AS correct,
+                COALESCE(AVG(pnl_pct), 0)::double precision AS avg_pnl,
+                MAX(created_at) AS last_learning_at
+            FROM brain_learning_log
+            WHERE UPPER(COALESCE(context->>'symbol', '')) = $1
+              AND created_at >= $2
+            """,
+            normalized_symbol,
+            cutoff,
+        )
+        total = int((aggregate or {}).get('total') or 0)
+        correct = int((aggregate or {}).get('correct') or 0)
+        avg_pnl = float((aggregate or {}).get('avg_pnl') or 0.0)
+        accuracy = (correct / total) if total else 0.0
+
+        recent_rows = await conn.fetch(
+            """
+            SELECT context, created_at
+            FROM brain_learning_log
+            WHERE UPPER(COALESCE(context->>'symbol', '')) = $1
+              AND created_at >= $2
+            ORDER BY created_at DESC
+            LIMIT 5
+            """,
+            normalized_symbol,
+            cutoff,
+        )
+        recent_reasons: List[str] = []
+        for row in recent_rows:
+            context = row.get('context')
+            if isinstance(context, str):
+                try:
+                    context = json.loads(context)
+                except (json.JSONDecodeError, TypeError):
+                    context = {}
+            context = context if isinstance(context, dict) else {}
+            reason = str(
+                context.get('loss_explanation')
+                or context.get('close_reason')
+                or context.get('reasoning')
+                or ''
+            ).strip()
+            if reason and reason not in recent_reasons:
+                recent_reasons.append(reason[:180])
+
+        sample_component = min(total / 6.0, 1.0) * 0.15
+        pnl_component = max(min(avg_pnl / 6.0, 0.20), -0.20)
+        score = min(max(accuracy * 0.65 + sample_component + pnl_component, 0.0), 1.0)
+        if total >= 3 and accuracy >= 0.55 and avg_pnl > 0:
+            status = 'promote'
+        elif total >= 2 and score >= 0.45:
+            status = 'monitor'
+        else:
+            status = 'cold'
+
+        last_learning_at = (aggregate or {}).get('last_learning_at')
+        return {
+            'symbol': normalized_symbol,
+            'total': total,
+            'correct': correct,
+            'accuracy': round(accuracy, 4),
+            'avg_pnl': round(avg_pnl, 4),
+            'score': round(score, 4),
+            'status': status,
+            'last_learning_at': last_learning_at.isoformat() if isinstance(last_learning_at, datetime) else None,
+            'recent_reasons': recent_reasons,
+        }
 
     async def connect(self):
         """Initialize database connection pool"""
@@ -377,6 +585,7 @@ class Database:
 
             # Create indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_timestamp ON trades(symbol, timestamp)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp_exchange_market ON trades(timestamp DESC, exchange, market_type)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_price_movements_symbol_time ON price_movements(symbol, start_time)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_status_timestamp ON signals(status, timestamp)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_simulations_status_time ON simulations(status, entry_time)")
@@ -503,7 +712,7 @@ class Database:
         market_type = signal_data.get('market_type', 'spot')
         symbol = signal_data['symbol']
         entry_price = float(signal_data.get('price', 0) or 0)
-        timestamp = signal_data['timestamp']
+        timestamp = _utc_naive(signal_data['timestamp'])
 
         # Enforce mandatory signal fields and minimum 2% target for all signals.
         direction = str(metadata.get('position_bias') or signal_data.get('direction') or 'long').lower()
@@ -518,15 +727,26 @@ class Database:
 
         metadata.setdefault('position_bias', direction)
         metadata['target_pct'] = target_pct
-        metadata['signal_time'] = str(metadata.get('signal_time') or timestamp)
+        metadata['signal_time'] = str(metadata.get('signal_time') or _utc_isoformat(timestamp))
         metadata['entry_price'] = float(metadata.get('entry_price', entry_price) or entry_price)
         metadata['current_price_at_signal'] = float(metadata.get('current_price_at_signal', entry_price) or entry_price)
         metadata['target_price'] = float(metadata.get('target_price', target_price) or target_price)
         metadata['estimated_duration_to_target_minutes'] = max(1, eta_minutes)
         metadata.setdefault('market_type', market_type)
         metadata.setdefault('exchange', 'mixed')
+        signal_source = _infer_signal_source(signal_data.get('signal_type', ''), metadata)
+        metadata['source'] = signal_source
+        metadata.setdefault('signal_provider', signal_source)
+        metadata.setdefault('source_model', _infer_signal_model(signal_source, metadata))
+        expires_at = timestamp + timedelta(hours=24) if isinstance(timestamp, datetime) else datetime.utcnow() + timedelta(hours=24)
+        metadata['expires_at'] = str(metadata.get('expires_at') or _utc_isoformat(expires_at))
 
         async with self.pool.acquire() as conn:
+            learning_profile = await self._get_symbol_learning_profile_conn(conn, symbol)
+            if int(learning_profile.get('total', 0) or 0) > 0:
+                metadata['learning_profile'] = learning_profile
+                metadata['learning_priority'] = float(learning_profile.get('score', 0.0) or 0.0)
+                metadata['learned_symbol'] = learning_profile.get('status') in {'monitor', 'promote'}
             return await conn.fetchval("""
                 INSERT INTO signals (market_type, symbol, signal_type, confidence, price, timestamp, metadata)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -534,6 +754,40 @@ class Database:
             """, market_type, symbol, signal_data['signal_type'],
                 signal_data['confidence'], entry_price, timestamp,
                 _dumps(metadata))
+
+    async def record_signal_outcome(
+        self,
+        signal_id: int,
+        *,
+        target_hit: bool,
+        was_correct: bool,
+        pnl_pct: float,
+        outcome_details: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Persist the realized outcome back onto the source signal for history and learning traceability."""
+        if not signal_id:
+            return False
+
+        details = dict(outcome_details or {})
+        details.update({
+            'target_hit': bool(target_hit),
+            'was_correct': bool(was_correct),
+            'realized_pnl_pct': float(pnl_pct or 0.0),
+        })
+        status = 'target_hit' if target_hit else 'target_missed'
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE signals
+                SET status = $2,
+                    metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                WHERE id = $1
+                """,
+                int(signal_id),
+                status,
+                _dumps(details),
+            )
+            return result == 'UPDATE 1'
 
     async def update_signal_status(self, signal_id: int, status: str) -> bool:
         """Update signal status"""
@@ -548,10 +802,50 @@ class Database:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT * FROM signals
-                WHERE status = 'pending'
+                WHERE status = 'pending' AND timestamp >= NOW() - INTERVAL '24 hours'
                 ORDER BY timestamp DESC LIMIT 200
             """)
-            return [dict(row) for row in rows]
+            results = [dict(row) for row in rows]
+            return [row for row in results if _is_target_card_candidate(row)]
+
+    async def cleanup_stale_signals(self, ttl_hours: int = 24) -> Dict[str, int]:
+        """Expire or delete stale active signals older than the given TTL."""
+        hours = max(1, int(ttl_hours))
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                WITH deleted AS (
+                    DELETE FROM signals s
+                    WHERE s.timestamp < NOW() - make_interval(hours => $1)
+                      AND s.status IN ('pending', 'active', 'open')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM simulations sim WHERE sim.signal_id = s.id
+                      )
+                    RETURNING s.id
+                ), updated AS (
+                    UPDATE signals s
+                    SET status = 'expired',
+                        metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
+                            'expired_at', NOW()::text,
+                            'expired_reason', '24h_ttl'
+                        )
+                    WHERE s.timestamp < NOW() - make_interval(hours => $1)
+                      AND s.status IN ('pending', 'active', 'open')
+                      AND EXISTS (
+                        SELECT 1 FROM simulations sim WHERE sim.signal_id = s.id
+                      )
+                    RETURNING s.id
+                )
+                SELECT
+                    COALESCE((SELECT COUNT(*)::int FROM deleted), 0) AS deleted_count,
+                    COALESCE((SELECT COUNT(*)::int FROM updated), 0) AS expired_count
+                """,
+                hours,
+            )
+        return {
+            'deleted_count': int(row['deleted_count'] or 0),
+            'expired_count': int(row['expired_count'] or 0),
+        }
 
     async def get_signal_pipeline_snapshot(self, hours: int = 6) -> Dict[str, Any]:
         """Return recent signal flow summary for chat/system narration."""
@@ -927,6 +1221,54 @@ class Database:
                 'avg_pnl': float(avg_pnl) if avg_pnl else 0,
             }
 
+    async def get_symbol_learning_profile(self, symbol: str, lookback_days: int = 21) -> Dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            return await self._get_symbol_learning_profile_conn(conn, symbol, lookback_days=lookback_days)
+
+    async def get_learning_candidates(
+        self,
+        min_samples: int = 2,
+        limit: int = 20,
+        lookback_days: int = 21,
+    ) -> List[Dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            cutoff = datetime.utcnow() - timedelta(days=max(1, int(lookback_days)))
+            rows = await conn.fetch(
+                """
+                SELECT UPPER(COALESCE(context->>'symbol', '')) AS symbol,
+                       COUNT(*)::int AS total,
+                       COUNT(*) FILTER (WHERE was_correct = TRUE)::int AS correct,
+                       COALESCE(AVG(pnl_pct), 0)::double precision AS avg_pnl
+                FROM brain_learning_log
+                WHERE COALESCE(context->>'symbol', '') <> ''
+                  AND created_at >= $1
+                GROUP BY 1
+                HAVING COUNT(*) >= $2
+                ORDER BY COUNT(*) DESC, AVG(pnl_pct) DESC
+                LIMIT $3
+                """,
+                cutoff,
+                max(1, int(min_samples)),
+                max(1, int(limit)),
+            )
+            profiles: List[Dict[str, Any]] = []
+            for row in rows:
+                symbol = str(row.get('symbol') or '').upper().strip()
+                if not symbol:
+                    continue
+                profile = await self._get_symbol_learning_profile_conn(conn, symbol, lookback_days=lookback_days)
+                if int(profile.get('total', 0) or 0) > 0:
+                    profiles.append(profile)
+            profiles.sort(
+                key=lambda item: (
+                    float(item.get('score', 0.0) or 0.0),
+                    float(item.get('avg_pnl', 0.0) or 0.0),
+                    int(item.get('total', 0) or 0),
+                ),
+                reverse=True,
+            )
+            return profiles[: max(1, int(limit))]
+
     # ─── Enhanced Analytics ───
 
     async def get_trades_for_snapshot(self, symbol: str, minutes: int = 15,
@@ -1147,26 +1489,51 @@ class Database:
 
     async def get_historical_signatures(self, symbol: str = None,
                                           timeframe: str = None,
-                                          limit: int = 200) -> List[Dict[str, Any]]:
+                                          limit: int = 200,
+                                          lookback_hours: int = None) -> List[Dict[str, Any]]:
         """Historical signature'ları getir"""
         async with self.pool.acquire() as conn:
+            cutoff = None
+            if lookback_hours:
+                cutoff = datetime.utcnow() - timedelta(hours=max(1, int(lookback_hours)))
             if symbol and timeframe:
-                rows = await conn.fetch("""
-                    SELECT * FROM historical_signatures
-                    WHERE symbol = $1 AND timeframe = $2
-                    ORDER BY created_at DESC LIMIT $3
-                """, symbol, timeframe, limit)
+                if cutoff:
+                    rows = await conn.fetch("""
+                        SELECT * FROM historical_signatures
+                        WHERE symbol = $1 AND timeframe = $2 AND created_at >= $3
+                        ORDER BY created_at DESC LIMIT $4
+                    """, symbol, timeframe, cutoff, limit)
+                else:
+                    rows = await conn.fetch("""
+                        SELECT * FROM historical_signatures
+                        WHERE symbol = $1 AND timeframe = $2
+                        ORDER BY created_at DESC LIMIT $3
+                    """, symbol, timeframe, limit)
             elif symbol:
-                rows = await conn.fetch("""
-                    SELECT * FROM historical_signatures
-                    WHERE symbol = $1
-                    ORDER BY created_at DESC LIMIT $2
-                """, symbol, limit)
+                if cutoff:
+                    rows = await conn.fetch("""
+                        SELECT * FROM historical_signatures
+                        WHERE symbol = $1 AND created_at >= $2
+                        ORDER BY created_at DESC LIMIT $3
+                    """, symbol, cutoff, limit)
+                else:
+                    rows = await conn.fetch("""
+                        SELECT * FROM historical_signatures
+                        WHERE symbol = $1
+                        ORDER BY created_at DESC LIMIT $2
+                    """, symbol, limit)
             else:
-                rows = await conn.fetch("""
-                    SELECT * FROM historical_signatures
-                    ORDER BY created_at DESC LIMIT $1
-                """, limit)
+                if cutoff:
+                    rows = await conn.fetch("""
+                        SELECT * FROM historical_signatures
+                        WHERE created_at >= $1
+                        ORDER BY created_at DESC LIMIT $2
+                    """, cutoff, limit)
+                else:
+                    rows = await conn.fetch("""
+                        SELECT * FROM historical_signatures
+                        ORDER BY created_at DESC LIMIT $1
+                    """, limit)
             result = []
             for row in rows:
                 d = dict(row)
@@ -1189,12 +1556,14 @@ class Database:
         self,
         min_abs_change: float = 0.005,
         limit: int = 600,
+        lookback_hours: int = None,
     ) -> int:
         """
         historical_signatures bosken, son price_movements kayitlarindan
         pattern-matcher icin bootstrap veri olustur.
         """
         async with self.pool.acquire() as conn:
+            cutoff = datetime.utcnow() - timedelta(hours=max(1, int(lookback_hours))) if lookback_hours else None
             rows = await conn.fetch(
                 """
                 WITH candidates AS (
@@ -1223,7 +1592,7 @@ class Database:
                         ) AS volume_profile,
                         pm.end_time
                     FROM price_movements pm
-                    WHERE pm.end_time >= NOW() - INTERVAL '14 days'
+                                        WHERE ($3::timestamp IS NULL OR pm.end_time >= $3)
                       AND ABS((pm.change_pct)::double precision) >= $1
                       AND jsonb_typeof(COALESCE(pm.t10_data->'price_profile', '[]'::jsonb)) = 'array'
                       AND NOT EXISTS (
@@ -1244,6 +1613,7 @@ class Database:
                 """,
                 min_abs_change,
                 int(limit),
+                cutoff,
             )
             return len(rows)
 
@@ -1280,7 +1650,7 @@ class Database:
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 RETURNING id
             """, data['symbol'], data['timeframe'],
-                data.get('matched_signature_id'),
+                _coerce_optional_int(data.get('matched_signature_id')),
                 data['similarity'], data['euclidean_distance'],
                 data.get('matched_direction'), data.get('matched_change_pct'),
                 data.get('predicted_direction'), data.get('predicted_magnitude'),

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useLivePrices, useSignals, useSimulations } from "@/lib/api";
 import { Terminal as TerminalIcon, Pause, Play, ArrowDown } from "lucide-react";
+import { formatTimeOnly } from "@/lib/time";
 
 interface LogEntry {
   id: number;
@@ -38,7 +39,7 @@ export default function BottomTerminal() {
       if (paused) return;
       const entry: LogEntry = {
         id: ++logCounter,
-        time: new Date().toLocaleTimeString("tr-TR"),
+        time: formatTimeOnly(Date.now()),
         level,
         text,
       };

@@ -1,93 +1,307 @@
 "use client";
 
-import { useSignals } from "@/lib/api";
-import { ArrowUpCircle, ArrowDownCircle, Clock, Target } from "lucide-react";
+import { useState } from "react";
+import { clearSignals, dismissSignal, useSignals } from "@/lib/api";
+import { ArrowUpCircle, ArrowDownCircle, Clock3, Target, BadgeInfo, BrainCircuit, Building2, Trash2, X } from "lucide-react";
+import { formatInQuenbotTimeZone, parseQuenbotDate, toTimestampMs } from "@/lib/time";
+
+function toNumber(value: unknown, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function formatPrice(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "-";
+  if (numeric >= 1000) return numeric.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (numeric >= 1) return numeric.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+  return numeric.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 8 });
+}
+
+function formatCountdown(target: Date) {
+  const diff = target.getTime() - Date.now();
+  if (diff <= 0) return "Süre doldu";
+  const totalMinutes = Math.floor(diff / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}s ${minutes}dk`;
+}
+
+function normalizeTargetPct(value: unknown) {
+  const numeric = toNumber(value, 0);
+  if (numeric <= 0) return 0;
+  return numeric > 0.5 ? numeric / 100 : numeric;
+}
+
+function resolveTargetPct(signal: any) {
+  const meta = signal.metadata || {};
+  const direct = normalizeTargetPct(signal.target_pct ?? meta.target_pct ?? meta.predicted_magnitude);
+  if (direct > 0) return direct;
+
+  const entry = toNumber(signal.entry_price ?? meta.entry_price ?? signal.price, 0);
+  const target = toNumber(signal.target_price ?? meta.target_price, 0);
+  if (entry > 0 && target > 0) {
+    return Math.abs((target - entry) / entry);
+  }
+
+  const horizons = Array.isArray(meta.target_horizons) ? meta.target_horizons : [];
+  const strongest = horizons.reduce((best: any, item: any) => {
+    const strength = toNumber(item?.strength, 0);
+    return !best || strength > toNumber(best?.strength, 0) ? item : best;
+  }, null);
+  return normalizeTargetPct(strongest?.target_pct);
+}
+
+function resolvePrimaryTarget(signal: any) {
+  const meta = signal.metadata || {};
+  const horizons = Array.isArray(meta.target_horizons) ? meta.target_horizons : [];
+  const selected = horizons.find((item: any) => item?.label === meta.selected_horizon) || horizons[0] || null;
+  const entry = toNumber(signal.entry_price ?? meta.entry_price ?? signal.price, 0);
+  const targetPrice = toNumber(signal.target_price ?? meta.target_price ?? selected?.target_price, 0);
+  const eta = toNumber(signal.estimated_duration_to_target_minutes ?? meta.estimated_duration_to_target_minutes ?? selected?.eta_minutes, 60);
+  const pct = resolveTargetPct(signal);
+  return {
+    entry,
+    targetPrice,
+    eta,
+    pct,
+    selected,
+  };
+}
 
 export default function ActiveSignals() {
-  const { data: signals } = useSignals();
-  const toNumber = (value: unknown, fallback = 0) => {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : fallback;
-  };
-
-  // Show only active/pending signals
+  const { data: signals, mutate } = useSignals();
+  const [busy, setBusy] = useState<number[]>([]);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const active = (signals || [])
-    .filter((s) => s.status === "active" || s.status === "pending" || s.status === "open")
-    .sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+    .filter((s) => {
+      const signalTime = parseQuenbotDate(s.signal_time || s.timestamp);
+      const ageHours = (Date.now() - signalTime.getTime()) / 3600000;
+      const targetPct = resolveTargetPct(s);
+      const normalizedStatus = String(s.status || "").toLowerCase();
+      const visible = !["failed", "expired", "closed", "dismissed"].includes(normalizedStatus) && !normalizedStatus.startsWith("risk_");
+      return visible && ageHours < 24 && targetPct >= 0.02;
+    })
+    .sort((a, b) => toTimestampMs(b.signal_time || b.timestamp) - toTimestampMs(a.signal_time || a.timestamp));
+  const movementList = [...active]
+    .sort((a, b) => {
+      const aScore = resolveTargetPct(a) * 100 + toNumber(a.confidence) * 10;
+      const bScore = resolveTargetPct(b) * 100 + toNumber(b.confidence) * 10;
+      return bScore - aScore;
+    })
+    .slice(0, 10);
+
+  async function handleDismiss(signalId: number) {
+    setBusy((prev) => [...prev, signalId]);
+    try {
+      await dismissSignal(signalId);
+      await mutate((current) => (current || []).filter((item) => item.id !== signalId), { revalidate: false });
+    } finally {
+      setBusy((prev) => prev.filter((item) => item !== signalId));
+      void mutate();
+    }
+  }
+
+  async function handleClearVisible() {
+    if (!active.length) return;
+    setBulkBusy(true);
+    const ids = active.map((item) => item.id);
+    try {
+      await clearSignals(ids);
+      await mutate((current) => (current || []).filter((item) => !ids.includes(item.id)), { revalidate: false });
+    } finally {
+      setBulkBusy(false);
+      void mutate();
+    }
+  }
 
   return (
-    <div className="h-full flex flex-col bg-surface-card/30 overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-surface-border">
-        <span className="text-xs font-semibold text-gray-300 tracking-wide">AKTİF SİNYALLER</span>
-        <span className="text-[10px] text-gray-500">{active.length} sinyal</span>
+    <div className="h-full flex flex-col overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(34,197,94,0.08),_transparent_42%),linear-gradient(180deg,rgba(15,23,42,0.94),rgba(2,6,23,0.96))]">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border/70">
+        <div>
+          <div className="text-xs font-semibold text-gray-200 tracking-[0.18em]">%2+ AKTİF HEDEF KARTLARI</div>
+          <div className="text-[10px] text-gray-500 mt-1">24 saat içinde yaşayan uzun ve kısa sinyaller</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleClearVisible}
+            disabled={bulkBusy || active.length === 0}
+            className="inline-flex items-center gap-1 rounded-full border border-rose-400/20 bg-rose-400/10 px-2.5 py-1 text-[10px] text-rose-200 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Trash2 size={11} />
+            Temizle
+          </button>
+          <span className="text-[10px] text-emerald-300/90 border border-emerald-400/20 bg-emerald-400/10 rounded-full px-2 py-1">{active.length} canlı kart</span>
+        </div>
+      </div>
+
+      <div className="border-b border-surface-border/50 px-3 py-2">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500">Hareket Beklenen Coinler</div>
+        <div className="flex gap-1.5 overflow-x-auto pb-1 custom-scrollbar">
+          {movementList.length === 0 ? (
+            <span className="text-[10px] text-gray-600">Liste boş</span>
+          ) : (
+            movementList.map((signal) => {
+              const targetPct = resolveTargetPct(signal) * 100;
+              const isLong = (signal.direction || "").toLowerCase() === "long" || (signal.direction || "").toLowerCase() === "buy";
+              return (
+                <div
+                  key={`mover-${signal.id}`}
+                  className={`min-w-fit rounded-full border px-2.5 py-1 text-[10px] font-medium whitespace-nowrap ${
+                    isLong
+                      ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-200"
+                      : "border-rose-400/25 bg-rose-400/10 text-rose-200"
+                  }`}
+                >
+                  {signal.symbol} • %{targetPct.toFixed(1)}
+                </div>
+              );
+            })
+          )}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar">
         {active.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-gray-600 text-xs">Aktif sinyal yok</div>
+          <div className="flex items-center justify-center h-full text-gray-600 text-xs px-6 text-center">Son 24 saatte %2 hedefli aktif sinyal yok</div>
         ) : (
-          <div className="space-y-1 p-2">
+          <div className="grid grid-cols-1 gap-2 p-2 xl:grid-cols-2">
             {active.map((s) => {
               const isLong = (s.direction || "").toLowerCase() === "long" || (s.direction || "").toLowerCase() === "buy";
               const meta = s.metadata || {};
-              const entry = s.entry_price ?? meta.entry_price ?? s.price;
-              const target = s.target_price ?? meta.target_price;
+              const learningProfile = meta.learning_profile || null;
+              const primaryTarget = resolvePrimaryTarget(s);
+              const entry = primaryTarget.entry;
+              const target = primaryTarget.targetPrice;
               const currentAtSignal = s.current_price_at_signal ?? meta.current_price_at_signal ?? s.price;
-              const etaMin = s.estimated_duration_to_target_minutes ?? meta.estimated_duration_to_target_minutes ?? 60;
+              const etaMin = primaryTarget.eta;
               const reason = meta.reason || s.signal_type;
               const conf = (toNumber(s.confidence) * 100).toFixed(0);
-              const age = new Date(s.timestamp);
+              const signalAt = parseQuenbotDate(s.signal_time || s.timestamp);
+              const expiresAt = parseQuenbotDate(s.expires_at || meta.expires_at || signalAt.getTime() + 24 * 3600000);
+              const targetAt = new Date(signalAt.getTime() + toNumber(etaMin, 60) * 60000);
+              const targetPct = primaryTarget.pct * 100;
+              const source = s.source || meta.source || meta.signal_provider || "unknown";
+              const sourceModel = s.source_model || meta.source_model || "unknown";
+              const horizons = Array.isArray(meta.target_horizons) ? meta.target_horizons.slice(0, 3) : [];
 
               return (
                 <div
                   key={s.id}
-                  className={`rounded-lg border p-2.5 transition-colors ${
+                  className={`rounded-xl border p-2 transition-colors shadow-[0_8px_24px_rgba(0,0,0,0.16)] ${
                     isLong
-                      ? "border-bull/20 bg-bull/[0.04] hover:bg-bull/[0.08]"
-                      : "border-bear/20 bg-bear/[0.04] hover:bg-bear/[0.08]"
+                      ? "border-emerald-400/25 bg-[linear-gradient(135deg,rgba(16,185,129,0.18),rgba(15,23,42,0.55))] hover:bg-[linear-gradient(135deg,rgba(16,185,129,0.24),rgba(15,23,42,0.62))]"
+                      : "border-rose-400/25 bg-[linear-gradient(135deg,rgba(244,63,94,0.16),rgba(15,23,42,0.55))] hover:bg-[linear-gradient(135deg,rgba(244,63,94,0.22),rgba(15,23,42,0.62))]"
                   }`}
                 >
-                  {/* Top row */}
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="flex items-center gap-1.5">
+                  <div className="mb-1.5 flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2">
                       {isLong ? (
-                        <ArrowUpCircle size={14} className="text-bull" />
+                        <ArrowUpCircle size={14} className="text-emerald-300 mt-0.5" />
                       ) : (
-                        <ArrowDownCircle size={14} className="text-bear" />
+                        <ArrowDownCircle size={14} className="text-rose-300 mt-0.5" />
                       )}
-                      <span className="text-xs font-semibold text-gray-200">{s.symbol}</span>
-                      <span className={`text-[10px] font-bold ${isLong ? "text-bull" : "text-bear"}`}>
-                        {(s.direction || "?").toUpperCase()}
-                      </span>
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[12px] font-semibold text-white tracking-wide">{s.symbol}</span>
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${isLong ? "text-emerald-200 bg-emerald-400/15" : "text-rose-200 bg-rose-400/15"}`}>
+                            {isLong ? "YÜKSELİŞ" : "DÜŞÜŞ"}
+                          </span>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-full border border-white/10 text-gray-300 uppercase">{s.exchange || "mixed"}</span>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-full border border-white/10 text-gray-400 uppercase">{s.market_type || "spot"}</span>
+                        </div>
+                        <div className="mt-0.5 line-clamp-1 text-[9px] text-gray-400">{reason}</div>
+                      </div>
                     </div>
-                    <span className="text-[10px] text-accent font-medium">{conf}%</span>
+                    <div className="flex items-start gap-2">
+                      <div className="text-right">
+                        <div className="text-[10px] text-amber-300 font-semibold">Güven {conf}%</div>
+                        <div className="text-[9px] text-gray-400">Hedef {targetPct.toFixed(2)}%</div>
+                      </div>
+                      <button
+                        onClick={() => void handleDismiss(s.id)}
+                        disabled={busy.includes(s.id)}
+                        className="rounded-full border border-white/10 bg-black/20 p-1 text-gray-300 hover:text-white disabled:opacity-40"
+                        aria-label={`${s.symbol} sinyalini kaldır`}
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
                   </div>
 
-                  {/* Details */}
-                  <div className="grid grid-cols-2 gap-1 text-[10px] text-gray-400">
-                    <div className="flex items-center gap-1">
-                      <span className="text-gray-600">Giriş:</span>
-                      <span className="text-gray-300 font-mono">${String(entry)}</span>
+                  <div className="grid grid-cols-3 gap-1 text-[9px] text-gray-300">
+                    <div className="rounded-lg bg-black/20 border border-white/5 px-2 py-1.5">
+                      <div className="text-[10px] text-gray-500">Sinyal Fiyatı</div>
+                      <div className="font-mono text-white mt-0.5">${formatPrice(currentAtSignal)}</div>
                     </div>
-                    {target && (
-                      <div className="flex items-center gap-1">
-                        <Target size={8} className="text-gray-600" />
-                        <span className="text-gray-300 font-mono">${String(target)}</span>
+                    <div className="rounded-lg bg-black/20 border border-white/5 px-2 py-1.5">
+                      <div className="text-[10px] text-gray-500 flex items-center gap-1"><Target size={9} /> Hedef</div>
+                      <div className="font-mono text-white mt-0.5">${formatPrice(target)}</div>
+                    </div>
+                    <div className="rounded-lg bg-black/20 border border-white/5 px-2 py-1.5">
+                      <div className="text-[10px] text-gray-500">Giriş</div>
+                      <div className="font-mono text-white mt-0.5">${formatPrice(entry)}</div>
+                    </div>
+                    <div className="col-span-3 rounded-lg bg-black/20 border border-white/5 px-2 py-1.5">
+                      <div className="text-[10px] text-gray-500">Beklenen Hedef Zamanı</div>
+                      <div className="text-white mt-0.5">{formatInQuenbotTimeZone(targetAt, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-1.5 grid grid-cols-1 gap-1 text-[9px] text-gray-300">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/5 border border-white/10">
+                        <Clock3 size={9} className="text-sky-300" />
+                        {formatInQuenbotTimeZone(signalAt, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                      </span>
+                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/5 border border-white/10">
+                        <BadgeInfo size={9} className="text-amber-300" />
+                        ETA {toNumber(etaMin)} dk
+                      </span>
+                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/5 border border-white/10">
+                        <Building2 size={9} className="text-violet-300" />
+                        24s TTL kalan: {formatCountdown(expiresAt)}
+                      </span>
+                      {learningProfile ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-emerald-400/10 border border-emerald-300/20 text-emerald-200">
+                          Ogrenme skoru {(toNumber(learningProfile.score) * 100).toFixed(0)}
+                        </span>
+                      ) : null}
+                      {primaryTarget.selected?.label ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-cyan-400/10 border border-cyan-300/20 text-cyan-200">
+                          Ana ufuk {String(primaryTarget.selected.label)}
+                        </span>
+                      ) : null}
+                    </div>
+
+                    {horizons.length > 0 ? (
+                      <div className="flex items-center gap-2 flex-wrap mt-1">
+                        {horizons.map((h: any) => (
+                          <span key={`${s.id}-${String(h.label)}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] text-gray-300">
+                            {String(h.label)} • %{(normalizeTargetPct(h.target_pct) * 100).toFixed(1)}
+                          </span>
+                        ))}
                       </div>
-                    )}
-                    <div className="flex items-center gap-1 col-span-2">
-                      <span className="text-gray-600">Sinyal Anı:</span>
-                      <span className="text-gray-300 font-mono">${String(currentAtSignal)}</span>
-                      <span className="text-[9px] px-1 py-0.5 rounded border border-surface-border text-gray-500 uppercase">{s.exchange || "mixed"}</span>
-                      <span className="text-[9px] px-1 py-0.5 rounded border border-surface-border text-gray-500 uppercase">{s.market_type || "spot"}</span>
+                    ) : null}
+
+                    <div className="rounded-lg bg-black/20 border border-white/5 px-2 py-1.5">
+                      <div className="text-[10px] text-gray-500 flex items-center gap-1"><BrainCircuit size={9} /> Kaynak / Model</div>
+                      <div className="mt-0.5 text-white font-medium">{String(source).replaceAll("_", " ")}</div>
+                      <div className="text-gray-400 mt-0.5">{sourceModel}</div>
                     </div>
-                    <div className="col-span-2 text-gray-500">Tahmini hedef süresi: {toNumber(etaMin)} dk</div>
-                    <div className="col-span-2 flex items-center gap-1">
-                      <Clock size={8} className="text-gray-600" />
-                      <span>{age.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}</span>
-                      <span className="ml-1 text-gray-600">|</span>
-                      <span className="text-gray-500 truncate">{reason}</span>
-                    </div>
+
+                    {learningProfile ? (
+                      <div className="rounded-lg bg-emerald-400/8 border border-emerald-300/10 px-2 py-1.5">
+                        <div className="text-[10px] text-emerald-200 flex items-center gap-1"><BrainCircuit size={9} /> Ogrenilmis Coin Profili</div>
+                        <div className="mt-0.5 text-white">
+                          Dogruluk %{(toNumber(learningProfile.accuracy) * 100).toFixed(0)} • {toNumber(learningProfile.correct)} / {toNumber(learningProfile.total)} isabet
+                        </div>
+                        <div className="text-gray-300 mt-0.5">Ort. PnL %{toNumber(learningProfile.avg_pnl).toFixed(2)} • Durum {String(learningProfile.status || "cold")}</div>
+                        {Array.isArray(learningProfile.recent_reasons) && learningProfile.recent_reasons.length > 0 ? (
+                          <div className="text-gray-400 mt-0.5 line-clamp-2">Son ders: {String(learningProfile.recent_reasons[0])}</div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               );

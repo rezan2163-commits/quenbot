@@ -28,8 +28,8 @@ logger = logging.getLogger("deploy")
 
 # ── Constants ──
 OLLAMA_URL = "http://localhost:11434"
-REQUIRED_MODEL = "quenbot-brain"
-FALLBACK_MODELS = ["qwen3:1.7b", "gemma3:4b-it-q4_K_M"]
+REQUIRED_MODEL = os.getenv("QUENBOT_DECISION_MODEL") or os.getenv("QUENBOT_LLM_MODEL") or "qwen3:8b"
+FALLBACK_MODELS = ["qwen3:8b", "qwen3:1.7b", "gemma3:4b-it-q4_K_M", "quenbot-brain"]
 PYTHON_AGENTS_DIR = Path(__file__).parent / "python_agents"
 SCRIPT_DIR = Path(__file__).parent
 MIN_RAM_GB = 4
@@ -192,7 +192,8 @@ class DeploymentPipeline:
 
         required = [
             "asyncio", "aiohttp", "asyncpg", "numpy",
-            "sklearn", "websockets", "dotenv",
+            "pandas", "pydantic", "redis", "chromadb",
+            "sklearn", "websockets", "websocket", "dotenv",
         ]
 
         for pkg in required:
@@ -232,6 +233,11 @@ class DeploymentPipeline:
             "risk_manager",
             "rca_engine",
             "chat_engine",
+            "qwen_models",
+            "vector_memory",
+            "redis_event_bus",
+            "cleanup_module",
+            "websocket_ingestion",
             "indicators",
             "similarity_engine",
             "intelligence_core",

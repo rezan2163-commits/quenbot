@@ -3,6 +3,7 @@
 import { useSignalHistory } from "@/lib/api";
 import { History, ArrowUp, ArrowDown, Filter } from "lucide-react";
 import { useState } from "react";
+import { formatInQuenbotTimeZone } from "@/lib/time";
 
 export default function SignalHistory() {
   const [symbolFilter, setSymbolFilter] = useState("");
@@ -91,7 +92,7 @@ export default function SignalHistory() {
                       </span>
                     </td>
                     <td className="px-2 py-1.5 text-right text-gray-500">
-                      {new Date(s.timestamp).toLocaleString("tr-TR", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      {formatInQuenbotTimeZone(s.signal_time || s.timestamp, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                     </td>
                   </tr>
                 );

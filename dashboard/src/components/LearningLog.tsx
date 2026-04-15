@@ -2,6 +2,7 @@
 
 import { useLearningLog, useLearningStats } from "@/lib/api";
 import { Brain, CheckCircle, XCircle, TrendingUp } from "lucide-react";
+import { formatInQuenbotTimeZone } from "@/lib/time";
 
 export default function LearningLog() {
   const { data: log } = useLearningLog();
@@ -86,7 +87,7 @@ export default function LearningLog() {
                     </span>
                   </div>
                   <div className="text-[9px] text-gray-600">
-                    {new Date(entry.created_at).toLocaleString("tr-TR", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                    {formatInQuenbotTimeZone(entry.created_at, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                   </div>
                 </div>
               </div>

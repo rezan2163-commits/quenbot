@@ -3,6 +3,7 @@
 import { usePatterns, PatternRecord } from "@/lib/api";
 import { Database, ChevronDown, ChevronUp } from "lucide-react";
 import { useState } from "react";
+import { formatInQuenbotTimeZone } from "@/lib/time";
 
 function OutcomeBadge({ label, val }: { label: string; val: number | null }) {
   if (val == null) return null;
@@ -50,7 +51,7 @@ function PatternRow({ p }: { p: PatternRecord }) {
             <OutcomeBadge label="1g" val={p.outcome_1d} />
           </div>
           <div className="text-[10px] text-gray-600">
-            {new Date(p.created_at).toLocaleString("tr-TR")}
+            {formatInQuenbotTimeZone(p.created_at)}
           </div>
           {snap && (
             <pre className="text-[9px] text-gray-600 bg-black/20 rounded p-1.5 max-h-24 overflow-auto">

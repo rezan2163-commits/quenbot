@@ -71,9 +71,9 @@ export default function StrategyAlert() {
   return (
     <>
       {/* Bottom status bar */}
-      <div className="flex items-center justify-between px-4 py-1.5 border-t border-surface-border bg-surface-card/30">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-t border-surface-border bg-surface-card/30 sm:px-4 sm:py-1.5">
         {/* Left: correction status */}
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
           {needsCorrection ? (
             <div className="flex items-center gap-1.5 text-warn">
               <RefreshCw size={12} className="animate-spin" />
@@ -86,14 +86,14 @@ export default function StrategyAlert() {
             </div>
           )}
           {perf && (
-            <span className="text-[10px] text-gray-500 font-mono">
+            <span className="text-[10px] text-gray-500 font-mono break-words">
               24h: {perf.recent_trades ?? 0} işlem | WR %{perf.recent_win_rate ?? 0} | Avg %{perf.avg_pnl_pct ?? 0}
             </span>
           )}
         </div>
 
         {/* Right: RCA summary */}
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           {(correction?.rca_summary || []).slice(0, 3).map((r, i) => (
             <span key={i} className="text-[10px] text-gray-500 bg-surface-hover px-1.5 py-0.5 rounded">
               {r.failure_type}: {r.count}
@@ -109,7 +109,7 @@ export default function StrategyAlert() {
 
       {/* Floating toast notifications */}
       {visibleToasts.length > 0 && (
-        <div className="fixed top-4 right-4 z-50 space-y-2 max-w-sm">
+        <div className="fixed left-3 right-3 top-3 z-50 space-y-2 sm:left-auto sm:right-4 sm:top-4 sm:max-w-sm">
           {visibleToasts.map((t) => (
             <div
               key={t.id}

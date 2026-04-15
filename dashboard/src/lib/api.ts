@@ -49,8 +49,55 @@ export interface SystemSummary {
   state: { mode: string; trades: number; pnl: number };
   brain: { patterns: number; accuracy: number };
   pattern_matcher: { ok: boolean; scans: number; matches: number; best_similarity: number };
+  mamis?: { ok: boolean; bars: number; alerts: number; classifications: number; signals: number; last_pattern?: string | null };
   warnings: { level: string; comp: string; msg: string }[];
   uptime: number;
+}
+
+export interface MamisBar {
+  symbol: string;
+  bar_index: number;
+  total_volume: number;
+  cumulative_volume_delta: number;
+  ofi_normalized: number;
+  vpin: number;
+  volatility: number;
+  spread_bps: number;
+  cancel_to_trade_ratio: number;
+  ended_at: string;
+}
+
+export interface MamisClassification {
+  symbol: string;
+  pattern_type: string;
+  confidence: number;
+  direction_hint: string;
+  estimated_volatility: number;
+  reason: string;
+  event_bar: MamisBar;
+}
+
+export interface MamisSignal {
+  timestamp: string;
+  symbol: string;
+  signal_direction: string;
+  confidence_score: number;
+  detected_pattern_type: string;
+  estimated_volatility: number;
+  position_size: number;
+  metadata: Record<string, any>;
+}
+
+export interface MamisStatus {
+  health: {
+    healthy: boolean;
+    sentinel?: Record<string, any>;
+    forensic?: Record<string, any>;
+    strategist?: Record<string, any>;
+  };
+  bars: MamisBar[];
+  classifications: MamisClassification[];
+  signals: MamisSignal[];
 }
 
 export interface Signal {
@@ -66,11 +113,22 @@ export interface Signal {
   target_price?: number;
   target_pct?: number;
   estimated_duration_to_target_minutes?: number;
+  source?: string;
+  source_model?: string;
+  expires_at?: string;
   exchange?: string;
   market_type?: string;
   status: string;
   timestamp: string;
   metadata: Record<string, any>;
+}
+
+export interface SignalTargetHorizon {
+  label: string;
+  eta_minutes: number;
+  target_pct: number;
+  target_price: number;
+  strength: number;
 }
 
 export interface Simulation {
@@ -140,11 +198,71 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export interface ChatResponse {
+  success: boolean;
+  message: string;
+  assistant?: {
+    name: string;
+    model: string;
+    role: string;
+  };
+  routed_actions?: Array<Record<string, any>>;
+  timestamp?: string;
+}
+
+export interface ChatActionView {
+  type: string;
+  [key: string]: any;
+}
+
 export interface DirectiveStatus {
   master_directive: string;
   agent_overrides: Record<string, string>;
   updated_at?: string;
   history_count?: number;
+}
+
+export interface CodeOperatorEditPreview {
+  path: string;
+  reason?: string;
+  old_preview?: string;
+  new_preview?: string;
+}
+
+export interface CodeOperatorTask {
+  id: string;
+  prompt: string;
+  requested_by?: string;
+  source?: string;
+  mode: string;
+  status: string;
+  summary?: string;
+  clarification?: string;
+  error?: string;
+  created_at: string;
+  updated_at?: string;
+  plan?: {
+    summary?: string;
+    needs_clarification?: boolean;
+    clarification?: string;
+    paths?: string[];
+    validation_commands?: string[];
+  };
+  selected_files?: string[];
+  preview?: CodeOperatorEditPreview[];
+  validation_commands?: string[];
+  validation?: Array<{ command: string; status: string; output?: string; returncode?: number }>;
+  apply_result?: { ok: boolean; changed_files?: string[]; backup_dir?: string; error?: string };
+}
+
+export interface CodeOperatorStatus {
+  enabled: boolean;
+  available?: boolean;
+  repo_root?: string;
+  model?: string;
+  active_task_id?: string | null;
+  queued?: number;
+  recent_tasks?: CodeOperatorTask[];
 }
 
 export interface LlmStatus {
@@ -181,6 +299,37 @@ export function useDirectiveStatus() {
   });
 }
 
+export function useCodeOperatorStatus() {
+  return useSWR<CodeOperatorStatus>(`${API}/api/code/status`, fetcher, {
+    refreshInterval: 8000,
+  });
+}
+
+export function useCodeOperatorTasks(limit: number = 20) {
+  return useSWR<{ items: CodeOperatorTask[] }>(`${API}/api/code/tasks?limit=${encodeURIComponent(String(limit))}`, fetcher, {
+    refreshInterval: 8000,
+  });
+}
+
+export async function createCodeTask(prompt: string, mode: "preview" | "apply" = "preview") {
+  const res = await fetch(`${API}/api/code/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, mode, requested_by: "dashboard", source: "dashboard" }),
+  });
+  if (!res.ok) throw new Error(`Code task ${res.status}`);
+  return res.json() as Promise<CodeOperatorTask>;
+}
+
+export async function applyCodeTask(taskId: string) {
+  const res = await fetch(`${API}/api/code/tasks/${encodeURIComponent(taskId)}/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) throw new Error(`Code task apply ${res.status}`);
+  return res.json();
+}
+
 export async function setDirective(text: string) {
   const res = await fetch(`${API}/api/directives`, {
     method: "POST",
@@ -201,6 +350,35 @@ export function useSignals() {
   return useSWR<Signal[]>(`${API}/api/signals`, fetcher, {
     refreshInterval: 8000,
   });
+}
+
+export async function dismissSignal(signalId: number) {
+  const res = await fetch(`${API}/api/signals/${signalId}/dismiss`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `API ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export async function clearSignals(signalIds: number[]) {
+  const res = await fetch(`${API}/api/signals/clear`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids: signalIds }),
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || `API ${res.status}`);
+  }
+
+  return res.json();
 }
 
 export function useSimulations() {
@@ -299,7 +477,7 @@ export function useChatMessages() {
   });
 }
 
-export async function sendChat(message: string) {
+export async function sendChat(message: string): Promise<ChatResponse> {
   const res = await fetch(`${API}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -308,12 +486,13 @@ export async function sendChat(message: string) {
   return res.json();
 }
 
-export async function setDirective(master_directive: string) {
-  const res = await fetch(`${API}/api/directives`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ master_directive }),
+export async function clearChatMessages() {
+  const res = await fetch(`${API}/api/chat/messages`, {
+    method: "DELETE",
   });
+  if (!res.ok) {
+    throw new Error(`Chat clear ${res.status}`);
+  }
   return res.json();
 }
 
@@ -418,6 +597,145 @@ export interface EquityPoint {
   cumulative_pnl: number;
 }
 
+export interface IntegrationAgent {
+  name: string;
+  status: string;
+  source_status: string;
+  last_heartbeat: string;
+  age_seconds: number;
+  activity_score: number;
+  metadata: Record<string, any>;
+}
+
+export interface IntegrationModel {
+  name: string;
+  owner: string;
+  activity: number;
+  source: string;
+}
+
+export interface IntegrationSignalPerformance {
+  source: string;
+  source_model: string;
+  total_signals: number;
+  active_signals: number;
+  closed_simulations: number;
+  wins: number;
+  avg_pnl_pct: number;
+  best_confidence: number;
+  last_signal_at: string;
+  win_rate: number;
+}
+
+export interface IntegrationExchange {
+  exchange: string;
+  market_type: string;
+  last_trade_at: string;
+  trades_5m: number;
+  trades_1h: number;
+  age_seconds: number;
+}
+
+export interface IntegrationOverview {
+  generated_at: string;
+  agents: IntegrationAgent[];
+  models: IntegrationModel[];
+  signals: {
+    recent: Array<Record<string, any>>;
+    performance: IntegrationSignalPerformance[];
+  };
+  exchanges: IntegrationExchange[];
+  resources: {
+    cpu_percent: number;
+    ram_percent: number;
+    ram_used_mb: number;
+    process_rss_mb: number;
+    disk_percent: number;
+    load_avg: number[];
+  };
+  brain: {
+    total: number;
+    correct: number;
+    accuracy: number;
+    avg_pnl: number;
+    history: Array<{
+      timestamp: string;
+      mode: string;
+      cumulative_pnl: number;
+      daily_pnl: number;
+      win_rate: number;
+      total_trades: number;
+    }>;
+  };
+  brain_control: {
+    mode: string;
+    health: string;
+    directive_updated_at: string | null;
+    directive_preview: string | null;
+    decision_core: {
+      ok: boolean;
+      model: string;
+      approval_rate: number;
+      total_requests: number;
+      gemma_calls: number;
+      fallback_calls: number;
+      avg_latency_ms: number;
+    };
+    learning_weights: {
+      similarity: number;
+      volume_match: number;
+      direction_match: number;
+      confidence_history: number;
+    };
+    efom: {
+      ok: boolean;
+      logged_trades: number;
+      optimizations_run: number;
+      config_path: string | null;
+      latest_report_summary?: string | null;
+      latest_report_sample_size?: number;
+      failure_patterns?: Array<{ condition: string; impact: string }>;
+      optuna_total_trials?: number;
+      optuna_best_value?: number;
+      optuna_best_trial?: Record<string, any> | null;
+    };
+  };
+}
+
+export interface EfomOverview {
+  ok: boolean;
+  generated_at: string;
+  reports_path: string;
+  runtime_config_path: string;
+  post_mortem: null | {
+    summary?: string;
+    sample_size?: number;
+    regime_summary?: Array<Record<string, any>>;
+    failure_patterns?: Array<{ condition: string; impact: string }>;
+    parameter_adjustment_suggestions?: Record<string, any>;
+  };
+  optuna: {
+    trials: Array<{
+      number: number;
+      value: number;
+      coverage?: number;
+      sharpe?: number;
+      sortino?: number;
+      params?: Record<string, number>;
+    }>;
+    total_trials: number;
+    best_trial: null | {
+      number: number;
+      value: number;
+      coverage?: number;
+      sharpe?: number;
+      sortino?: number;
+      params?: Record<string, number>;
+    };
+  };
+  runtime_config: Record<string, any> | null;
+}
+
 export function useBacktestScores() {
   return useSWR<BacktestScore[]>(`${API}/api/backtest/scores`, fetcher, {
     refreshInterval: 15000,
@@ -457,10 +775,39 @@ export function useEquityCurve() {
   });
 }
 
+export function useIntegrationOverview() {
+  return useSWR<IntegrationOverview>(`${API}/api/integration/overview`, fetcher, {
+    refreshInterval: 2500,
+    dedupingInterval: 1000,
+    refreshWhenHidden: true,
+    refreshWhenOffline: true,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+  });
+}
+
+export function useEfomOverview() {
+  return useSWR<EfomOverview>(`${API}/api/efom/overview`, fetcher, {
+    refreshInterval: 5000,
+    dedupingInterval: 2000,
+    refreshWhenHidden: true,
+    refreshWhenOffline: true,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+  });
+}
+
 export function useSystemEvents() {
   return useSWR<SystemEventStats>(`${API}/api/system/events`, fetcher, {
     refreshInterval: 2000,
     dedupingInterval: 1000,
+  });
+}
+
+export function useMamisStatus() {
+  return useSWR<MamisStatus>(`${API}/api/mamis/status`, fetcher, {
+    refreshInterval: 5000,
+    dedupingInterval: 2000,
   });
 }
 
@@ -495,6 +842,7 @@ export interface SignalHistoryItem {
   direction: string;
   confidence: number;
   price: number;
+  signal_time?: string;
   status: string;
   timestamp: string;
   metadata: Record<string, any>;

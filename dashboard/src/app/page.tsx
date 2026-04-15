@@ -1,13 +1,14 @@
 "use client";
 
 import { SWRConfig } from "swr";
-import { Component, ReactNode, useState, Suspense, lazy } from "react";
+import { Component, ReactNode, useState } from "react";
 import dynamic from "next/dynamic";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
 import BottomTerminal from "@/components/BottomTerminal";
 import StrategyControl from "@/components/StrategyControl";
 import ChatPanel from "@/components/ChatPanel";
+import CodeOperatorPanel from "@/components/CodeOperatorPanel";
 import StrategyAlert from "@/components/StrategyAlert";
 import WatchlistManager from "@/components/WatchlistManager";
 import ActiveSignals from "@/components/ActiveSignals";
@@ -15,8 +16,11 @@ import PatternLibrary from "@/components/PatternLibrary";
 import SignalHistory from "@/components/SignalHistory";
 import LearningLog from "@/components/LearningLog";
 import InterAgentTerminal from "@/components/InterAgentTerminal";
+import MamisPanel from "@/components/MamisPanel";
+import IntegrationPanel from "@/components/IntegrationPanel";
+import MobileLiteDashboard from "@/components/MobileLiteDashboard";
 import { swrConfig } from "@/lib/api";
-import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain, TerminalSquare } from "lucide-react";
+import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain, TerminalSquare, Radar, Activity, PanelLeft, X } from "lucide-react";
 
 // Heavy components with lightweight-charts — lazy load
 const ChartCanvas = dynamic(() => import("@/components/ChartCanvas"), { ssr: false, loading: () => <div className="flex-1 bg-surface animate-pulse" /> });
@@ -50,13 +54,15 @@ class ErrorBoundary extends Component<{ children: ReactNode; fallback?: string }
 }
 
 function RightPanel() {
-  const [tab, setTab] = useState<"market" | "signals" | "backtest" | "flow" | "patterns" | "history" | "learning" | "intercom">("market");
+  const [tab, setTab] = useState<"market" | "signals" | "backtest" | "flow" | "integration" | "mamis" | "patterns" | "history" | "learning" | "intercom">("market");
 
   const tabs = [
     { key: "market" as const, icon: Radio, label: "Piyasa" },
     { key: "signals" as const, icon: Crosshair, label: "Sinyaller" },
     { key: "backtest" as const, icon: BarChart3, label: "Backtest" },
     { key: "flow" as const, icon: GitBranch, label: "Flow" },
+    { key: "integration" as const, icon: Activity, label: "Entegrasyon" },
+    { key: "mamis" as const, icon: Radar, label: "MAMIS" },
     { key: "patterns" as const, icon: Database, label: "Paternler" },
     { key: "history" as const, icon: History, label: "Geçmiş" },
     { key: "learning" as const, icon: Brain, label: "Öğrenme" },
@@ -64,7 +70,7 @@ function RightPanel() {
   ];
 
   return (
-    <div className="w-[26rem] xl:w-[28rem] flex-shrink-0 h-full flex flex-col border-l border-surface-border">
+    <div className="flex h-full min-h-0 w-full flex-col border-t border-surface-border lg:w-[26rem] lg:flex-shrink-0 lg:border-l lg:border-t-0 xl:w-[28rem]">
       {/* Tab selector — scrollable */}
       <div className="flex overflow-x-auto border-b border-surface-border bg-surface-card/30 custom-scrollbar">
         {tabs.map((t) => (
@@ -86,6 +92,8 @@ function RightPanel() {
         {tab === "signals" && <ActiveSignals />}
         {tab === "backtest" && <BacktestPanel />}
         {tab === "flow" && <AgentFlow />}
+        {tab === "integration" && <IntegrationPanel />}
+        {tab === "mamis" && <MamisPanel />}
         {tab === "patterns" && <PatternLibrary />}
         {tab === "history" && <SignalHistory />}
         {tab === "learning" && <LearningLog />}
@@ -95,28 +103,45 @@ function RightPanel() {
   );
 }
 
+
 export default function Home() {
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
   return (
     <ErrorBoundary fallback="Dashboard Hatası">
       <SWRConfig value={swrConfig}>
-        <div className="flex flex-col h-screen overflow-hidden">
-          <div className="flex flex-1 min-h-0">
+        <div className="flex min-h-svh flex-col overflow-x-hidden bg-surface lg:h-screen lg:overflow-hidden">
+          <div className="border-b border-surface-border px-3 py-2 lg:hidden">
+            <button
+              onClick={() => setMobileSidebarOpen(true)}
+              className="inline-flex items-center gap-2 rounded-lg border border-surface-border bg-surface-card px-3 py-2 text-xs font-medium text-gray-200"
+            >
+              <PanelLeft size={14} className="text-accent" />
+              Ajanlar ve Sistem
+            </button>
+          </div>
+
+          <div className="flex flex-1 min-h-0 flex-col lg:flex-row">
+            <MobileLiteDashboard />
+
             {/* Left sidebar — Agent health */}
             <ErrorBoundary fallback="Sidebar Hatası">
-              <Sidebar />
+              <div className="hidden lg:flex">
+                <Sidebar />
+              </div>
             </ErrorBoundary>
 
             {/* Center — Main trading area */}
-            <div className="flex-1 flex flex-col min-w-0">
+            <div className="hidden min-w-0 flex-1 flex-col lg:flex">
               <ErrorBoundary fallback="TopBar Hatası">
                 <TopBar />
               </ErrorBoundary>
-              <div className="flex-[3] min-h-0">
+              <div className="h-[42svh] min-h-[18rem] lg:flex-[3] lg:min-h-0">
                 <ErrorBoundary fallback="Grafik Hatası">
                   <ChartCanvas />
                 </ErrorBoundary>
               </div>
-              <div className="flex-[2] min-h-0">
+              <div className="h-[28rem] min-h-[16rem] lg:flex-[2] lg:min-h-0">
                 <ErrorBoundary fallback="Terminal Hatası">
                   <BottomTerminal />
                 </ErrorBoundary>
@@ -137,6 +162,27 @@ export default function Home() {
           {/* Floating controls */}
           <StrategyControl />
           <ChatPanel />
+          <CodeOperatorPanel />
+
+          {mobileSidebarOpen && (
+            <div className="fixed inset-0 z-50 flex bg-black/60 lg:hidden">
+              <div className="flex h-full w-[min(88vw,22rem)] flex-col bg-surface shadow-2xl">
+                <div className="flex items-center justify-between border-b border-surface-border px-4 py-3">
+                  <span className="text-sm font-semibold text-gray-200">Sistem Durumu</span>
+                  <button
+                    onClick={() => setMobileSidebarOpen(false)}
+                    className="rounded-md border border-surface-border p-1 text-gray-400"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <Sidebar />
+                </div>
+              </div>
+              <button className="flex-1" onClick={() => setMobileSidebarOpen(false)} aria-label="Kapat" />
+            </div>
+          )}
         </div>
       </SWRConfig>
     </ErrorBoundary>

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { createChart, IChartApi, CandlestickData, Time, CandlestickSeries, createSeriesMarkers } from "lightweight-charts";
 import { mutate } from "swr";
 import { addWatchlistCoin, usePriceHistory, useSignals, useLivePrices, useWatchlist, Signal } from "@/lib/api";
+import { toTimestampMs } from "@/lib/time";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
 const TIMEFRAMES = ["5m", "15m", "1h", "4h", "8h", "1d"] as const;
@@ -150,7 +151,7 @@ export default function ChartCanvas() {
     if (!seriesRef.current || !candles?.length) return;
 
     const mapped: CandlestickData<Time>[] = candles.map((c) => ({
-      time: (new Date(c.minute).getTime() / 1000) as Time,
+      time: (toTimestampMs(c.minute) / 1000) as Time,
       open: toNumber(c.open),
       high: toNumber(c.high),
       low: toNumber(c.low),
@@ -169,7 +170,7 @@ export default function ChartCanvas() {
     if (symbolSignals.length > 0 && chartRef.current) {
       const markers = symbolSignals.slice(0, 20).map((s) => ({
         time: alignToTf(
-          Math.floor(new Date(s.signal_time || s.timestamp).getTime() / 1000),
+          Math.floor(toTimestampMs(s.signal_time || s.timestamp) / 1000),
           activeTf
         ) as Time,
         position: s.direction === "long" ? ("belowBar" as const) : ("aboveBar" as const),

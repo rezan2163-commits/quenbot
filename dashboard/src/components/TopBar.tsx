@@ -69,38 +69,40 @@ export default function TopBar() {
   });
 
   return (
-    <div className="flex flex-wrap items-center gap-4 px-4 py-2 border-b border-surface-border bg-surface-card/30">
+    <div className="flex flex-col gap-3 px-3 py-3 border-b border-surface-border bg-surface-card/30 lg:flex-row lg:flex-wrap lg:items-center lg:gap-4 lg:px-4 lg:py-2">
       {/* KPIs */}
-      <KPI
-        icon={BarChart3}
-        label="Simülasyon"
-        value={summary ? `${summary.closed_simulations}` : "—"}
-        sub={summary ? `${summary.open_simulations} açık` : ""}
-      />
-      <KPI
-        icon={Target}
-        label="Win Rate"
-        value={summary ? `%${toNumber(summary.win_rate).toFixed(1)}` : "—"}
-        color={summary && toNumber(summary.win_rate) >= 50 ? "text-bull" : "text-bear"}
-      />
-      <KPI
-        icon={Activity}
-        label="PnL"
-        value={summary ? `$${toNumber(summary.total_pnl).toFixed(2)}` : "—"}
-        color={summary && toNumber(summary.total_pnl) >= 0 ? "text-bull" : "text-bear"}
-      />
-      <KPI
-        icon={TrendingUp}
-        label="Sinyal"
-        value={summary ? `${summary.active_signals}` : "—"}
-        sub="aktif"
-      />
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:flex lg:flex-wrap lg:items-center lg:gap-4">
+        <KPI
+          icon={BarChart3}
+          label="Simülasyon"
+          value={summary ? `${summary.closed_simulations}` : "—"}
+          sub={summary ? `${summary.open_simulations} açık` : ""}
+        />
+        <KPI
+          icon={Target}
+          label="Win Rate"
+          value={summary ? `%${toNumber(summary.win_rate).toFixed(1)}` : "—"}
+          color={summary && toNumber(summary.win_rate) >= 50 ? "text-bull" : "text-bear"}
+        />
+        <KPI
+          icon={Activity}
+          label="PnL"
+          value={summary ? `$${toNumber(summary.total_pnl).toFixed(2)}` : "—"}
+          color={summary && toNumber(summary.total_pnl) >= 0 ? "text-bull" : "text-bear"}
+        />
+        <KPI
+          icon={TrendingUp}
+          label="Sinyal"
+          value={summary ? `${summary.active_signals}` : "—"}
+          sub="aktif"
+        />
+      </div>
 
       {/* Top movers divider */}
-      <div className="w-px h-6 bg-surface-border flex-shrink-0" />
+      <div className="hidden h-6 w-px bg-surface-border flex-shrink-0 lg:block" />
 
       {/* Top movers */}
-      <div className="grid grid-cols-2 xl:grid-cols-3 gap-2 min-w-[320px]">
+      <div className="grid w-full grid-cols-2 gap-2 sm:grid-cols-3 lg:min-w-[320px] lg:w-auto xl:grid-cols-3">
         {marketCards.map((m) => (
           <div
             key={m.symbol}
@@ -119,8 +121,8 @@ export default function TopBar() {
       </div>
 
       {/* Always-visible coin add */}
-      <div className="w-px h-6 bg-surface-border flex-shrink-0" />
-      <div className="flex items-center gap-2 min-w-[320px]">
+      <div className="hidden h-6 w-px bg-surface-border flex-shrink-0 lg:block" />
+      <div className="flex w-full flex-wrap items-center gap-2 lg:min-w-[320px] lg:w-auto lg:flex-nowrap">
         <span className="text-[10px] text-gray-500 uppercase">Coin Ekle</span>
         <input
           value={symbolInput}
@@ -130,7 +132,7 @@ export default function TopBar() {
           }}
           list="known-symbols"
           placeholder="BTC, ETH veya BTCUSDT"
-          className="h-7 w-[170px] rounded border border-surface-border bg-surface px-2 text-xs text-gray-200 placeholder:text-gray-600 focus:outline-none"
+          className="h-9 min-w-0 flex-1 rounded border border-surface-border bg-surface px-3 text-xs text-gray-200 placeholder:text-gray-600 focus:outline-none lg:h-7 lg:w-[170px] lg:flex-none lg:px-2"
         />
         <datalist id="known-symbols">
           {knownSymbols.slice(0, 80).map((s) => (
@@ -148,7 +150,7 @@ export default function TopBar() {
         >
           {adding ? "Ekleniyor" : "Ekle"}
         </button>
-        {message && <span className="text-[10px] text-gray-400 whitespace-nowrap">{message}</span>}
+        {message && <span className="w-full text-[10px] text-gray-400 lg:w-auto lg:whitespace-nowrap">{message}</span>}
       </div>
     </div>
   );
@@ -168,11 +170,11 @@ function KPI({
   color?: string;
 }) {
   return (
-    <div className="flex items-center gap-2 whitespace-nowrap">
+    <div className="flex min-w-0 items-center gap-2 whitespace-nowrap rounded-lg border border-surface-border bg-surface/50 px-2 py-2 lg:border-0 lg:bg-transparent lg:px-0 lg:py-0">
       <Icon size={14} className="text-gray-500 flex-shrink-0" />
-      <div>
+      <div className="min-w-0">
         <p className="text-[10px] text-gray-500 uppercase">{label}</p>
-        <p className={`text-sm font-bold font-mono ${color || "text-gray-200"}`}>
+        <p className={`truncate text-sm font-bold font-mono ${color || "text-gray-200"}`}>
           {value}
           {sub && <span className="text-[10px] text-gray-500 font-normal ml-1">{sub}</span>}
         </p>

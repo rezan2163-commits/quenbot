@@ -31,6 +31,7 @@ class StateTracker:
         'active_symbols': [],
         'bootstrap_mode': True,
         'system_start_time': None,
+        'forced_mode': None,
         'mode': 'BOOTSTRAP',  # BOOTSTRAP → LEARNING → WARMUP → PRODUCTION
     }
 
@@ -48,6 +49,7 @@ class StateTracker:
                 if row:
                     saved = json.loads(row['state_value'])
                     self.state.update(saved)
+                    self._normalize_corrupted_state()
                     logger.info(f"📦 State loaded: PnL={self.state['cumulative_pnl']:.4f} "
                                 f"Trades={self.state['total_trades']} "
                                 f"Mode={self.state['mode']}")
@@ -110,6 +112,7 @@ class StateTracker:
             )
         else:
             self.state['current_drawdown'] = 0.0
+        self._normalize_corrupted_state()
 
         # Signal type stats
         if signal_type not in self.state['signal_type_stats']:
@@ -181,6 +184,22 @@ class StateTracker:
     def get_mode(self) -> str:
         return self.state['mode']
 
+    async def set_mode(self, mode: Optional[str]):
+        """Force bot mode or clear override with AUTO."""
+        normalized = (mode or "").strip().upper()
+        valid_modes = {'BOOTSTRAP', 'LEARNING', 'WARMUP', 'PRODUCTION'}
+
+        if not normalized or normalized == 'AUTO':
+            self.state['forced_mode'] = None
+            self._check_mode_transition()
+        elif normalized in valid_modes:
+            self.state['forced_mode'] = normalized
+            self.state['mode'] = normalized
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")
+
+        await self.save_state()
+
     def _check_daily_reset(self):
         """Gün değişiminde günlük metrikleri sıfırla"""
         today = str(date.today())
@@ -193,6 +212,11 @@ class StateTracker:
 
     def _check_mode_transition(self):
         """Sistem modunu kontrol et ve geçiş yap"""
+        forced_mode = str(self.state.get('forced_mode') or '').upper()
+        if forced_mode in {'BOOTSTRAP', 'LEARNING', 'WARMUP', 'PRODUCTION'}:
+            self.state['mode'] = forced_mode
+            return
+
         start_str = self.state.get('system_start_time')
         if not start_str:
             return
@@ -217,6 +241,13 @@ class StateTracker:
         if old_mode != self.state['mode']:
             logger.info(f"🔄 Mode transition: {old_mode} → {self.state['mode']} "
                         f"(running {hours_running:.1f}h)")
+
+    def _normalize_corrupted_state(self):
+        current_drawdown = float(self.state.get('current_drawdown', 0) or 0)
+        if current_drawdown > 100:
+            logger.warning("StateTracker drawdown normalized: %.2f -> 100.00", current_drawdown)
+            self.state['current_drawdown'] = 100.0
+            self._dirty = True
 
     async def _save_history_snapshot(self):
         """Her trade sonrası state_history tablosuna snapshot yaz"""

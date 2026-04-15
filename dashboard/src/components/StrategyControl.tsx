@@ -55,7 +55,7 @@ export default function StrategyControl() {
     return (
       <button
         onClick={() => setIsOpen(true)}
-        className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-accent text-white text-sm font-medium shadow-lg shadow-accent/25 hover:bg-accent-dim transition-colors"
+        className="fixed bottom-20 right-3 z-50 flex items-center gap-2 rounded-xl bg-accent px-3 py-2 text-sm font-medium text-white shadow-lg shadow-accent/25 transition-colors hover:bg-accent-dim sm:bottom-4 sm:right-4 sm:px-4 sm:py-2.5"
       >
         <Settings size={16} />
         Strateji Kontrol
@@ -65,7 +65,7 @@ export default function StrategyControl() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-full max-w-lg mx-4 bg-surface-card rounded-2xl border border-surface-border shadow-2xl">
+      <div className="mx-3 max-h-[88svh] w-full max-w-lg overflow-y-auto rounded-2xl border border-surface-border bg-surface-card shadow-2xl sm:mx-4">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-surface-border">
           <div className="flex items-center gap-2">
@@ -85,7 +85,7 @@ export default function StrategyControl() {
           <p className="text-[11px] text-gray-500 uppercase tracking-wider font-semibold mb-3">
             Hazır Stratejiler
           </p>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {PRESET_STRATEGIES.map((preset) => (
               <button
                 key={preset.name}

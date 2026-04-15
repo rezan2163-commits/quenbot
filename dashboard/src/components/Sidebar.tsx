@@ -72,7 +72,7 @@ export default function Sidebar() {
   const runningCount = agentEntries.filter(([, v]) => v.status === "running").length;
 
   return (
-    <aside className="w-64 flex-shrink-0 h-screen overflow-y-auto border-r border-surface-border bg-surface flex flex-col">
+    <aside className="flex h-full w-full flex-shrink-0 flex-col overflow-y-auto border-r border-surface-border bg-surface lg:h-screen lg:w-64">
       {/* Header */}
       <div className="p-4 border-b border-surface-border">
         <div className="flex items-center gap-2">
