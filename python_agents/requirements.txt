@@ -11,3 +11,4 @@ redis==6.4.0
 chromadb==1.2.0
 websocket-client==1.9.0
 optuna==4.5.0
+llama-cpp-python==0.3.9

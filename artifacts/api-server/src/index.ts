@@ -235,7 +235,7 @@ async function buildLocalChatFallback() {
         'Istersen soruyu daha kisa gonder veya kod gorevini dogrudan Code Operator panelinden ver.'
       ].join(' | '),
       assistant: {
-        name: 'Qwen Command',
+        name: 'SuperGemma Command',
         model: 'fallback-status',
         role: 'direct_operator',
       },
@@ -249,7 +249,7 @@ async function buildLocalChatFallback() {
       status: 'chat_timeout_fallback_local',
       message: 'Sistem aktif ama chat modeli su an yogun. Birazdan tekrar deneyin veya gorevi Code Operator panelinden iletin.',
       assistant: {
-        name: 'Qwen Command',
+        name: 'SuperGemma Command',
         model: 'fallback-status',
         role: 'direct_operator',
       },
@@ -1912,7 +1912,7 @@ app.post("/api/chat", express.json(), async (req, res) => {
         const data = await agentResponse.json();
         return res.json({
           success: true,
-          message: data.message || "Qwen response generated",
+          message: data.message || "SuperGemma response generated",
           assistant: data.assistant,
           routed_actions: data.routed_actions || [],
           status: data.status,

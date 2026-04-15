@@ -34,8 +34,8 @@ class Config:
 
     # Agent thresholds
     PRICE_MOVEMENT_THRESHOLD = 0.01  # 1%
-    SIMILARITY_THRESHOLD = 0.5
-    GHOST_SIMILARITY_THRESHOLD = 0.5
+    SIMILARITY_THRESHOLD = 0.6      # ≥60% triggers SuperGemma brain
+    GHOST_SIMILARITY_THRESHOLD = 0.6
     AUDIT_LEARNING_RATE = 0.1
 
     # Time windows

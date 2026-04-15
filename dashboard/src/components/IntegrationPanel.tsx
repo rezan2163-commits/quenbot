@@ -63,7 +63,7 @@ export default function IntegrationPanel() {
               <div className="text-[10px] text-gray-500 mt-1">Durum {brainControl?.health || "unknown"} • mod {brainControl?.mode || "unknown"}</div>
             </div>
             <div className="rounded-xl border border-white/6 bg-white/[0.03] px-3 py-2">
-              <div className="text-gray-500">Qwen karar akisi</div>
+              <div className="text-gray-500">SuperGemma karar akisi</div>
               <div className="text-emerald-300 font-semibold mt-1">%{toNumber(brainControl?.decision_core.approval_rate).toFixed(1)} onay</div>
               <div className="text-[10px] text-gray-500 mt-1">{toNumber(brainControl?.decision_core.total_requests)} istek • {toNumber(brainControl?.decision_core.avg_latency_ms).toFixed(0)} ms</div>
             </div>

@@ -27,13 +27,18 @@ logging.basicConfig(
 logger = logging.getLogger("deploy")
 
 # ── Constants ──
-OLLAMA_URL = "http://localhost:11434"
-REQUIRED_MODEL = os.getenv("QUENBOT_DECISION_MODEL") or os.getenv("QUENBOT_LLM_MODEL") or "qwen3:8b"
-FALLBACK_MODELS = ["qwen3:8b", "qwen3:1.7b", "gemma3:4b-it-q4_K_M", "quenbot-brain"]
+GGUF_MODEL_DIR = os.getenv("QUENBOT_GGUF_MODEL_DIR", "/root/models")
+REQUIRED_MODEL = os.getenv("QUENBOT_DECISION_MODEL") or os.getenv("QUENBOT_LLM_MODEL") or "supergemma-26b"
+GGUF_MODEL_CANDIDATES = [
+    "gemma-2-27b-it-Q4_K_M.gguf",
+    "gemma-2-27b-it-Q5_K_S.gguf",
+    "gemma-2-27b-it-Q4_K_S.gguf",
+    "gemma-3-27b-it-Q4_K_M.gguf",
+]
 PYTHON_AGENTS_DIR = Path(__file__).parent / "python_agents"
 SCRIPT_DIR = Path(__file__).parent
-MIN_RAM_GB = 4
-MIN_SWAP_GB = 2
+MIN_RAM_GB = 16
+MIN_SWAP_GB = 4
 DIRECTIVE_API_PORT = 3002
 
 

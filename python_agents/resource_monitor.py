@@ -108,7 +108,7 @@ class ResourceMonitor:
                            f"({snap.ram_used_mb:.0f}/{snap.ram_total_mb:.0f} MB). "
                            f"Python process: {snap.process_rss_mb:.0f} MB. "
                            f"Ollama modeli RAM'in büyük bölümünü kullanıyor olabilir. "
-                           f"Daha küçük model (qwen3:1.7b) düşünün." + component_note,
+                           f"Model GGUF quantize seviyesini düşürün (Q3_K_L)." + component_note,
                 "value": snap.ram_percent,
             })
         elif snap.ram_percent >= self.RAM_WARNING_PCT:

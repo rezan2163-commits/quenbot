@@ -53,7 +53,7 @@ export default function InterAgentTerminal() {
       </div>
 
       <div className="px-3 py-1.5 border-b border-surface-border/50 text-[10px] text-gray-500">
-        Qwen komutlari, LLM istek/yanitlari ve ajanlar arasi hareketler canli izlenir.
+        SuperGemma komutlari, LLM istek/yanitlari ve ajanlar arasi hareketler canli izlenir.
       </div>
 
       <div className="flex-1 overflow-y-auto terminal-log px-3 py-2 space-y-1">

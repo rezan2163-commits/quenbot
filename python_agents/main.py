@@ -108,7 +108,7 @@ class AgentOrchestrator:
         self._max_restarts = 50
         self._system_mode = "initializing"  # initializing | healthy | degraded
         self._llm_available = False
-        self._last_known_llm_model: str = os.getenv("QUENBOT_LLM_MODEL", "quenbot-brain")
+        self._last_known_llm_model: str = os.getenv("QUENBOT_LLM_MODEL", "supergemma-26b")
         self._start_time = time.time()
         self._last_resource_snapshot = None
         self._resource_warnings: list[dict] = []
@@ -1400,7 +1400,7 @@ class AgentOrchestrator:
                 for msg in messages:
                     if msg['role'] == 'user' and msg['id'] > last_processed_id:
                         response = await self.chat_engine.respond(msg['message'])
-                        assistant_name = self.chat_engine.get_assistant_identity()['name'] if self.chat_engine else 'Qwen Command'
+                        assistant_name = self.chat_engine.get_assistant_identity()['name'] if self.chat_engine else 'SuperGemma Command'
                         await self.db.insert_chat_message('assistant', response, assistant_name)
                         last_processed_id = msg['id']
                         logger.info(f"💬 Chat: '{msg['message'][:50]}' → answered")
@@ -1653,7 +1653,7 @@ class AgentOrchestrator:
                 logger.warning(f"Watchlist runtime refresh failed: {e}")
 
         async def execute_control(request):
-            """Runtime control plane for Qwen: directives, watchlist, risk params, model switch."""
+            """Runtime control plane for SuperGemma: directives, watchlist, risk params, model switch."""
             if not _is_control_authorized(request):
                 return web.json_response({"error": "Unauthorized"}, status=403)
 
@@ -2412,7 +2412,7 @@ class AgentOrchestrator:
             return []
 
         async def post_chat(request):
-            """Qwen chat and direct command interface."""
+            """SuperGemma chat and direct command interface."""
             try:
                 data = await request.json()
                 message = data.get("message", "").strip()

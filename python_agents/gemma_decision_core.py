@@ -1,15 +1,17 @@
 """
-Qwen Decision Core — Katman 3: Karar Verme Merkezi
-===================================================
-Tüm ajanlardan gelen girdileri sentezleyerek Qwen karar motoruna gönderir
-ve nihai stratejik kararı alır.
+SuperGemma Decision Core — Katman 3: Karar Verme Merkezi
+=========================================================
+Tüm ajanlardan gelen girdileri sentezleyerek SuperGemma-26B
+karar motoruna (GGUF/llama.cpp) gönderir ve nihai stratejik kararı alır.
 
 MİMARİ KONUM: Decision Core (Katman 3)
 - INPUT  ← PatternMatcher skoru, Scout verileri, Strategist önerileri,
             RiskManager durumu, StateTracker modu, Brain öğrenme verileri
 - OUTPUT → Onay/Red kararı, yön, güven, eylem talimatı
 
-FELSEFE: Ajanlar ÖNERI sunar, Qwen NİHAİ KARAR verir.
+FELSEFE: Ajanlar ÖNERI sunar, SuperGemma NİHAİ KARAR verir.
+MODEL: SuperGemma-26B (gemma-2-27b-it Q4_K_M GGUF) — llama-cpp-python
+TETİKLEME: Sadece Similarity_Score ≥ %60 olduğunda çağrılır.
 """
 import asyncio
 import json
@@ -53,9 +55,9 @@ def _get_llm_bridge():
     return _llm_bridge
 
 
-# ─── Qwen Decision Prompt Templates ───
+# ─── SuperGemma Decision Prompt Templates ───
 
-DECISION_SYSTEM_PROMPT = """Sen QuenBot trading sisteminin merkezi karar verme motorusun (Qwen Decision Core).
+DECISION_SYSTEM_PROMPT = """Sen QuenBot trading sisteminin merkezi karar verme motorusun (SuperGemma Decision Core).
 
 GÖREV: Ajanlardan gelen tüm verileri sentezleyerek nihai stratejik karar ver.
 
@@ -189,25 +191,28 @@ class GemmaDecision:
 
 class GemmaDecisionCore:
     """
-    Katman 3: Merkezi Karar Verme Motoru
-    =====================================
-    Tüm ajanlardan gelen girdileri tek bir Qwen promptunda sentezler.
-    Qwen nihai kararı verir, ajanlar sadece uygular.
+    Katman 3: Merkezi Karar Verme Motoru (SuperGemma-26B)
+    =====================================================
+    Tüm ajanlardan gelen girdileri tek bir SuperGemma promptunda sentezler.
+    SuperGemma nihai kararı verir, ajanlar sadece uygular.
+    Tetikleme: Sadece Similarity_Score ≥ %60 olduğunda çalışır.
 
     AKIŞ:
       PatternMatcher → |
             Scout          → | → GemmaDecisionCore.evaluate() → GemmaDecision
-            Strategist     → |     ↓ Qwen LLM inference
+            Strategist     → |     ↓ SuperGemma-26B GGUF inference
       Brain          → |
       RiskManager    → |
     """
 
     # Son N kararı bellekte tut
     MAX_DECISION_HISTORY = 100
-    # Qwen'i aşırı yüklememek için rate limit (saniye)
+    # SuperGemma'yı aşırı yüklememek için rate limit (saniye)
     MIN_DECISION_INTERVAL = float(os.getenv("QUENBOT_DECISION_MIN_INTERVAL", "0.5"))
-    # Qwen bağlanamazsa fallback kurallar
-    FALLBACK_MIN_SIMILARITY = 0.50
+    # Similarity trigger — sadece ≥%60 eşleşmede SuperGemma çağrılır
+    SIMILARITY_TRIGGER_THRESHOLD = 0.60
+    # SuperGemma bağlanamazsa fallback kurallar
+    FALLBACK_MIN_SIMILARITY = 0.60
     FALLBACK_MIN_CONFIDENCE = 0.50
 
     def __init__(self, brain=None, risk_manager=None, state_tracker=None, redis_bridge=None):
@@ -217,7 +222,7 @@ class GemmaDecisionCore:
         self.redis_bridge = redis_bridge
         self.vector_store = get_vector_store()
         self.event_bus = get_event_bus()
-        self._decision_model = os.getenv("QUENBOT_DECISION_MODEL", "quenbot-brain")
+        self._decision_model = os.getenv("QUENBOT_DECISION_MODEL", "supergemma-26b")
         self._decision_timeout = int(os.getenv("QUENBOT_DECISION_TIMEOUT", "35"))
         self._decision_lock = asyncio.Lock()
         self._decision_history: List[GemmaDecision] = []
@@ -262,10 +267,15 @@ class GemmaDecisionCore:
         # ─── Context toplama ───
         context = self._build_context(pattern_data, scout_data, strategist_data)
 
-        # ─── Qwen çağrısı (single-flight) ───
-        if self._decision_lock.locked():
+        # ─── Similarity Trigger Gate (≥60%) ───
+        similarity_score = context.get('similarity', 0)
+        if similarity_score < self.SIMILARITY_TRIGGER_THRESHOLD:
             decision = self._fallback_evaluate(symbol, timeframe, context)
-            decision.reasoning = f"{decision.reasoning} | LLM yogun, hizli fallback"
+            decision.reasoning = f"{decision.reasoning} | Similarity {similarity_score:.1%} < %60 eşik — SuperGemma tetiklenmedi"
+            self._stats['fallback_calls'] += 1
+        elif self._decision_lock.locked():
+            decision = self._fallback_evaluate(symbol, timeframe, context)
+            decision.reasoning = f"{decision.reasoning} | SuperGemma yoğun, hızlı fallback"
             self._stats['fallback_calls'] += 1
         else:
             async with self._decision_lock:
@@ -273,7 +283,7 @@ class GemmaDecisionCore:
                     decision = await self._gemma_evaluate(symbol, timeframe, context)
                     self._stats['gemma_calls'] += 1
                 except Exception as e:
-                    logger.warning(f"Qwen Decision Core fallback: {e}")
+                    logger.warning(f"SuperGemma Decision Core fallback: {e}")
                     decision = self._fallback_evaluate(symbol, timeframe, context)
                     self._stats['fallback_calls'] += 1
 
@@ -297,16 +307,16 @@ class GemmaDecisionCore:
         self._last_decision_time = time.monotonic()
 
         logger.info(
-            f"🎯 QwenDecision: {symbol} {timeframe} → "
+            f"🎯 SuperGemmaDecision: {symbol} {timeframe} → "
             f"{'✅ APPROVE' if decision.approved else '🚫 REJECT'} "
-            f"({decision.direction}, güven={decision.confidence:.0%}, "
+            f"(sim={context.get('similarity', 0):.1%}, {decision.direction}, güven={decision.confidence:.0%}, "
             f"{decision.latency_ms}ms)"
         )
 
         envelope = self.build_command_envelope(pattern_data, decision)
         await self.event_bus.publish(Event(
             type=EventType.DECISION_MADE,
-            source="qwen_decision_core",
+            source="supergemma_decision_core",
             data={
                 "symbol": symbol,
                 "timeframe": timeframe,
@@ -320,9 +330,9 @@ class GemmaDecisionCore:
             await self.redis_bridge.publish_command(
                 CommunicationLogEntry(
                     channel="commands",
-                    source="qwen_decision_core",
+                    source="supergemma_decision_core",
                     kind="command",
-                    summary=f"{symbol} icin {envelope.command.action.value} komutu üretildi",
+                    summary=f"{symbol} icin {envelope.command.action.value} komutu üretildi (SuperGemma)",
                     payload={
                         "decision": decision.to_dict(),
                         "command": envelope.command.model_dump(mode="json"),
@@ -433,7 +443,7 @@ class GemmaDecisionCore:
 
     async def _gemma_evaluate(self, symbol: str, timeframe: str,
                                context: Dict) -> GemmaDecision:
-        """Qwen'e tam context gönder, karar al."""
+        """SuperGemma-26B'ye tam context gönder, karar al."""
         prompt = SYNTHESIS_PROMPT_TEMPLATE.format(**context)
 
         client = _get_llm_client()
@@ -443,13 +453,12 @@ class GemmaDecisionCore:
             temperature=0.2,
             json_mode=True,
             timeout_override=self._decision_timeout,
-            model_override=self._decision_model,
-            max_tokens_override=180,
+            max_tokens_override=256,
             prefer_fast_fail=True,
         )
 
         if not response.success or not response.text.strip():
-            raise RuntimeError(f"Qwen yanıt vermedi: {response.text[:100]}")
+            raise RuntimeError(f"SuperGemma yanıt vermedi: {response.text[:100]}")
 
         # JSON parse
         parsed = self._parse_decision_json(response.text)
@@ -471,9 +480,9 @@ class GemmaDecisionCore:
     def _fallback_evaluate(self, symbol: str, timeframe: str,
                             context: Dict) -> GemmaDecision:
         """
-        Qwen çalışmadığında kural tabanlı fallback karar.
+        SuperGemma çalışmadığında kural tabanlı fallback karar.
         MarketActivityTracker modunu, MAMIS sinyalini ve Brain doğruluğunu kullanır.
-        """
+        Similarity ≥ %60 gating dahil."""
         similarity = context.get('similarity', 0)
         predicted_direction = context.get('predicted_direction', 'neutral')
         predicted_magnitude = context.get('predicted_magnitude', 0)
@@ -559,7 +568,7 @@ class GemmaDecisionCore:
             direction=predicted_direction,
             confidence=confidence if approved else confidence * 0.5,
             magnitude=predicted_magnitude,
-            reasoning=' | '.join(reasons) if reasons else 'Kural tabanlı onay (Qwen offline)',
+            reasoning=' | '.join(reasons) if reasons else 'Kural tabanlı onay (SuperGemma offline)',
             risk_level=risk_level,
             action=f'{predicted_direction.upper()} pozisyon aç' if approved else 'Bekle',
             priority='normal',
@@ -589,7 +598,7 @@ class GemmaDecisionCore:
                 return json.loads(match.group(1))
             except json.JSONDecodeError:
                 pass
-        logger.warning(f"Qwen karar JSON parse hatası: {text[:200]}")
+        logger.warning(f"SuperGemma karar JSON parse hatası: {text[:200]}")
         return {'decision': 'REJECT', 'reasoning': 'JSON parse hatası'}
 
     def build_command_envelope(self, pattern_data: Dict[str, Any], decision: GemmaDecision) -> DecisionEnvelope:
@@ -677,7 +686,7 @@ class GemmaDecisionCore:
         exp_id = self.vector_store.record_experience(experience)
         await self.event_bus.publish(Event(
             type=EventType.EXPERIENCE_RECORDED,
-            source="qwen_decision_core",
+            source="supergemma_decision_core",
             data={"experience_id": exp_id, **experience.model_dump(mode="json")},
         ))
         return exp_id

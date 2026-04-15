@@ -34,7 +34,7 @@ export default function ChatPanel() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [localMessages, setLocalMessages] = useState<{ role: string; message: string }[]>([]);
-  const [assistantLabel, setAssistantLabel] = useState("Qwen Command");
+  const [assistantLabel, setAssistantLabel] = useState("SuperGemma Command");
   const [commandLog, setCommandLog] = useState<Array<{ id: string; text: string }>>([]);
   const { data: messages, mutate } = useChatMessages();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -191,7 +191,7 @@ export default function ChatPanel() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleSend()}
-          placeholder="Qwen'e emir ver veya soru sor..."
+          placeholder="SuperGemma'ya emir ver veya soru sor..."
           className="flex-1 px-3 py-2 rounded-lg bg-surface border border-surface-border text-sm text-gray-200 placeholder:text-gray-600 focus:outline-none focus:border-accent/50"
           disabled={sending}
         />

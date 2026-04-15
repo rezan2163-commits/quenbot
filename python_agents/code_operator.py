@@ -109,14 +109,13 @@ class CodeOperator:
         self.repo_root = REPO_ROOT
         self._store = get_directive_store()
         self._client = LLMClient(
-            model=os.getenv("QUENBOT_CODE_MODEL", os.getenv("QUENBOT_CHAT_MODEL", os.getenv("QUENBOT_LLM_MODEL", "qwen3.5-coder:9b"))),
-            timeout=int(os.getenv("QUENBOT_CODE_TIMEOUT", "70")),
+            model=os.getenv("QUENBOT_CODE_MODEL", os.getenv("QUENBOT_CHAT_MODEL", os.getenv("QUENBOT_LLM_MODEL", "supergemma-26b"))),
+            timeout=int(os.getenv("QUENBOT_CODE_TIMEOUT", "90")),
             max_tokens=int(os.getenv("QUENBOT_CODE_MAX_TOKENS", "900")),
             max_retries=0,
         )
-        self._client._semaphore = asyncio.Semaphore(1)
-        self._client.num_ctx = int(os.getenv("QUENBOT_CODE_NUM_CTX", "6144"))
-        self._client.num_thread = int(os.getenv("QUENBOT_CODE_NUM_THREAD", os.getenv("QUENBOT_LLM_NUM_THREAD", "12")))
+        self._client.num_ctx = int(os.getenv("QUENBOT_CODE_NUM_CTX", "8192"))
+        self._client.num_thread = int(os.getenv("QUENBOT_CODE_NUM_THREAD", os.getenv("QUENBOT_LLM_NUM_THREAD", "14")))
         self._lock = asyncio.Lock()
         self._queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None

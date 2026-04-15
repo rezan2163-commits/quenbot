@@ -24,7 +24,7 @@ const AGENT_META: Record<string, { label: string; icon: React.ElementType; desc:
   pattern_matcher: { label: "PatternMatcher", icon: Grid3X3,      desc: "Benzerlik taraması" },
   brain:           { label: "Brain",          icon: Brain,        desc: "Öğrenme & hafıza" },
   chat_engine:     { label: "Chat Engine",    icon: MessageSquare, desc: "Doğal dil sohbet" },
-  llm_brain:       { label: "LLM",           icon: Zap,          desc: "Qwen model durumu" },
+  llm_brain:       { label: "LLM",           icon: Zap,          desc: "SuperGemma model durumu" },
   system:          { label: "System",         icon: Activity,     desc: "Orkestratör" },
 };
 

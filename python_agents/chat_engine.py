@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
-ACTIVE_LLM_MODEL = os.getenv("QUENBOT_LLM_MODEL", "quenbot-brain")
+ACTIVE_LLM_MODEL = os.getenv("QUENBOT_LLM_MODEL", "supergemma-26b")
 CHAT_CACHE_TTL = int(os.getenv("QUENBOT_CHAT_CACHE_TTL", "8"))
 HEALTH_CACHE_TTL = int(os.getenv("QUENBOT_HEALTH_CACHE_TTL", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("QUENBOT_CHAT_CONTEXT_CHARS", "1800"))
@@ -125,7 +125,7 @@ class ChatEngine:
 
     def get_assistant_identity(self) -> Dict[str, str]:
         return {
-            "name": "Qwen Command",
+            "name": "SuperGemma Command",
             "model": self.get_chat_model_name(),
             "role": "direct_operator",
         }

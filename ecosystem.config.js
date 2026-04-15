@@ -1,5 +1,5 @@
 // PM2 Ecosystem Configuration - QuenBot
-// Optimized for 12 vCPU (AMD) / 24 GB RAM
+// Optimized for 16 vCPU / 32 GB RAM — SuperGemma-26B GGUF
 // Usage: pm2 start ecosystem.config.js
 const quenbotTimeZone = process.env.QUENBOT_TIMEZONE || "Europe/Vienna";
 
@@ -51,14 +51,20 @@ module.exports = {
         DB_USER: "user",
         DB_PASSWORD: "password",
         DB_NAME: "trade_intel",
-        OLLAMA_NUM_PARALLEL: "2",
-        OLLAMA_MAX_LOADED_MODELS: "2",
-        QUENBOT_LLM_MODEL: "qwen3.5-coder:9b",
-        QUENBOT_LLM_NUM_CTX: "4096",
-        QUENBOT_LLM_MAX_TOKENS: "384",
-        QUENBOT_LLM_NUM_THREAD: "12",
-        QUENBOT_CHAT_MODEL: "qwen3.5-coder:9b",
-        QUENBOT_DECISION_MODEL: "qwen3.5-coder:9b",
+        OLLAMA_NUM_PARALLEL: "1",
+        OLLAMA_MAX_LOADED_MODELS: "1",
+        QUENBOT_LLM_MODEL: "supergemma-26b",
+        QUENBOT_LLM_NUM_CTX: "8192",
+        QUENBOT_LLM_MAX_TOKENS: "512",
+        QUENBOT_LLM_NUM_THREAD: "14",
+        QUENBOT_CHAT_MODEL: "supergemma-26b",
+        QUENBOT_DECISION_MODEL: "supergemma-26b",
+        QUENBOT_GGUF_MODEL_DIR: process.env.QUENBOT_GGUF_MODEL_DIR || "/root/models",
+        QUENBOT_GGUF_MODEL_FILE: process.env.QUENBOT_GGUF_MODEL_FILE || "gemma-2-27b-it-Q4_K_M.gguf",
+        QUENBOT_GGUF_NUM_THREADS: "14",
+        QUENBOT_GGUF_NUM_CTX: "8192",
+        QUENBOT_GGUF_MAX_TOKENS: "512",
+        QUENBOT_GGUF_BATCH_SIZE: "512",
         QUENBOT_ENABLE_REDIS: process.env.QUENBOT_ENABLE_REDIS || "1",
         QUENBOT_REDIS_URL: process.env.QUENBOT_REDIS_URL || "redis://127.0.0.1:6379/0",
         QUENBOT_VECTOR_DB_PATH: process.env.QUENBOT_VECTOR_DB_PATH || "./.chroma",

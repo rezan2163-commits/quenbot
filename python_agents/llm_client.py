@@ -1,9 +1,8 @@
 """
 QuenBot V2 — LLM Client Module
-Centralized async client for Ollama API (localhost:11434).
-Handles connection pooling, retries, prompt trimming, and timeout management
-for CPU-only 8GB RAM environments.
-Auto-detects available models and falls back gracefully.
+SuperGemma-26B GGUF backend via llama-cpp-python.
+Ollama yerine doğrudan GGUF inference yapılır.
+Mevcut arayüz (generate/chat/health_check) korunur — llm_bridge uyumlu.
 """
 
 import asyncio
@@ -14,27 +13,19 @@ import time
 from typing import Optional
 from dataclasses import dataclass, field
 
-import aiohttp
-
 logger = logging.getLogger("quenbot.llm_client")
 
 # -------------------------------------------------------------------
-# Defaults tuned for 12 vCPU / 24 GB RAM
+# Defaults tuned for 16 vCPU / 32 GB RAM — SuperGemma-26B GGUF
 # -------------------------------------------------------------------
-DEFAULT_BASE_URL = os.getenv("QUENBOT_LLM_BASE_URL", "http://localhost:11434")
-DEFAULT_MODEL = os.getenv("QUENBOT_LLM_MODEL", "quenbot-brain")
-MODEL_CANDIDATES = [
-    "quenbot-brain",
-    "qwen3:8b",
-    "qwen3:1.7b",
-]
-DEFAULT_TIMEOUT = int(os.getenv("QUENBOT_LLM_TIMEOUT", "60"))
-DEFAULT_MAX_TOKENS = int(os.getenv("QUENBOT_LLM_MAX_TOKENS", "384"))
-DEFAULT_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_LLM_MAX_PROMPT_CHARS", "5000"))
+DEFAULT_MODEL = os.getenv("QUENBOT_LLM_MODEL", "supergemma-26b")
+DEFAULT_TIMEOUT = int(os.getenv("QUENBOT_LLM_TIMEOUT", "90"))
+DEFAULT_MAX_TOKENS = int(os.getenv("QUENBOT_LLM_MAX_TOKENS", "512"))
+DEFAULT_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_LLM_MAX_PROMPT_CHARS", "6000"))
 DEFAULT_MAX_RETRIES = int(os.getenv("QUENBOT_LLM_MAX_RETRIES", "1"))
-DEFAULT_CONCURRENCY = int(os.getenv("QUENBOT_LLM_CONCURRENCY", "2"))
-DEFAULT_NUM_THREAD = int(os.getenv("QUENBOT_LLM_NUM_THREAD", "11"))
-DEFAULT_NUM_CTX = int(os.getenv("QUENBOT_LLM_NUM_CTX", "4096"))
+DEFAULT_CONCURRENCY = int(os.getenv("QUENBOT_LLM_CONCURRENCY", "1"))
+DEFAULT_NUM_THREAD = int(os.getenv("QUENBOT_LLM_NUM_THREAD", "14"))
+DEFAULT_NUM_CTX = int(os.getenv("QUENBOT_LLM_NUM_CTX", "8192"))
 
 
 @dataclass
@@ -52,62 +43,64 @@ class LLMResponse:
         """Try to parse response text as JSON."""
         try:
             cleaned = self.text.strip()
-            # Handle markdown code blocks
             if cleaned.startswith("```"):
                 lines = cleaned.split("\n")
                 lines = [l for l in lines if not l.strip().startswith("```")]
                 cleaned = "\n".join(lines)
             return json.loads(cleaned)
         except (json.JSONDecodeError, ValueError):
+            start = cleaned.find("{") if cleaned else -1
+            end = cleaned.rfind("}") + 1 if cleaned else 0
+            if start >= 0 and end > start:
+                try:
+                    return json.loads(cleaned[start:end])
+                except (json.JSONDecodeError, ValueError):
+                    pass
             return None
 
 
 class LLMClient:
-    """Async Ollama client optimized for CPU-only inference."""
+    """
+    SuperGemma-26B GGUF client — llm_bridge uyumlu arayüz.
+    Dahili olarak gguf_engine.GGUFEngine kullanır.
+    """
 
     def __init__(
         self,
-        base_url: str = DEFAULT_BASE_URL,
+        base_url: str = "",
         model: str = DEFAULT_MODEL,
         timeout: int = DEFAULT_TIMEOUT,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
         max_retries: int = DEFAULT_MAX_RETRIES,
     ):
-        self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.max_tokens = max_tokens
         self.max_prompt_chars = max_prompt_chars
         self.max_retries = max_retries
-        # Per-instance inference parameters (can be overridden by callers)
         self.num_thread: int = DEFAULT_NUM_THREAD
         self.num_ctx: int = DEFAULT_NUM_CTX
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._semaphore = asyncio.Semaphore(DEFAULT_CONCURRENCY)
+        self._engine = None
         self._total_calls = 0
         self._total_errors = 0
         self._total_latency_ms = 0.0
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            connector = aiohttp.TCPConnector(limit=8, force_close=False)
-            timeout = aiohttp.ClientTimeout(total=self.timeout + 30)
-            self._session = aiohttp.ClientSession(
-                connector=connector, timeout=timeout
-            )
-        return self._session
+    def _get_engine(self):
+        """Lazy import to avoid circular deps."""
+        if self._engine is None:
+            from gguf_engine import get_gguf_engine
+            self._engine = get_gguf_engine()
+        return self._engine
 
     async def close(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
+        if self._engine:
+            await self._engine.close()
 
     def _trim_prompt(self, text: str) -> str:
         """Trim prompt to fit within max chars to prevent OOM."""
         if len(text) <= self.max_prompt_chars:
             return text
-        # Keep the beginning (system context) and end (latest data)
         head_size = self.max_prompt_chars // 2
         tail_size = self.max_prompt_chars - head_size - 50
         trimmed = (
@@ -115,157 +108,37 @@ class LLMClient:
             + "\n\n[... trimmed for memory constraints ...]\n\n"
             + text[-tail_size:]
         )
-        logger.debug(
-            "Prompt trimmed: %d -> %d chars", len(text), len(trimmed)
-        )
+        logger.debug("Prompt trimmed: %d -> %d chars", len(text), len(trimmed))
         return trimmed
 
     async def health_check(self) -> bool:
-        """Check if Ollama is reachable and ensure a model is available."""
+        """Check if GGUF model is loaded and responsive."""
         try:
-            session = await self._get_session()
-            async with session.get(
-                f"{self.base_url}/api/tags", timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                if resp.status != 200:
-                    return False
-                data = await resp.json()
-                available = [m.get("name", "") for m in data.get("models", [])]
-                if available:
-                    logger.info(f"Ollama models available: {available}")
-                    # Prefer the configured model if present
-                    preferred = self.model
-                    if preferred:
-                        for avail in available:
-                            if avail == preferred or avail.startswith(preferred + ":"):
-                                if self.model != avail:
-                                    logger.info(f"Model selected: {avail}")
-                                self.model = avail
-                                return True
-
-                    # Find best model from candidates list
-                    matched = False
-                    for candidate in MODEL_CANDIDATES:
-                        for avail in available:
-                            # Match both exact and prefix (e.g. "gemma4-trading" matches "gemma4-trading:latest")
-                            if avail == candidate or avail.startswith(candidate + ":"):
-                                if self.model != avail:
-                                    logger.info(f"Model selected: {avail}")
-                                self.model = avail
-                                matched = True
-                                break
-                        if matched:
-                            break
-                    if not matched:
-                        self.model = available[0]
-                        logger.info(f"Using first available model: {self.model}")
-                    return True
-                else:
-                    logger.warning("Ollama running but no models installed")
-                    return False
+            engine = self._get_engine()
+            if not engine._initialized:
+                ok = await engine.initialize()
+                if ok:
+                    self.model = engine._model_name
+                return ok
+            self.model = engine._model_name
+            return True
         except Exception:
             return False
 
     async def list_models(self) -> list[str]:
-        """List all available models from Ollama."""
-        try:
-            session = await self._get_session()
-            async with session.get(
-                f"{self.base_url}/api/tags", timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return [m.get("name", "") for m in data.get("models", [])]
-        except Exception:
-            pass
+        """List available GGUF model (single model architecture)."""
+        engine = self._get_engine()
+        if engine._initialized:
+            return [engine._model_name]
         return []
 
     async def ensure_model(self) -> bool:
-        """Ensure a working model is loaded. Pull one if needed."""
-        models = await self.list_models()
-        if models:
-            # Check if our model exists (exact or prefix match)
-            for m in models:
-                if m == self.model or m.startswith(self.model + ":"):
-                    self.model = m
-                    return True
-            # Try to find a candidate
-            for candidate in MODEL_CANDIDATES:
-                for m in models:
-                    if m == candidate or m.startswith(candidate + ":"):
-                        self.model = m
-                        logger.info(f"Using existing model: {self.model}")
-                        return True
-
-        # No suitable model found — try to pull Qwen3 8B
-        logger.info("No suitable model found. Attempting to pull qwen3:8b...")
-        try:
-            session = await self._get_session()
-            async with session.post(
-                f"{self.base_url}/api/pull",
-                json={"name": "qwen3:8b", "stream": False},
-                timeout=aiohttp.ClientTimeout(total=1800),
-            ) as resp:
-                if resp.status == 200:
-                    self.model = "qwen3:8b"
-                    logger.info("✓ Qwen3 8B model pulled successfully")
-                    await self._create_custom_model(base_model="qwen3:8b", target_name="quenbot-brain")
-                    return True
-                else:
-                    logger.error(f"Model pull failed: HTTP {resp.status}")
-        except Exception as e:
-            logger.error(f"Model pull error: {e}")
-        return False
-
-    async def _create_custom_model(self, base_model: Optional[str] = None, target_name: str = "quenbot-brain"):
-        """Create a custom QuenBot model from the given base model."""
-        source_model = base_model or self.model
-        modelfile = f'''FROM {source_model}
-
-PARAMETER temperature 0.18
-PARAMETER temperature 0.15
-PARAMETER top_p 0.85
-PARAMETER top_k 30
-PARAMETER repeat_penalty 1.15
-PARAMETER num_ctx {DEFAULT_NUM_CTX}
-PARAMETER num_predict {DEFAULT_MAX_TOKENS}
-PARAMETER num_thread {DEFAULT_NUM_THREAD}
-
-SYSTEM """Sen QuenBot Merkezi Zeka Sistemisin — kripto piyasalarinda kurumsal bot hareketlerini tespit eden, siniflandiran ve otonom sinyal ureten cok katmanli bir trading AI'sin.
-
-6 AJAN MIMARISI:
-1. Scout: Binance spot+futures WebSocket ile canli trade akisi toplar, anomalileri isaretler
-2. PatternMatcher: Euclidean distance ile gecmis paternlere benzerlik hesaplar (esik: %50+)
-3. Strategist: Coklu timeframe analiz + pattern + momentum ile sinyal uretir
-4. GhostSimulator: Paper trade, TP/SL takibi, geri besleme
-5. Auditor: RCA ile basarisizlik analizi, duzeltme onerileri
-6. Brain (SEN): Pattern kutuphanesi, benzerlik motoru, regime tespiti, surekli ogrenme
-
-KARAR HIYERARSISI:
-Veri → Anomali → Pattern Eslestirme → Sinyal → Risk Kapisi → Paper Trade → Audit → Ogrenme
-
-OGRENME: Her simulasyondan ogren, dogruluk <%40 ise threshold artir, >%70 ise azalt.
-
-DAVRANIS:
-- JSON istegi → kesin JSON döndur
-- Normal sohbet → dogal, kisa, net Turkce
-- Eksik veri → acikca belirt, uydurmadan karar verme
-- Sistemin sahibi gibi konus"""
-'''
-        try:
-            session = await self._get_session()
-            async with session.post(
-                f"{self.base_url}/api/create",
-                json={"name": target_name, "modelfile": modelfile, "stream": False},
-                timeout=aiohttp.ClientTimeout(total=900),
-            ) as resp:
-                if resp.status == 200:
-                    self.model = target_name
-                    logger.info("✓ Custom %s model created from %s", target_name, source_model)
-                else:
-                    logger.warning(f"Custom model creation failed (HTTP {resp.status}), using base model")
-        except Exception as e:
-            logger.warning(f"Custom model creation error: {e}, using base model")
+        """Ensure GGUF model is loaded."""
+        engine = self._get_engine()
+        ok = await engine.initialize()
+        if ok:
+            self.model = engine._model_name
+        return ok
 
     async def generate(
         self,
@@ -280,155 +153,58 @@ DAVRANIS:
         max_retries_override: Optional[int] = None,
     ) -> LLMResponse:
         """
-        Generate a response from the local LLM.
-        Uses semaphore to ensure single inference at a time on CPU.
+        Generate a response from SuperGemma-26B GGUF.
+        Arayüz Ollama client ile aynı kalır — llm_bridge uyumlu.
         """
-        if prefer_fast_fail:
-            acquire_timeout = float(os.getenv("QUENBOT_LLM_ACQUIRE_TIMEOUT", "1.2"))
-            try:
-                await asyncio.wait_for(self._semaphore.acquire(), timeout=acquire_timeout)
-            except asyncio.TimeoutError:
-                return LLMResponse(
-                    text="",
-                    model=model_override or self.model,
-                    success=False,
-                    error=f"LLM busy (acquire timeout {acquire_timeout}s)",
-                )
-            try:
-                return await self._generate_inner(
-                    prompt,
-                    system,
-                    temperature,
-                    json_mode,
-                    timeout_override,
-                    model_override,
-                    max_tokens_override,
-                    max_retries_override,
-                )
-            finally:
-                self._semaphore.release()
-
-        async with self._semaphore:
-            return await self._generate_inner(
-                prompt,
-                system,
-                temperature,
-                json_mode,
-                timeout_override,
-                model_override,
-                max_tokens_override,
-                max_retries_override,
-            )
-
-    async def _generate_inner(
-        self,
-        prompt: str,
-        system: Optional[str],
-        temperature: float,
-        json_mode: bool,
-        timeout_override: Optional[int],
-        model_override: Optional[str] = None,
-        max_tokens_override: Optional[int] = None,
-        max_retries_override: Optional[int] = None,
-    ) -> LLMResponse:
-        prompt = self._trim_prompt(prompt)
-        if system:
-            system = self._trim_prompt(system)
-
-        use_model = model_override or self.model
-
-        # Qwen3 thinking modunu kapat -- yoksa <think>...</think> bloklari
-        # onlarca token harcatip yanitlari geciktirir
-        _disable_thinking = "qwen3" in use_model.lower() or "quenbot-qwen" in use_model.lower()
-
-        payload = {
-            "model": use_model,
-            "prompt": prompt,
-            "stream": False,
-            "keep_alive": os.getenv("QUENBOT_LLM_KEEP_ALIVE", "30m"),
-            "options": {
-                "temperature": temperature,
-                "top_p": 0.85,
-                "top_k": 40,
-                "repeat_penalty": 1.1,
-                "num_predict": int(max_tokens_override or self.max_tokens),
-                "num_ctx": self.num_ctx,
-                "num_thread": self.num_thread,
-            },
-        }
-        if _disable_thinking:
-            payload["think"] = False
-
-        if system:
-            payload["system"] = system
-        if json_mode:
-            payload["format"] = "json"
+        engine = self._get_engine()
 
         effective_timeout = timeout_override or self.timeout
+        effective_max_tokens = int(max_tokens_override or self.max_tokens)
         effective_retries = self.max_retries if max_retries_override is None else max(0, int(max_retries_override))
 
         for attempt in range(effective_retries + 1):
             t0 = time.monotonic()
-            try:
-                session = await self._get_session()
-                async with session.post(
-                    f"{self.base_url}/api/generate",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=effective_timeout),
-                ) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        raise RuntimeError(
-                            f"Ollama HTTP {resp.status}: {error_text[:200]}"
-                        )
-                    data = await resp.json()
 
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                self._total_calls += 1
-                self._total_latency_ms += elapsed_ms
+            gguf_resp = await engine.generate(
+                prompt=prompt,
+                system=system,
+                temperature=temperature,
+                json_mode=json_mode,
+                max_tokens=effective_max_tokens,
+                timeout_override=effective_timeout,
+                prefer_fast_fail=prefer_fast_fail,
+            )
 
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            self._total_calls += 1
+            self._total_latency_ms += elapsed_ms
+
+            if gguf_resp.success:
                 return LLMResponse(
-                    text=data.get("response", ""),
-                    model=data.get("model", self.model),
-                    total_duration_ms=data.get("total_duration", 0) / 1e6,
-                    prompt_eval_count=data.get("prompt_eval_count", 0),
-                    eval_count=data.get("eval_count", 0),
+                    text=gguf_resp.text,
+                    model=gguf_resp.model,
+                    total_duration_ms=gguf_resp.total_duration_ms,
+                    prompt_eval_count=gguf_resp.prompt_tokens,
+                    eval_count=gguf_resp.completion_tokens,
                     success=True,
                 )
 
-            except asyncio.TimeoutError:
-                elapsed_ms = (time.monotonic() - t0) * 1000
+            if attempt < effective_retries:
                 logger.warning(
-                    "LLM timeout (attempt %d/%d, %.0fms)",
-                    attempt + 1, effective_retries + 1, elapsed_ms
+                    "GGUF inference attempt %d/%d failed: %s",
+                    attempt + 1, effective_retries + 1, gguf_resp.error
                 )
-                if attempt == effective_retries:
-                    self._total_errors += 1
-                    return LLMResponse(
-                        text="",
-                        model=self.model,
-                        success=False,
-                        error=f"Timeout after {effective_timeout}s",
-                    )
                 await asyncio.sleep(2)
+                continue
 
-            except Exception as e:
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                logger.error(
-                    "LLM error (attempt %d/%d): %s",
-                    attempt + 1, effective_retries + 1, str(e)
-                )
-                if attempt == effective_retries:
-                    self._total_errors += 1
-                    return LLMResponse(
-                        text="",
-                        model=self.model,
-                        success=False,
-                        error=str(e),
-                    )
-                await asyncio.sleep(2)
+            self._total_errors += 1
+            return LLMResponse(
+                text="",
+                model=gguf_resp.model,
+                success=False,
+                error=gguf_resp.error,
+            )
 
-        # Should not reach here
         return LLMResponse(text="", model=self.model, success=False, error="Unknown")
 
     async def chat(
@@ -437,7 +213,7 @@ DAVRANIS:
         temperature: float = 0.3,
         json_mode: bool = False,
     ) -> LLMResponse:
-        """Chat-style API (converts to generate internally for efficiency)."""
+        """Chat-style API (converts to generate internally)."""
         system_parts = []
         prompt_parts = []
 
@@ -467,15 +243,19 @@ DAVRANIS:
             if self._total_calls > 0
             else 0
         )
+        engine_stats = {}
+        if self._engine:
+            engine_stats = self._engine.get_stats()
         return {
             "total_calls": self._total_calls,
             "total_errors": self._total_errors,
             "avg_latency_ms": round(avg_latency, 1),
             "model": self.model,
-            "base_url": self.base_url,
+            "backend": "SuperGemma-26B (GGUF / llama-cpp-python)",
             "concurrency": DEFAULT_CONCURRENCY,
             "num_thread": DEFAULT_NUM_THREAD,
             "num_ctx": DEFAULT_NUM_CTX,
+            **engine_stats,
         }
 
 

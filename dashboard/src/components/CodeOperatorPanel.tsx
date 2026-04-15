@@ -122,7 +122,7 @@ export default function CodeOperatorPanel() {
           <div className="flex items-center gap-2">
             <Bot size={16} className="text-accent" />
             <div>
-              <div className="text-sm font-semibold text-gray-200">Qwen Kod Operatoru</div>
+              <div className="text-sm font-semibold text-gray-200">SuperGemma Kod Operatoru</div>
               <div className="text-[11px] text-gray-500">Dogal dil ile kod gorevi, preview ve apply akisı</div>
             </div>
           </div>

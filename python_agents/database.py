@@ -74,7 +74,7 @@ def _infer_signal_model(source: str, metadata: Dict[str, Any]) -> str:
     if source == 'mamis':
         return 'MAMIS Microstructure'
     if source == 'pattern_matcher':
-        return 'PatternMatcher + Qwen Decision Core'
+        return 'PatternMatcher + SuperGemma Decision Core'
     return 'Strategist Engine'
 
 
