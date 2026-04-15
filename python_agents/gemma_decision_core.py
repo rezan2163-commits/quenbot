@@ -1,7 +1,7 @@
 """
-Gemma Decision Core — Katman 3: Karar Verme Merkezi
-=====================================================
-Tüm ajanlardan gelen girdileri sentezleyerek Gemma 4'e gönderir
+Qwen Decision Core — Katman 3: Karar Verme Merkezi
+===================================================
+Tüm ajanlardan gelen girdileri sentezleyerek Qwen karar motoruna gönderir
 ve nihai stratejik kararı alır.
 
 MİMARİ KONUM: Decision Core (Katman 3)
@@ -9,7 +9,7 @@ MİMARİ KONUM: Decision Core (Katman 3)
             RiskManager durumu, StateTracker modu, Brain öğrenme verileri
 - OUTPUT → Onay/Red kararı, yön, güven, eylem talimatı
 
-FELSEFE: Ajanlar ÖNERI sunar, Gemma NİHAİ KARAR verir.
+FELSEFE: Ajanlar ÖNERI sunar, Qwen NİHAİ KARAR verir.
 """
 import asyncio
 import json
@@ -18,6 +18,19 @@ import os
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
+
+from event_bus import Event, EventType, get_event_bus
+from qwen_models import (
+    CommandAction,
+    CommunicationLogEntry,
+    DecisionCommand,
+    DecisionEnvelope,
+    ErrorObservation,
+    ExecutionFeedback,
+    LearningExperience,
+)
+from vector_memory import get_vector_store
+from market_activity_tracker import get_market_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +53,16 @@ def _get_llm_bridge():
     return _llm_bridge
 
 
-# ─── Gemma Decision Prompt Templates ───
+# ─── Qwen Decision Prompt Templates ───
 
-DECISION_SYSTEM_PROMPT = """Sen QuenBot trading sisteminin merkezi karar verme motorusun (Gemma Decision Core).
+DECISION_SYSTEM_PROMPT = """Sen QuenBot trading sisteminin merkezi karar verme motorusun (Qwen Decision Core).
 
 GÖREV: Ajanlardan gelen tüm verileri sentezleyerek nihai stratejik karar ver.
 
 KURALLAR:
 1. Tüm ajan raporlarını dikkatlice analiz et
 2. Pattern eşleşme skoru, piyasa rejimi, risk durumu, öğrenme geçmişini dengele
+3. MAMIS mikro-yapı sinyali varsa OFI, VPIN, CVD ve pattern sınıflandırmasını kararın içine kat
 3. Kararını JSON formatında ver
 4. Onaylamadığın sinyalleri net gerekçeyle reddet
 5. Güven seviyeni %0-100 olarak belirt
@@ -103,8 +117,18 @@ SYNTHESIS_PROMPT_TEMPLATE = """## KARAR İSTEĞİ — {symbol} ({timeframe})
 - Öneri: {strategist_recommendation}
 - Momentum Skoru: {momentum_score:.2f}
 
+### 🔬 MAMIS MİKRO-YAPI
+- Bias: {mamis_bias}
+- Güven: {mamis_confidence:.1%}
+- Pattern: {mamis_pattern}
+- Tahmini Volatilite: {mamis_volatility:.5f}
+
 ### 📚 ÖĞRENME BİRİKİMİ
 {learning_context}
+
+### ⚡ PİYASA AKTİVİTE
+- Piyasa Modu: {market_mode}
+- Aktif Sembol Sayısı: {active_symbol_count}
 
 ---
 Bu verileri sentezle ve nihai kararını JSON formatında ver."""
@@ -160,29 +184,32 @@ class GemmaDecisionCore:
     """
     Katman 3: Merkezi Karar Verme Motoru
     =====================================
-    Tüm ajanlardan gelen girdileri tek bir Gemma promptunda sentezler.
-    Gemma nihai kararı verir, ajanlar sadece uygular.
+    Tüm ajanlardan gelen girdileri tek bir Qwen promptunda sentezler.
+    Qwen nihai kararı verir, ajanlar sadece uygular.
 
     AKIŞ:
       PatternMatcher → |
-      Scout          → | → GemmaDecisionCore.evaluate() → GemmaDecision
-      Strategist     → |     ↓ Gemma 4 LLM inference
+            Scout          → | → GemmaDecisionCore.evaluate() → GemmaDecision
+            Strategist     → |     ↓ Qwen LLM inference
       Brain          → |
       RiskManager    → |
     """
 
     # Son N kararı bellekte tut
     MAX_DECISION_HISTORY = 100
-    # Gemma'yı aşırı yüklememek için rate limit (saniye)
+    # Qwen'i aşırı yüklememek için rate limit (saniye)
     MIN_DECISION_INTERVAL = float(os.getenv("QUENBOT_DECISION_MIN_INTERVAL", "0.5"))
-    # Gemma bağlanamazsa fallback kurallar
+    # Qwen bağlanamazsa fallback kurallar
     FALLBACK_MIN_SIMILARITY = 0.50
     FALLBACK_MIN_CONFIDENCE = 0.50
 
-    def __init__(self, brain=None, risk_manager=None, state_tracker=None):
+    def __init__(self, brain=None, risk_manager=None, state_tracker=None, redis_bridge=None):
         self.brain = brain
         self.risk_manager = risk_manager
         self.state_tracker = state_tracker
+        self.redis_bridge = redis_bridge
+        self.vector_store = get_vector_store()
+        self.event_bus = get_event_bus()
         self._decision_model = os.getenv("QUENBOT_DECISION_MODEL", "quenbot-brain")
         self._decision_timeout = int(os.getenv("QUENBOT_DECISION_TIMEOUT", "35"))
         self._decision_lock = asyncio.Lock()
@@ -228,7 +255,7 @@ class GemmaDecisionCore:
         # ─── Context toplama ───
         context = self._build_context(pattern_data, scout_data, strategist_data)
 
-        # ─── Gemma çağrısı (single-flight) ───
+        # ─── Qwen çağrısı (single-flight) ───
         if self._decision_lock.locked():
             decision = self._fallback_evaluate(symbol, timeframe, context)
             decision.reasoning = f"{decision.reasoning} | LLM yogun, hizli fallback"
@@ -239,7 +266,7 @@ class GemmaDecisionCore:
                     decision = await self._gemma_evaluate(symbol, timeframe, context)
                     self._stats['gemma_calls'] += 1
                 except Exception as e:
-                    logger.warning(f"Gemma Decision Core fallback: {e}")
+                    logger.warning(f"Qwen Decision Core fallback: {e}")
                     decision = self._fallback_evaluate(symbol, timeframe, context)
                     self._stats['fallback_calls'] += 1
 
@@ -263,11 +290,38 @@ class GemmaDecisionCore:
         self._last_decision_time = time.monotonic()
 
         logger.info(
-            f"🎯 GemmaDecision: {symbol} {timeframe} → "
+            f"🎯 QwenDecision: {symbol} {timeframe} → "
             f"{'✅ APPROVE' if decision.approved else '🚫 REJECT'} "
             f"({decision.direction}, güven={decision.confidence:.0%}, "
             f"{decision.latency_ms}ms)"
         )
+
+        envelope = self.build_command_envelope(pattern_data, decision)
+        await self.event_bus.publish(Event(
+            type=EventType.DECISION_MADE,
+            source="qwen_decision_core",
+            data={
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "approved": decision.approved,
+                "decision": decision.to_dict(),
+                "command": envelope.command.model_dump(mode="json"),
+                "reasoning_steps": envelope.reasoning_steps,
+            },
+        ))
+        if self.redis_bridge:
+            await self.redis_bridge.publish_command(
+                CommunicationLogEntry(
+                    channel="commands",
+                    source="qwen_decision_core",
+                    kind="command",
+                    summary=f"{symbol} icin {envelope.command.action.value} komutu üretildi",
+                    payload={
+                        "decision": decision.to_dict(),
+                        "command": envelope.command.model_dump(mode="json"),
+                    },
+                )
+            )
 
         return decision
 
@@ -278,6 +332,7 @@ class GemmaDecisionCore:
         """Tüm ajan verilerini tek bir context dict'ine topla."""
         scout = scout_data or {}
         strat = strategist_data or {}
+        mamis_context = pattern_data.get('mamis_context') or strat.get('mamis_context') or {}
 
         # Brain öğrenme verileri
         brain_accuracy = 0.0
@@ -352,13 +407,21 @@ class GemmaDecisionCore:
             # Strategist
             'strategist_recommendation': strat.get('recommendation', 'bekle'),
             'momentum_score': strat.get('momentum_score', 0),
+            # MAMIS
+            'mamis_bias': mamis_context.get('direction', 'neutral'),
+            'mamis_confidence': float(mamis_context.get('confidence', 0) or 0),
+            'mamis_pattern': mamis_context.get('pattern_type', 'none'),
+            'mamis_volatility': float(mamis_context.get('volatility', 0) or 0),
             # Learning context
-            'learning_context': self.brain.get_learning_context() if self.brain else 'Ogrenme verisi yok',
+            'learning_context': self.vector_store.build_learning_context(pattern_data.get('symbol')),
+            # Market Activity
+            'market_mode': get_market_tracker().mode.value,
+            'active_symbol_count': len(get_market_tracker().get_active_symbols()),
         }
 
     async def _gemma_evaluate(self, symbol: str, timeframe: str,
                                context: Dict) -> GemmaDecision:
-        """Gemma 4'e tam context gönder, karar al."""
+        """Qwen'e tam context gönder, karar al."""
         prompt = SYNTHESIS_PROMPT_TEMPLATE.format(**context)
 
         client = _get_llm_client()
@@ -374,7 +437,7 @@ class GemmaDecisionCore:
         )
 
         if not response.success or not response.text.strip():
-            raise RuntimeError(f"Gemma yanıt vermedi: {response.text[:100]}")
+            raise RuntimeError(f"Qwen yanıt vermedi: {response.text[:100]}")
 
         # JSON parse
         parsed = self._parse_decision_json(response.text)
@@ -396,8 +459,8 @@ class GemmaDecisionCore:
     def _fallback_evaluate(self, symbol: str, timeframe: str,
                             context: Dict) -> GemmaDecision:
         """
-        Gemma çalışmadığında kural tabanlı fallback karar.
-        Daha muhafazakar eşikler kullanır.
+        Qwen çalışmadığında kural tabanlı fallback karar.
+        MarketActivityTracker modunu, MAMIS sinyalini ve Brain doğruluğunu kullanır.
         """
         similarity = context.get('similarity', 0)
         predicted_direction = context.get('predicted_direction', 'neutral')
@@ -405,11 +468,16 @@ class GemmaDecisionCore:
         brain_accuracy = context.get('brain_accuracy', 0)
         consecutive_losses = context.get('consecutive_losses', 0)
         drawdown = context.get('drawdown', 0)
+        mamis_bias = context.get('mamis_bias', 'neutral')
+        mamis_confidence = context.get('mamis_confidence', 0)
+        direction_accuracy = context.get('direction_accuracy', 0)
+        bot_mode = context.get('bot_mode', 'LEARNING')
 
         # Kural tabanlı karar
         approved = True
         reasons = []
 
+        # ─── Hard Gates ───
         if similarity < self.FALLBACK_MIN_SIMILARITY:
             approved = False
             reasons.append(f"Benzerlik düşük: {similarity:.4f} < {self.FALLBACK_MIN_SIMILARITY}")
@@ -430,15 +498,57 @@ class GemmaDecisionCore:
             approved = False
             reasons.append(f"Brain doğruluğu düşük: {brain_accuracy:.1%}")
 
-        confidence = min(similarity * 0.5 + brain_accuracy * 0.3 + 0.2, 1.0)
+        # ─── MAMIS Cross-validation ───
+        if mamis_bias != 'neutral' and mamis_bias != predicted_direction and mamis_confidence > 0.6:
+            approved = False
+            reasons.append(f"MAMIS çelişkisi: {mamis_bias} vs {predicted_direction} (güven={mamis_confidence:.0%})")
+
+        # ─── Market Activity Mode ───
+        tracker = get_market_tracker()
+        if not tracker.is_active:
+            # Piyasa durgunken onay eşiğini yükselt
+            if similarity < 0.70:
+                approved = False
+                reasons.append(f"Piyasa durgun — yüksek benzerlik gerekli: {similarity:.4f} < 0.70")
+
+        # ─── Direction-specific accuracy gate ───
+        if direction_accuracy > 0 and direction_accuracy < 0.35:
+            approved = False
+            reasons.append(f"Bu yön ({predicted_direction}) başarı oranı düşük: {direction_accuracy:.1%}")
+
+        # ─── Confidence calculation ───
+        # Weighted: similarity(40%) + brain_accuracy(25%) + mamis_alignment(20%) + direction_accuracy(15%)
+        mamis_alignment = 0.5
+        if mamis_bias == predicted_direction:
+            mamis_alignment = mamis_confidence
+        elif mamis_bias == 'neutral':
+            mamis_alignment = 0.5
+        else:
+            mamis_alignment = max(0.1, 1.0 - mamis_confidence)
+
+        confidence = (
+            similarity * 0.40 +
+            brain_accuracy * 0.25 +
+            mamis_alignment * 0.20 +
+            (direction_accuracy if direction_accuracy > 0 else 0.5) * 0.15
+        )
+        confidence = min(max(confidence, 0.0), 1.0)
+
+        # ─── Risk level determination ───
+        if abs(drawdown) > 5 or consecutive_losses >= 3:
+            risk_level = 'high'
+        elif abs(drawdown) > 2 or consecutive_losses >= 1:
+            risk_level = 'medium'
+        else:
+            risk_level = 'low'
 
         return GemmaDecision(
             decision='APPROVE' if approved else 'REJECT',
             direction=predicted_direction,
             confidence=confidence if approved else confidence * 0.5,
             magnitude=predicted_magnitude,
-            reasoning=' | '.join(reasons) if reasons else 'Kural tabanlı onay (Gemma offline)',
-            risk_level='high' if drawdown < -5 else 'medium',
+            reasoning=' | '.join(reasons) if reasons else 'Kural tabanlı onay (Qwen offline)',
+            risk_level=risk_level,
             action=f'{predicted_direction.upper()} pozisyon aç' if approved else 'Bekle',
             priority='normal',
             symbol=symbol,
@@ -467,8 +577,113 @@ class GemmaDecisionCore:
                 return json.loads(match.group(1))
             except json.JSONDecodeError:
                 pass
-        logger.warning(f"Gemma karar JSON parse hatası: {text[:200]}")
+        logger.warning(f"Qwen karar JSON parse hatası: {text[:200]}")
         return {'decision': 'REJECT', 'reasoning': 'JSON parse hatası'}
+
+    def build_command_envelope(self, pattern_data: Dict[str, Any], decision: GemmaDecision) -> DecisionEnvelope:
+        raw_direction = (decision.direction or pattern_data.get("predicted_direction") or "neutral").lower()
+        if raw_direction in {"up", "long"}:
+            action = CommandAction.LONG
+        elif raw_direction in {"down", "short"}:
+            action = CommandAction.SHORT
+        else:
+            action = CommandAction.HOLD
+
+        target_profit_pct = abs(float(decision.magnitude or pattern_data.get("predicted_magnitude", 0.02) or 0.02))
+        target_profit_pct = max(0.02, min(target_profit_pct, 0.12))
+        stop_loss_pct = max(0.01, min(target_profit_pct / 2.0, 0.05))
+
+        command = DecisionCommand(
+            action=action,
+            symbol=str(pattern_data.get("symbol", "GLOBAL") or "GLOBAL"),
+            market_type=str(pattern_data.get("market_type", "spot")),
+            exchange=str(pattern_data.get("exchange", "mixed")),
+            target_profit_pct=target_profit_pct,
+            stop_loss_pct=stop_loss_pct,
+            estimated_duration_minutes=int(pattern_data.get("estimated_duration_minutes", 30) or 30),
+            confidence=float(decision.confidence or 0.0),
+            reasoning=decision.reasoning,
+            strategy="pattern_vector_recall",
+            execution_mode="paper",
+            constraints={
+                "match_count": pattern_data.get("match_count", 0),
+                "similarity": pattern_data.get("similarity", 0),
+                "risk_level": decision.risk_level,
+            },
+            metadata={
+                "source_event": "EVENT_PATTERN_DETECTED",
+                "timeframe": pattern_data.get("timeframe", "15m"),
+                "current_price": pattern_data.get("current_price", 0),
+            },
+        )
+        steps = [
+            f"Pattern similarity {float(pattern_data.get('similarity', 0)):.2f}",
+            f"Predicted direction {raw_direction}",
+            f"Risk level {decision.risk_level}",
+        ]
+        return DecisionEnvelope(
+            task=f"{command.symbol} icin anlamli pattern hareketini isle",
+            goal="Dusuk gecikmeli, yapilandirilmis ve paper-trade uyumlu karar uretmek",
+            strategy_summary=decision.reasoning[:240],
+            command=command,
+            priority=decision.priority if decision.priority in {"low", "normal", "high", "critical"} else "normal",
+            source_event="pattern.detected",
+            reasoning_steps=steps,
+        )
+
+    def build_command_envelope_from_dict(self, pattern_data: Dict[str, Any], decision_data: Dict[str, Any]) -> DecisionEnvelope:
+        synthetic_decision = GemmaDecision(
+            decision='APPROVE' if decision_data.get('approved') else 'REJECT',
+            direction=str(decision_data.get('direction', 'neutral')),
+            confidence=float(decision_data.get('confidence', 0.0) or 0.0),
+            magnitude=float(decision_data.get('magnitude', 0.0) or 0.0),
+            reasoning=str(decision_data.get('reasoning', '')),
+            risk_level=str(decision_data.get('risk_level', 'medium')),
+            action=str(decision_data.get('action', 'Bekle')),
+            priority='high' if float(decision_data.get('confidence', 0.0) or 0.0) >= 0.75 else 'normal',
+            symbol=str(pattern_data.get('symbol', 'GLOBAL') or 'GLOBAL'),
+            timeframe=str(pattern_data.get('timeframe', '15m') or '15m'),
+        )
+        return self.build_command_envelope(pattern_data, synthetic_decision)
+
+    async def record_execution_feedback(self, feedback: ExecutionFeedback):
+        outcome = "error" if feedback.status == "error" else "success" if (feedback.pnl_pct or 0) > 0 else "failure"
+        lessons = [str(item) for item in feedback.details.get("lessons", []) if item]
+        if not lessons:
+            fallback_lesson = str(feedback.error_message or "paper trade feedback")
+            lessons = [fallback_lesson]
+        experience = LearningExperience(
+            symbol=feedback.symbol,
+            action=feedback.action,
+            outcome=outcome,
+            pnl_pct=float(feedback.pnl_pct or 0.0),
+            confidence=float(feedback.details.get("confidence", 0.0) or 0.0),
+            reasoning=str(feedback.details.get("reasoning", "")),
+            lessons=lessons,
+            context=feedback.details,
+        )
+        exp_id = self.vector_store.record_experience(experience)
+        await self.event_bus.publish(Event(
+            type=EventType.EXPERIENCE_RECORDED,
+            source="qwen_decision_core",
+            data={"experience_id": exp_id, **experience.model_dump(mode="json")},
+        ))
+        return exp_id
+
+    async def record_error_observation(self, source: str, error_type: str, message: str, context: Optional[Dict[str, Any]] = None):
+        observation = ErrorObservation(
+            source=source,
+            error_type=error_type,
+            message=message,
+            context=context or {},
+        )
+        err_id = self.vector_store.record_error(observation)
+        await self.event_bus.publish(Event(
+            type=EventType.ERROR_OBSERVED,
+            source=source,
+            data={"error_id": err_id, **observation.model_dump(mode="json")},
+        ))
+        return err_id
 
     # ─── Query & Stats ───
 

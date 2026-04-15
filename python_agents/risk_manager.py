@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, Optional
 
 from config import Config
+from market_activity_tracker import get_market_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +21,29 @@ class RiskManager:
     def __init__(self, state_tracker):
         self.state = state_tracker
         self.last_loss_time: Optional[datetime] = None
+        self._last_stale_drawdown_log_at: Optional[datetime] = None
+        self._last_rejection_log_at: Dict[str, datetime] = {}
 
         # Configurable limits
         self.MAX_DAILY_TRADES = Config.RISK_MAX_DAILY_TRADES
         self.MAX_DAILY_LOSS_PCT = Config.RISK_MAX_DAILY_LOSS_PCT
+        self.DISABLE_DAILY_LOSS_GATE = Config.RISK_DISABLE_DAILY_LOSS_GATE
+        self.DISABLE_DRAWDOWN_GATE = Config.RISK_DISABLE_DRAWDOWN_GATE
         self.MAX_CONSECUTIVE_LOSSES = Config.RISK_MAX_CONSECUTIVE_LOSSES
         self.MAX_DRAWDOWN_PCT = Config.RISK_MAX_DRAWDOWN_PCT
         self.MAX_SAME_DIRECTION_POSITIONS = Config.RISK_MAX_SAME_DIRECTION
         self.COOLDOWN_AFTER_LOSS_SEC = Config.RISK_COOLDOWN_AFTER_LOSS_SEC
         self.MAX_OPEN_POSITIONS = Config.RISK_MAX_OPEN_POSITIONS
+
+    def should_log_rejection(self, symbol: str, reason: str, throttle_seconds: int = 45) -> bool:
+        """Rate-limit repeated rejection logs to reduce log storms under cooldown/lock conditions."""
+        key = f"{symbol}:{reason}"
+        now = datetime.utcnow()
+        last_logged_at = self._last_rejection_log_at.get(key)
+        if last_logged_at and (now - last_logged_at).total_seconds() < throttle_seconds:
+            return False
+        self._last_rejection_log_at[key] = now
+        return True
 
     def check_signal(self, signal: Dict[str, Any]) -> Tuple[bool, str]:
         """
@@ -47,7 +62,7 @@ class RiskManager:
             return False, f"Daily trade limit reached ({self.MAX_DAILY_TRADES})"
 
         # 2. Günlük kayıp limiti
-        if state['daily_pnl'] < self.MAX_DAILY_LOSS_PCT:
+        if not self.DISABLE_DAILY_LOSS_GATE and state['daily_pnl'] < self.MAX_DAILY_LOSS_PCT:
             return False, f"Daily loss limit reached ({state['daily_pnl']:.2f}%)"
 
         # 3. Art arda kayıp kontrolü
@@ -56,14 +71,18 @@ class RiskManager:
 
         # 4. Max drawdown kontrolü
         current_drawdown = float(state.get('current_drawdown', 0) or 0)
-        if current_drawdown >= abs(self.MAX_DRAWDOWN_PCT):
+        if not self.DISABLE_DRAWDOWN_GATE and current_drawdown >= abs(self.MAX_DRAWDOWN_PCT):
             if self._is_stale_drawdown_lock(state):
-                logger.warning(
-                    "Stale drawdown lock bypassed (dd=%.2f, daily_trades=%s, daily_pnl=%.2f)",
-                    current_drawdown,
-                    state.get('daily_trade_count', 0),
-                    float(state.get('daily_pnl', 0) or 0),
-                )
+                now = datetime.utcnow()
+                if (self._last_stale_drawdown_log_at is None or
+                        (now - self._last_stale_drawdown_log_at).total_seconds() >= 60):
+                    self._last_stale_drawdown_log_at = now
+                    logger.warning(
+                        "Stale drawdown lock bypassed (dd=%.2f, daily_trades=%s, daily_pnl=%.2f)",
+                        current_drawdown,
+                        state.get('daily_trade_count', 0),
+                        float(state.get('daily_pnl', 0) or 0),
+                    )
             else:
                 return False, f"Max drawdown reached ({current_drawdown:.2f}%)"
 
@@ -84,11 +103,17 @@ class RiskManager:
         if symbol in state.get('active_symbols', []):
             return False, f"Already have position in {symbol}"
 
-        # 8. Düşük güven filtresi (mode'a göre)
+        # 8. Düşük güven filtresi (mode + market activity'e göre)
         confidence = signal.get('confidence', 0)
         min_confidence = self._get_min_confidence(mode)
+
+        # Piyasa durgunken güven eşiğini %20 yükselt
+        tracker = get_market_tracker()
+        if not tracker.is_active:
+            min_confidence = min(min_confidence * 1.20, 0.90)
+
         if confidence < min_confidence:
-            return False, f"Confidence too low ({confidence:.2f} < {min_confidence})"
+            return False, f"Confidence too low ({confidence:.2f} < {min_confidence:.2f})"
 
         return True, "approved"
 
@@ -165,8 +190,14 @@ class RiskManager:
         atr_multiplier = target_atr / max(atr_ratio, 0.001)
         atr_multiplier = max(0.3, min(atr_multiplier, 3.0))  # Sınırla
 
+        # Market activity adjustment: durgun piyasada pozisyonu küçült
+        tracker = get_market_tracker()
+        market_multiplier = 1.0
+        if not tracker.is_active:
+            market_multiplier = 0.6  # Durgun piyasada %40 küçült
+
         # Final position size
-        position_value = balance * base_risk_pct * confidence * atr_multiplier
+        position_value = balance * base_risk_pct * confidence * atr_multiplier * market_multiplier
         max_position = Config.get_agent_config('ghost_simulator')['max_position_size']
         position_size = min(position_value, max_position)
         position_size = max(position_size, 10)  # Minimum $10
@@ -222,15 +253,21 @@ class RiskManager:
         """Dashboard/chat için risk özeti"""
         state = self.state.state
         mode = self.state.get_mode()
+        tracker = get_market_tracker()
         return {
             'mode': mode,
             'daily_trades': f"{state['daily_trade_count']}/{self.MAX_DAILY_TRADES}",
             'daily_pnl': state['daily_pnl'],
+            'daily_loss_gate_enabled': not self.DISABLE_DAILY_LOSS_GATE,
+            'drawdown_gate_enabled': not self.DISABLE_DRAWDOWN_GATE,
             'consecutive_losses': f"{state['consecutive_losses']}/{self.MAX_CONSECUTIVE_LOSSES}",
             'drawdown': f"{state['current_drawdown']:.2f}%/{abs(self.MAX_DRAWDOWN_PCT)}%",
             'open_positions': f"{len(state.get('active_symbols', []))}/{self.MAX_OPEN_POSITIONS}",
             'cooldown_active': self.last_loss_time is not None and
                                (datetime.utcnow() - self.last_loss_time).total_seconds() < self.COOLDOWN_AFTER_LOSS_SEC,
             'min_confidence': self._get_min_confidence(mode),
+            'market_mode': tracker.mode.value,
+            'market_active': tracker.is_active,
+            'active_symbols': len(tracker.get_active_symbols()),
             'mode_params': self.get_mode_params(),
         }

@@ -22,8 +22,9 @@ const fmt = (v: any, d = 2) => { const n = Number(v); return isNaN(n) ? "0" : ne
 const smartDecimals = (v: any): number => { const n = Math.abs(Number(v)); if (isNaN(n) || n === 0) return 2; if (n >= 100) return 2; if (n >= 1) return 4; if (n >= 0.01) return 6; return 8; };
 const fmtUsd = (v: any) => { const n = Number(v); return isNaN(n) ? '$0.00' : `$${fmt(v, smartDecimals(v))}`; };
 const fmtPct = (v: any) => { const n = Number(v); return `${isNaN(n) ? 0 : n >= 0 ? "+" : ""}${(isNaN(n) ? 0 : n).toFixed(2)}%`; };
-const fmtTime = (s: string) => { try { return new Date(s).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }); } catch { return "—"; } };
-const fmtDT = (s: string) => { try { const d = new Date(s); return `${d.toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric" })} ${d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`; } catch { return "—"; } };
+const QUENBOT_TZ = "Europe/Berlin";
+const fmtTime = (s: string) => { try { return new Date(s).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: QUENBOT_TZ }); } catch { return "—"; } };
+const fmtDT = (s: string) => { try { const d = new Date(s); return `${d.toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", timeZone: QUENBOT_TZ })} ${d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: QUENBOT_TZ })}`; } catch { return "—"; } };
 const safeConf = (v: any): number => { const n = Number(v); if (isNaN(n)) return 0; return n > 1 ? Math.min(n, 100) : Math.min(n * 100, 100); };
 const cls = (...c: (string | false | undefined | null)[]) => c.filter(Boolean).join(" ");
 const sn = (v: any, d = 0): number => { const n = Number(v); return isNaN(n) ? d : n; };
@@ -778,7 +779,7 @@ function App() {
 
           {learnSt?.daily_accuracy && learnSt.daily_accuracy.length > 0 && <div className="card"><div className="card-h"><h3>Günlük Öğrenme Trendi</h3></div>
             <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Tarih</th><th>Toplam</th><th>Doğru</th><th>Doğruluk</th></tr></thead><tbody>
-              {learnSt.daily_accuracy.map((d: any, i: number) => { const acc = sn(d.total) > 0 ? (sn(d.correct) / sn(d.total) * 100) : 0; return <tr key={i}><td>{d.day ? new Date(d.day).toLocaleDateString("tr-TR") : '—'}</td><td>{d.total}</td><td>{d.correct}</td><td className={acc >= 50 ? "t-g" : "t-r"}>{acc.toFixed(1)}%</td></tr>; })}
+              {learnSt.daily_accuracy.map((d: any, i: number) => { const acc = sn(d.total) > 0 ? (sn(d.correct) / sn(d.total) * 100) : 0; return <tr key={i}><td>{d.day ? new Date(d.day).toLocaleDateString("tr-TR", { timeZone: QUENBOT_TZ }) : '—'}</td><td>{d.total}</td><td>{d.correct}</td><td className={acc >= 50 ? "t-g" : "t-r"}>{acc.toFixed(1)}%</td></tr>; })}
             </tbody></table></div>
           </div>}
 
@@ -968,7 +969,7 @@ function App() {
           </div>}
 
           <div className="card"><div className="card-h"><h3>Zaman Bilgisi</h3></div>
-            <div className="info-list"><div><span className="t-m">İlk Trade:</span> {sysStats?.oldest_trade ? new Date(sysStats.oldest_trade).toLocaleString('tr-TR') : '—'}</div><div><span className="t-m">Son Trade:</span> {sysStats?.newest_trade ? new Date(sysStats.newest_trade).toLocaleString('tr-TR') : '—'}</div><div><span className="t-m">Şimdi:</span> {new Date().toLocaleString('tr-TR')}</div></div>
+            <div className="info-list"><div><span className="t-m">İlk Trade:</span> {sysStats?.oldest_trade ? new Date(sysStats.oldest_trade).toLocaleString('tr-TR', { timeZone: QUENBOT_TZ }) : '—'}</div><div><span className="t-m">Son Trade:</span> {sysStats?.newest_trade ? new Date(sysStats.newest_trade).toLocaleString('tr-TR', { timeZone: QUENBOT_TZ }) : '—'}</div><div><span className="t-m">Şimdi:</span> {new Date().toLocaleString('tr-TR', { timeZone: QUENBOT_TZ })}</div></div>
           </div>
 
           {auditRec.length > 0 && <div className="card"><div className="card-h"><h3>Denetim Kayıtları</h3></div>

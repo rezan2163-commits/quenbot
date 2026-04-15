@@ -6,6 +6,9 @@ from typing import Dict, List, Any
 
 from config import Config
 from database import Database
+from event_bus import Event, EventType, get_event_bus
+from qwen_models import CommandAction, ExecutionFeedback
+from market_activity_tracker import get_market_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +27,52 @@ def _get_llm_bridge():
 # Minimum potansiyel getiri filtresi
 MIN_POTENTIAL_RETURN = 0.005  # %0.5
 
+# ─── Spread & Latency Modelling ───
+# Gerçekçi paper trade simülasyonu için spread ve gecikme parametreleri
+SPREAD_MODEL = {
+    # symbol_prefix → (spread_bps, latency_ms)  
+    # basis points spread + simulated execution latency
+    'BTC':  (1.5, 50),    # Liquid pair: tight spread, fast fill
+    'ETH':  (2.0, 50),    
+    'SOL':  (3.0, 80),    
+    'BNB':  (2.5, 60),    
+    'XRP':  (3.5, 80),    
+    '_DEFAULT': (5.0, 100),  # Less liquid alts: wider spread, slower fill
+}
+
+def _get_spread_params(symbol: str) -> tuple:
+    """Sembol bazlı spread ve latency parametreleri döndür"""
+    symbol_upper = symbol.upper().replace('USDT', '')
+    for prefix, params in SPREAD_MODEL.items():
+        if prefix != '_DEFAULT' and symbol_upper.startswith(prefix):
+            return params
+    return SPREAD_MODEL['_DEFAULT']
+
+def _apply_slippage(price: float, side: str, spread_bps: float) -> float:
+    """
+    Gerçekçi slippage modeli.
+    Long giriş = fiyat yukarı kayar (ask'e yakın)
+    Short giriş = fiyat aşağı kayar (bid'e yakın)
+    Çıkışta tersi.
+    """
+    spread_pct = spread_bps / 10000.0
+    half_spread = spread_pct / 2.0
+    if side == 'long':
+        return price * (1 + half_spread)  # Ask side
+    else:
+        return price * (1 - half_spread)  # Bid side
+
 
 class GhostSimulatorAgent:
-    def __init__(self, db: Database, brain=None, state_tracker=None, risk_manager=None):
+    def __init__(self, db: Database, brain=None, state_tracker=None, risk_manager=None,
+                 rca_engine=None, decision_core=None):
         self.db = db
         self.brain = brain
         self.state_tracker = state_tracker
         self.risk_manager = risk_manager
+        self.rca_engine = rca_engine
+        self.decision_core = decision_core
+        self.event_bus = get_event_bus()
         self.running = False
         self.last_activity = None
         self.active_simulations: Dict[int, Dict[str, Any]] = {}
@@ -102,6 +144,7 @@ class GhostSimulatorAgent:
     async def start(self):
         self.running = True
         logger.info("Starting Ghost Simulator Agent...")
+        tracker = get_market_tracker()
 
         while self.running:
             try:
@@ -111,7 +154,12 @@ class GhostSimulatorAgent:
                 self.last_activity = datetime.utcnow()
             except Exception as e:
                 logger.error(f"Ghost simulator cycle error: {e}")
-            await asyncio.sleep(30)  # 30 saniyede bir kontrol
+
+            # Aktif simülasyon varsa daha sık kontrol, yoksa tracker'a bağlı bekle
+            if self.active_simulations:
+                await asyncio.sleep(10)  # Aktif pozisyon izleme: 10s
+            else:
+                await tracker.wait_for_activity(timeout=30)  # Pozisyon yoksa event bekle
 
     async def stop(self):
         self.running = False
@@ -138,7 +186,8 @@ class GhostSimulatorAgent:
                     approved, reason = self.risk_manager.check_signal(signal)
                     if not approved:
                         await self.db.update_signal_status(signal['id'], f'risk_rejected')
-                        logger.info(f"🛡 Risk rejected {signal['symbol']}: {reason}")
+                        if self.risk_manager.should_log_rejection(signal['symbol'], reason):
+                            logger.info(f"🛡 Risk rejected {signal['symbol']}: {reason}")
                         continue
 
                 # Min potansiyel getiri kontrolü
@@ -178,7 +227,7 @@ class GhostSimulatorAgent:
     async def _create_simulation(self, signal: Dict[str, Any]):
         try:
             config = Config.get_agent_config('ghost_simulator')
-            entry_price = float(signal['price'])
+            raw_entry_price = float(signal['price'])
             metadata = signal.get('metadata', {})
             if isinstance(metadata, str):
                 try:
@@ -190,6 +239,10 @@ class GhostSimulatorAgent:
                 'long' if signal['signal_type'].endswith('_long') or '_long_' in signal['signal_type']
                 else 'short'
             )
+
+            # ─── Spread & Latency Modelling ───
+            spread_bps, latency_ms = _get_spread_params(signal['symbol'])
+            entry_price = _apply_slippage(raw_entry_price, direction, spread_bps)
 
             # Dynamic TP/SL from RiskManager mode params
             if self.risk_manager:
@@ -231,6 +284,10 @@ class GhostSimulatorAgent:
                     'commission': config['commission_pct'] * position_size * entry_price,
                     'brain_analysis': metadata.get('brain_analysis', False),
                     'timeframe': metadata.get('timeframe', 'unknown'),
+                    'spread_bps': spread_bps,
+                    'latency_ms': latency_ms,
+                    'raw_entry_price': raw_entry_price,
+                    'slippage_pct': abs(entry_price - raw_entry_price) / max(raw_entry_price, 1e-8) * 100,
                 }
             }
 
@@ -396,14 +453,22 @@ class GhostSimulatorAgent:
             quantity = float(sim_data['quantity'])
             side = sim_data['side']
 
+            # ─── Exit slippage modelling ───
+            # Çıkışta ters yönde spread uygulanır (long çıkış = bid, short çıkış = ask)
+            spread_bps = float(sim_data.get('metadata', {}).get('spread_bps', 0) or 0)
+            if spread_bps > 0:
+                exit_side = 'short' if side == 'long' else 'long'  # Çıkış = ters taraf
+                exit_price = _apply_slippage(exit_price, exit_side, spread_bps)
+
             pnl = (exit_price - entry_price) * quantity if side == 'long' else (entry_price - exit_price) * quantity
             commission = sim_data.get('metadata', {}).get('commission', 0)
             pnl -= commission
             pnl_pct = (pnl / (entry_price * quantity)) * 100 if entry_price * quantity else 0.0
+            exit_time = datetime.utcnow()
 
             update_data = {
                 'exit_price': exit_price,
-                'exit_time': datetime.utcnow(),
+                'exit_time': exit_time,
                 'pnl': pnl,
                 'pnl_pct': pnl_pct,
                 'status': 'closed'
@@ -440,8 +505,63 @@ class GhostSimulatorAgent:
             logger.info(f"👻 {win_emoji} Closed sim {sim_id}: {reason} | "
                          f"{sim_data['symbol']} {side} | PnL: ${pnl:.2f} ({pnl_pct:.2f}%)")
 
+            loss_analysis = None
+            if not was_correct:
+                loss_analysis = await self._analyze_loss(sim_id, sim_data, reason, exit_price, pnl_pct)
+
             # Brain'e feedback gönder (öğrenme döngüsü)
-            await self._send_feedback_to_brain(sim_data, was_correct, pnl_pct)
+            await self._send_feedback_to_brain(
+                sim_data,
+                was_correct,
+                pnl_pct,
+                reason=reason,
+                exit_price=exit_price,
+                loss_analysis=loss_analysis,
+                simulation_id=sim_id,
+            )
+
+            signal_id = sim_data.get('signal_id')
+            outcome_details = {
+                'outcome_recorded_at': exit_time.isoformat() + 'Z',
+                'close_reason': reason,
+                'exit_price': float(exit_price),
+                'signal_id': signal_id,
+                'simulation_id': sim_id,
+                'signal_type': sim_data.get('metadata', {}).get('signal_type', 'unknown'),
+                'learning_feedback_ready': True,
+                'loss_analysis': loss_analysis,
+            }
+            if signal_id:
+                await self.db.record_signal_outcome(
+                    int(signal_id),
+                    target_hit=(reason == 'take_profit'),
+                    was_correct=was_correct,
+                    pnl_pct=pnl_pct,
+                    outcome_details=outcome_details,
+                )
+
+            await self.event_bus.publish(Event(
+                type=EventType.SIM_CLOSED,
+                source='ghost_simulator',
+                data={
+                    'id': sim_id,
+                    'signal_id': signal_id,
+                    'symbol': symbol,
+                    'side': side,
+                    'market_type': sim_data.get('market_type', 'spot'),
+                    'entry_price': float(entry_price),
+                    'exit_price': float(exit_price),
+                    'pnl': float(pnl),
+                    'pnl_pct': float(pnl_pct),
+                    'reason': reason,
+                    'was_correct': bool(was_correct),
+                    'target_hit': bool(reason == 'take_profit'),
+                    'closed_at': exit_time.isoformat() + 'Z',
+                    'signal_type': sim_data.get('metadata', {}).get('signal_type', 'unknown'),
+                    'metadata': sim_data.get('metadata', {}),
+                    'loss_analysis': loss_analysis,
+                },
+            ))
 
             # LLM post-trade analysis (background priority)
             bridge = _get_llm_bridge()
@@ -469,10 +589,120 @@ class GhostSimulatorAgent:
         except Exception as e:
             logger.error(f"Error closing simulation {sim_id}: {e}")
 
-    async def _send_feedback_to_brain(self, sim_data: Dict, was_correct: bool, pnl_pct: float):
+    async def _analyze_loss(self, sim_id: int, sim_data: Dict[str, Any], reason: str,
+                            exit_price: float, pnl_pct: float) -> Dict[str, Any] | None:
+        if not self.rca_engine:
+            return None
+
+        try:
+            simulation_payload = {
+                'id': sim_id,
+                'symbol': sim_data.get('symbol'),
+                'side': sim_data.get('side'),
+                'entry_price': sim_data.get('entry_price'),
+                'exit_price': exit_price,
+                'entry_time': sim_data.get('entry_time'),
+                'exit_time': datetime.utcnow(),
+                'pnl_pct': pnl_pct,
+                'metadata': sim_data.get('metadata', {}),
+            }
+            analysis = await self.rca_engine.analyze_failure(simulation_payload)
+            if not analysis:
+                return None
+
+            await self.db.insert_rca_result({
+                'simulation_id': sim_id,
+                'failure_type': analysis.get('failure_type', 'UNKNOWN'),
+                'confidence': analysis.get('confidence', 0),
+                'explanation': analysis.get('explanation'),
+                'recommendations': analysis.get('recommendations', []),
+                'context': {
+                    **(analysis.get('context', {}) or {}),
+                    'close_reason': reason,
+                    'entry_time': sim_data.get('entry_time'),
+                    'exit_time': simulation_payload['exit_time'],
+                },
+            })
+
+            signal_type = sim_data.get('metadata', {}).get('signal_type', 'unknown')
+            await self.db.insert_failure_analysis({
+                'timestamp': datetime.utcnow(),
+                'signal_type': signal_type,
+                'failure_count': 1,
+                'avg_loss_pct': abs(pnl_pct),
+                'recommendation': '; '.join(analysis.get('recommendations', [])[:2]),
+                'metadata': {
+                    'simulation_id': sim_id,
+                    'symbol': sim_data.get('symbol'),
+                    'failure_type': analysis.get('failure_type', 'UNKNOWN'),
+                    'close_reason': reason,
+                    'rca_confidence': analysis.get('confidence', 0),
+                    'rca_explanation': analysis.get('explanation', ''),
+                },
+            })
+
+            await self._write_immediate_correction_note(sim_data, sim_id, analysis)
+            return analysis
+        except Exception as e:
+            logger.debug(f"Immediate loss RCA skipped: {e}")
+            return None
+
+    async def _write_immediate_correction_note(self, sim_data: Dict[str, Any], sim_id: int,
+                                               rca_result: Dict[str, Any]) -> None:
+        failure_type = rca_result.get('failure_type', 'UNKNOWN')
+        confidence = float(rca_result.get('confidence', 0) or 0)
+        if confidence < 0.4:
+            return
+
+        signal_type = sim_data.get('metadata', {}).get('signal_type', 'unknown')
+        corrections = []
+        if failure_type == 'FALSE_BREAKOUT':
+            corrections.append(('similarity_threshold', 0.05, 'FALSE_BREAKOUT: increase similarity threshold to be more selective'))
+        elif failure_type == 'STOP_HUNT':
+            corrections.append(('stop_loss_pct', 0.005, 'STOP_HUNT: widen stop loss to avoid wick traps'))
+        elif failure_type == 'OVEREXTENDED':
+            corrections.append(('take_profit_pct', -0.005, 'OVEREXTENDED: tighten take profit for earlier exit'))
+        elif failure_type == 'LOW_VOLUME_NOISE':
+            corrections.append(('price_movement_threshold', 0.005, 'LOW_VOLUME_NOISE: raise movement threshold to filter noise'))
+        elif failure_type in ('BAD_TIMING', 'TREND_REVERSAL'):
+            corrections.append(('min_confidence', 0.05, f'{failure_type}: raise min confidence for {signal_type}'))
+
+        for adjustment_key, adjustment_value, reason in corrections:
+            await self.db.insert_correction_note({
+                'signal_type': signal_type,
+                'failure_type': failure_type,
+                'adjustment_key': adjustment_key,
+                'adjustment_value': adjustment_value,
+                'reason': reason,
+                'simulation_id': sim_id,
+            })
+
+    async def _send_feedback_to_brain(self, sim_data: Dict, was_correct: bool, pnl_pct: float,
+                                      reason: str, exit_price: float,
+                                      loss_analysis: Dict[str, Any] | None = None,
+                                      simulation_id: int | None = None):
         """Sonucu Brain'e ve DB'ye bildir - öğrenme döngüsü"""
         try:
-            signal_type = sim_data.get('metadata', {}).get('signal_type', 'unknown')
+            metadata = sim_data.get('metadata', {}) or {}
+            signal_type = metadata.get('signal_type', 'unknown')
+            recommendations = list((loss_analysis or {}).get('recommendations', [])[:3])
+            failure_type = (loss_analysis or {}).get('failure_type')
+            explanation = (loss_analysis or {}).get('explanation', '')
+            lesson_summary = ' | '.join(filter(None, [failure_type, explanation])) or reason
+            learning_context = {
+                'symbol': sim_data.get('symbol'),
+                'side': sim_data.get('side'),
+                'market_type': sim_data.get('market_type'),
+                'timeframe': metadata.get('timeframe'),
+                'confidence': metadata.get('signal_confidence'),
+                'entry_price': sim_data.get('entry_price'),
+                'exit_price': exit_price,
+                'close_reason': reason,
+                'simulation_id': simulation_id,
+                'failure_type': failure_type,
+                'loss_explanation': explanation,
+                'recommendations': recommendations,
+            }
 
             # Brain modülüne bildir
             if self.brain:
@@ -483,30 +713,49 @@ class GhostSimulatorAgent:
                 signal_type=signal_type,
                 was_correct=was_correct,
                 pnl_pct=pnl_pct,
-                context={
-                    'symbol': sim_data.get('symbol'),
-                    'side': sim_data.get('side'),
-                    'market_type': sim_data.get('market_type'),
-                    'timeframe': sim_data.get('metadata', {}).get('timeframe'),
-                    'confidence': sim_data.get('metadata', {}).get('signal_confidence'),
-                }
+                context=learning_context
             )
+
+            if self.decision_core:
+                side = str(sim_data.get('side', 'long')).lower()
+                action = CommandAction.LONG if side == 'long' else CommandAction.SHORT
+                lessons = recommendations or [lesson_summary]
+                await self.decision_core.record_execution_feedback(ExecutionFeedback(
+                    symbol=str(sim_data.get('symbol', '?')),
+                    action=action,
+                    status='paper_closed',
+                    pnl_pct=float(pnl_pct or 0.0),
+                    error_message=None if was_correct else lesson_summary,
+                    details={
+                        **learning_context,
+                        'reasoning': lesson_summary,
+                        'confidence': float(metadata.get('signal_confidence', 0.0) or 0.0),
+                        'lessons': lessons,
+                    },
+                ))
         except Exception as e:
             logger.debug(f"Feedback error: {e}")
 
     async def _get_current_prices(self) -> Dict[str, float]:
+        """In-memory price cache from MarketActivityTracker — zero DB queries."""
+        tracker = get_market_tracker()
+        tracker_prices = tracker.get_all_prices()
+
+        # Aktif simülasyonlardaki semboller için fiyat kontrol
         prices = {}
-        try:
-            # Açık simülasyonlardaki semboller + watchlist
-            symbols = set()
-            for sim in self.active_simulations.values():
-                symbols.add(sim['symbol'])
-            for symbol in symbols:
-                recent_trades = await self.db.get_recent_trades(symbol, limit=1)
-                if recent_trades:
-                    prices[symbol] = float(recent_trades[0]['price'])
-        except Exception as e:
-            logger.error(f"Error getting current prices: {e}")
+        for sim in self.active_simulations.values():
+            symbol = sim['symbol']
+            cached = tracker_prices.get(symbol, 0.0)
+            if cached > 0:
+                prices[symbol] = cached
+            else:
+                # Tracker'da yoksa DB fallback (nadir durum)
+                try:
+                    recent = await self.db.get_recent_trades(symbol, limit=1)
+                    if recent:
+                        prices[symbol] = float(recent[0]['price'])
+                except Exception:
+                    pass
         return prices
 
     async def health_check(self) -> Dict[str, Any]:

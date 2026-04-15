@@ -23,6 +23,7 @@ Karar mekanizması:
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
@@ -32,6 +33,8 @@ import numpy as np
 from config import Config
 from database import Database
 from event_bus import get_event_bus, Event, EventType
+from vector_memory import get_vector_store
+from market_activity_tracker import get_market_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +52,14 @@ def _get_llm_bridge():
 
 
 # ─── Configuration ───
-SIMILARITY_THRESHOLD = 0.50        # Minimum similarity to trigger a match
+SIMILARITY_THRESHOLD = 0.62        # Minimum similarity to trigger a match
 SCAN_INTERVAL_SECONDS = 15         # How often to scan each symbol
 VECTOR_POINTS = 60                 # N-point price vector (last N trade prices)
 MIN_HISTORICAL_SIGNATURES = 1      # Minimum signatures needed for matching
 MAX_MATCHES_PER_SCAN = 5           # Top-K matches to consider
-TIMEFRAMES_TO_SCAN = ['5m', '15m', '1h']
-COOLDOWN_SECONDS = 60              # Per-symbol cooldown after a match is found
+TIMEFRAMES_TO_SCAN = ['15m', '1h']
+COOLDOWN_SECONDS = 900             # Per-symbol cooldown after a match is found
+SIGNIFICANT_MOVE_THRESHOLD = 0.02  # Only react to >= 2% moves
 
 
 class PatternMatcherAgent:
@@ -73,6 +77,7 @@ class PatternMatcherAgent:
         self.running = False
         self.last_activity: Optional[datetime] = None
         self.event_bus = get_event_bus()
+        self.vector_store = get_vector_store()
 
         # Stats
         self.scan_count = 0
@@ -87,32 +92,49 @@ class PatternMatcherAgent:
         # Signature cache (refresh periodically)
         self._signature_cache: Dict[str, List[Dict]] = {}
         self._cache_expiry: float = 0
+        self._signature_cache_limit = max(500, int(os.getenv("QUENBOT_SIGNATURE_CACHE_LIMIT", str(Config.SIGNATURE_CACHE_LIMIT))))
+        self._vector_match_lookback_hours = max(24, int(os.getenv("QUENBOT_VECTOR_MATCH_LOOKBACK_HOURS", str(Config.VECTOR_MATCH_LOOKBACK_HOURS))))
+        self._signature_lookback_hours = max(24, int(os.getenv("QUENBOT_HISTORICAL_LOOKBACK_HOURS", str(Config.HISTORICAL_LOOKBACK_HOURS))))
 
     async def initialize(self):
         """Agent başlangıç — signature cache'i yükle"""
-        await self._refresh_signature_cache()
+        warm_limit = min(self._signature_cache_limit, 500)
+        await self._refresh_signature_cache(limit=warm_limit, cache_ttl_seconds=30)
         total = sum(len(v) for v in self._signature_cache.values())
         logger.info(f"🔍 PatternMatcher initialized — "
                     f"{total} historical signatures cached "
                     f"(threshold={SIMILARITY_THRESHOLD}, vector_points={VECTOR_POINTS})")
 
     async def start(self):
-        """Ana döngü: periyodik olarak tüm watchlist sembollerini tara"""
+        """Ana döngü: piyasa aktifken threshold-gated tarama"""
         self.running = True
         logger.info("🔍 PatternMatcher agent started")
+        tracker = get_market_tracker()
 
         while self.running:
             try:
+                # Piyasa aktif olana kadar bekle (max 30s)
+                is_active = await tracker.wait_for_activity(timeout=30)
+                if not is_active:
+                    # Low-power: sadece cache yenile
+                    if time.time() > self._cache_expiry:
+                        await self._refresh_signature_cache()
+                    continue
+
                 cycle_start = time.time()
 
                 # Signature cache'i periyodik yenile (5 dakikada bir)
                 if time.time() > self._cache_expiry:
                     await self._refresh_signature_cache()
 
-                # Tüm watchlist sembollerini tara (user watchlist)
-                symbols = await self.db.get_user_watchlist()
-                symbols = [str(w.get('symbol', '')).upper() for w in (symbols or []) if w.get('symbol')]
-                for symbol in symbols:
+                # Sadece aktif sembolleri tara (tracker'dan)
+                active_symbols = tracker.get_active_symbols()
+                if not active_symbols:
+                    # Aktif sembol yoksa tüm watchlist'i tara (ama daha yavaş)
+                    symbols = await self.db.get_user_watchlist()
+                    active_symbols = {str(w.get('symbol', '')).upper() for w in (symbols or []) if w.get('symbol')}
+
+                for symbol in active_symbols:
                     if not self.running:
                         break
 
@@ -174,13 +196,51 @@ class PatternMatcherAgent:
                 vector_result = await self._build_current_vector(symbol, tf_key)
                 if not vector_result:
                     continue
-                current_vector, current_price = vector_result
+                current_vector, current_price, recent_prices, recent_volumes = vector_result
                 if len(current_vector) < 10:
                     continue
 
+                recent_change = float(current_vector[-1]) if current_vector else 0.0
+                if abs(recent_change) < SIGNIFICANT_MOVE_THRESHOLD:
+                    continue
+
+                snapshot = self.vector_store.build_feature_snapshot(
+                    symbol=symbol,
+                    prices=recent_prices,
+                    volumes=recent_volumes,
+                    timeframe=tf_key,
+                    metadata={'buy_ratio': 0.5},
+                )
                 # 3. Compare against all historical signatures
+                vector_matches = self.vector_store.query_recent_pattern_matches(
+                    symbol,
+                    snapshot.feature_vector,
+                    timeframe=tf_key,
+                    max_age_hours=self._vector_match_lookback_hours,
+                    min_similarity=SIMILARITY_THRESHOLD,
+                    limit=MAX_MATCHES_PER_SCAN,
+                )
                 matches = self._find_euclidean_matches(current_vector, signatures)
                 self.total_comparisons += len(signatures)
+
+                if vector_matches:
+                    vector_match_payloads = [
+                        {
+                            'signature_id': item.reference_id,
+                            'symbol': symbol,
+                            'timeframe': item.timeframe,
+                            'direction': 'up' if item.direction == 'long' else 'down' if item.direction == 'short' else 'neutral',
+                            'change_pct': float(item.magnitude),
+                            'similarity': float(item.similarity),
+                            'euclidean_distance': float(max(0.0, 1.0 - item.similarity)),
+                            'vector_length': len(current_vector),
+                            'volume_profile': item.metadata,
+                            'pre_move_indicators': item.metadata,
+                            'source': 'chromadb',
+                        }
+                        for item in vector_matches
+                    ]
+                    matches = sorted(vector_match_payloads + matches, key=lambda row: row['similarity'], reverse=True)[:MAX_MATCHES_PER_SCAN]
 
                 if not matches:
                     continue
@@ -194,12 +254,12 @@ class PatternMatcherAgent:
 
                 if similarity >= SIMILARITY_THRESHOLD:
                     await self._handle_match(symbol, tf_key, current_vector,
-                                             matches, best_match, current_price)
+                                             matches, best_match, current_price, recent_change)
 
             except Exception as e:
                 logger.debug(f"PatternMatcher scan error {symbol}/{tf_key}: {e}")
 
-    async def _build_current_vector(self, symbol: str, tf_key: str) -> Optional[Tuple[List[float], float]]:
+    async def _build_current_vector(self, symbol: str, tf_key: str) -> Optional[Tuple[List[float], float, List[float], List[float]]]:
         """
         Son N trade'den normalize edilmiş fiyat vektörü oluştur.
         Scout'un _build_movement_vector() ile aynı formatta:
@@ -214,7 +274,9 @@ class PatternMatcherAgent:
             trades = list(reversed(trades))
 
             # Take last N prices
-            prices = [float(t['price']) for t in trades[-VECTOR_POINTS:]]
+            recent_trades = trades[-VECTOR_POINTS:]
+            prices = [float(t['price']) for t in recent_trades]
+            volumes = [float(t.get('quantity', 0) or 0) for t in recent_trades]
             if len(prices) < 10:
                 return None
 
@@ -224,7 +286,7 @@ class PatternMatcherAgent:
                 return None
 
             vector = [(p - base) / base for p in prices]
-            return vector, float(prices[-1])
+            return vector, float(prices[-1]), prices, volumes
 
         except Exception as e:
             logger.debug(f"Build vector error {symbol}: {e}")
@@ -287,7 +349,8 @@ class PatternMatcherAgent:
     async def _handle_match(self, symbol: str, tf_key: str,
                              current_vector: List[float],
                              matches: List[Dict], best: Dict,
-                             current_price: float):
+                             current_price: float,
+                             recent_change: float):
         """
         Eşik üstü eşleşme bulundu — Brain'e bildir ve DB'ye kaydet.
 
@@ -328,6 +391,7 @@ class PatternMatcherAgent:
             'current_vector': current_vector[-20:],  # Son 20 nokta kaydet
             'confidence': confidence,
             'current_price': current_price,
+            'recent_change_pct': recent_change,
         }
 
         try:
@@ -354,27 +418,39 @@ class PatternMatcherAgent:
         self._cooldowns[symbol] = time.time() + COOLDOWN_SECONDS
 
         # Publish PATTERN_MATCH event → Brain
+        event_payload = {
+            'event_type': 'EVENT_PATTERN_DETECTED',
+            'match_id': match_id,
+            'symbol': symbol,
+            'timeframe': tf_key,
+            'similarity': best['similarity'],
+            'euclidean_distance': best['euclidean_distance'],
+            'predicted_direction': prediction['direction'],
+            'predicted_magnitude': prediction['magnitude'],
+            'current_price': current_price,
+            'price_change_pct': recent_change,
+            'confidence': confidence,
+            'matched_signature_id': best['signature_id'],
+            'matched_change_pct': best['change_pct'],
+            'matched_direction': best['direction'],
+            'match_count': len(matches),
+            'top_matches': matches[:3],
+            'indicators': best.get('pre_move_indicators', {}),
+            'volume_profile': best.get('volume_profile', {}),
+            'source': best.get('source', 'historical_signatures'),
+            'lookback_hours': 24,
+            'similarity_threshold': SIMILARITY_THRESHOLD,
+        }
+
+        await self.event_bus.publish(Event(
+            type=EventType.PATTERN_DETECTED,
+            source="pattern_matcher",
+            data=event_payload,
+        ))
         await self.event_bus.publish(Event(
             type=EventType.PATTERN_MATCH,
             source="pattern_matcher",
-            data={
-                'match_id': match_id,
-                'symbol': symbol,
-                'timeframe': tf_key,
-                'similarity': best['similarity'],
-                'euclidean_distance': best['euclidean_distance'],
-                'predicted_direction': prediction['direction'],
-                'predicted_magnitude': prediction['magnitude'],
-                'current_price': current_price,
-                'confidence': confidence,
-                'matched_signature_id': best['signature_id'],
-                'matched_change_pct': best['change_pct'],
-                'matched_direction': best['direction'],
-                'match_count': len(matches),
-                'top_matches': matches[:3],  # Top 3 detayı
-                'indicators': best.get('pre_move_indicators', {}),
-                'volume_profile': best.get('volume_profile', {}),
-            },
+            data=event_payload,
         ))
 
     def _compute_weighted_prediction(self, matches: List[Dict]) -> Dict[str, Any]:
@@ -418,10 +494,13 @@ class PatternMatcherAgent:
 
     # ─── Cache Management ───
 
-    async def _refresh_signature_cache(self):
+    async def _refresh_signature_cache(self, limit: int | None = None, cache_ttl_seconds: int = 300):
         """Historical signatures cache'ini yenile (5 dakikada bir)"""
         try:
-            all_sigs = await self.db.get_historical_signatures(limit=1000)
+            all_sigs = await self.db.get_historical_signatures(
+                limit=limit or self._signature_cache_limit,
+                lookback_hours=self._signature_lookback_hours,
+            )
             cache: Dict[str, List[Dict]] = {}
 
             for sig in all_sigs:
@@ -439,7 +518,7 @@ class PatternMatcherAgent:
                 cache[key].append(sig)
 
             self._signature_cache = cache
-            self._cache_expiry = time.time() + 300  # 5 minutes
+            self._cache_expiry = time.time() + max(30, cache_ttl_seconds)
             total = sum(len(v) for v in cache.values())
             logger.debug(f"🔍 Signature cache refreshed: {total} signatures, "
                         f"{len(cache)} symbol/timeframe groups")
@@ -482,7 +561,7 @@ class PatternMatcherAgent:
             if not vector_result:
                 results[tf_key] = {'status': 'insufficient_data'}
                 continue
-            current_vector, _ = vector_result
+            current_vector, _, _, _ = vector_result
 
             signatures = self._get_cached_signatures(symbol, tf_key)
             if not signatures:

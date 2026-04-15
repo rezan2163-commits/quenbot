@@ -1,6 +1,9 @@
 import asyncio
+from asyncio import QueueEmpty
 import json
 import logging
+import os
+import contextlib
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 
@@ -12,6 +15,9 @@ from config import Config
 from database import Database
 from indicators import compute_all_indicators
 from similarity_engine import cosine_sim
+from vector_memory import get_vector_store
+from websocket_ingestion import WebSocketClientBridge
+from event_bus import Event, EventType, get_event_bus
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +55,22 @@ class ScoutAgent:
         self.last_rest_fetch: Dict[str, datetime] = {}
         self._active_watchlist: List[str] = []
         self.trade_counter = 0
+        self.vector_store = get_vector_store()
+        self._ws_client_enabled = False
+        self._ws_client_bridges: List[WebSocketClientBridge] = []
+        self.event_bus = get_event_bus()
+        self._orderbook_state: Dict[str, Dict[str, float]] = {}
+        self._bybit_ws_attempts: Dict[str, int] = {'spot': 0, 'futures': 0}
+        self._retry_counts: Dict[str, int] = {}
+        self._exchange_last_trade_at: Dict[str, datetime] = {}
+        self._last_bybit_rest_fetch_at: Dict[str, datetime] = {}
+        self._bybit_stale_after_seconds = max(4, int(os.getenv("QUENBOT_BYBIT_STALE_AFTER_SECONDS", "8")))
+        self._bybit_fast_poll_seconds = max(2, int(os.getenv("QUENBOT_BYBIT_FAST_POLL_SECONDS", "6")))
+        self._bybit_rest_symbol_cooldown_seconds = max(2, int(os.getenv("QUENBOT_BYBIT_REST_SYMBOL_COOLDOWN_SECONDS", "4")))
+        self.trade_ingest_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=max(5000, Config.SCOUT_TRADE_QUEUE_SIZE))
+        self._trade_ingest_workers: List[asyncio.Task] = []
+        self._trade_queue_drops = 0
+        self._last_trade_timeout_log_at: Optional[datetime] = None
 
     async def initialize(self):
         """Initialize the scout agent."""
@@ -58,6 +80,97 @@ class ScoutAgent:
         for symbol in self._active_watchlist:
             self.price_cache[symbol] = 0.0
             self.last_rest_fetch[symbol] = datetime.utcnow()
+
+        self._ws_client_enabled = str(os.getenv('QUENBOT_USE_WS_CLIENT_BRIDGE', '0')).lower() in {'1', 'true', 'yes', 'on'}
+        self._ensure_trade_ingest_workers()
+        if self._ws_client_enabled and self._active_watchlist:
+            loop = asyncio.get_running_loop()
+            streams = "/".join([f"{symbol.lower()}@trade" for symbol in self._active_watchlist])
+            url = f"wss://stream.binance.com:443/stream?streams={streams}"
+            bridge = WebSocketClientBridge(
+                url,
+                loop=loop,
+                name="binance-spot-bridge",
+                parser=lambda message: {"raw": message, "market_type": "spot"},
+            )
+            self._ws_client_bridges = [bridge]
+            for item in self._ws_client_bridges:
+                item.start()
+            logger.info("✓ websocket-client bridge enabled for Scout (%s symbols)", len(self._active_watchlist))
+
+    def _ensure_trade_ingest_workers(self):
+        if self._trade_ingest_workers:
+            return
+        worker_count = max(2, Config.SCOUT_TRADE_INGEST_WORKERS)
+        for worker_index in range(worker_count):
+            self._trade_ingest_workers.append(
+                asyncio.create_task(self._trade_ingest_worker(worker_index), name=f"scout-trade-worker-{worker_index}")
+            )
+
+    async def _trade_ingest_worker(self, worker_index: int):
+        while True:
+            try:
+                trade = await self.trade_ingest_queue.get()
+                batch = [trade]
+                while len(batch) < max(1, Config.SCOUT_TRADE_BATCH_SIZE):
+                    try:
+                        batch.append(self.trade_ingest_queue.get_nowait())
+                    except QueueEmpty:
+                        break
+
+                for item in batch:
+                    await self._persist_trade(item)
+
+                for _ in batch:
+                    self.trade_ingest_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Scout trade ingest worker {worker_index} error: {e}")
+
+    def _queue_trade(self, trade_data: Dict[str, Any]):
+        try:
+            self.trade_ingest_queue.put_nowait(trade_data)
+        except asyncio.QueueFull:
+            self._trade_queue_drops += 1
+            try:
+                _ = self.trade_ingest_queue.get_nowait()
+                self.trade_ingest_queue.task_done()
+            except QueueEmpty:
+                pass
+            try:
+                self.trade_ingest_queue.put_nowait(trade_data)
+            except asyncio.QueueFull:
+                logger.debug("Scout trade queue full after drop; skipping trade")
+
+    async def _persist_trade(self, trade_data: Dict[str, Any]):
+        retry_count = int(trade_data.get('_retry_count', 0) or 0)
+        try:
+            inserted_id = await self.db.insert_trade(trade_data)
+        except asyncio.TimeoutError:
+            if retry_count < 2:
+                retry_trade = dict(trade_data)
+                retry_trade['_retry_count'] = retry_count + 1
+                self._queue_trade(retry_trade)
+
+            now = datetime.utcnow()
+            if (self._last_trade_timeout_log_at is None or
+                    (now - self._last_trade_timeout_log_at).total_seconds() >= 30):
+                self._last_trade_timeout_log_at = now
+                logger.warning(
+                    "Scout trade insert timeout; queue_depth=%s drops=%s retry=%s",
+                    self.trade_ingest_queue.qsize(),
+                    self._trade_queue_drops,
+                    retry_count,
+                )
+            return
+        except Exception as e:
+            logger.debug(f"Scout trade persist skipped: {e}")
+            return
+
+        if inserted_id:
+            self.trade_counter += 1
+            await self._publish_trade_update(trade_data)
 
     async def _refresh_watchlist(self):
         """Kullanıcı watchlist'ini DB'den yükle - sadece user_watchlist tablosu kullanılır"""
@@ -78,6 +191,35 @@ class ScoutAgent:
     def get_watchlist(self) -> List[str]:
         return self._active_watchlist if self._active_watchlist else []
 
+    async def _publish_trade_update(self, trade_data: Dict[str, Any]):
+        try:
+            await self.event_bus.publish(Event(
+                type=EventType.SCOUT_PRICE_UPDATE,
+                source="scout",
+                data={
+                    "exchange": trade_data.get("exchange", "mixed"),
+                    "market_type": trade_data.get("market_type", "spot"),
+                    "symbol": trade_data.get("symbol", ""),
+                    "price": float(trade_data.get("price", 0) or 0),
+                    "quantity": float(trade_data.get("quantity", 0) or 0),
+                    "side": trade_data.get("side", "buy"),
+                    "timestamp": trade_data.get("timestamp").isoformat() if hasattr(trade_data.get("timestamp"), "isoformat") else trade_data.get("timestamp"),
+                    "trade_id": trade_data.get("trade_id"),
+                },
+            ))
+        except Exception as e:
+            logger.debug(f"Scout trade publish skipped: {e}")
+
+    async def _publish_orderbook_update(self, update: Dict[str, Any]):
+        try:
+            await self.event_bus.publish(Event(
+                type=EventType.ORDER_BOOK_UPDATE,
+                source="scout",
+                data=update,
+            ))
+        except Exception as e:
+            logger.debug(f"Scout order book publish skipped: {e}")
+
     async def start(self):
         """Start the scout agent."""
         self.running = True
@@ -89,9 +231,13 @@ class ScoutAgent:
             self._monitor_bybit_market('spot'),
             self._monitor_bybit_market('futures'),
             self._rest_fallback_fetcher(),
+            self._bybit_stale_recovery_loop(),
             self._price_movement_detector(),
             self._watchlist_refresher(),
         ]
+
+        if self._ws_client_enabled:
+            tasks.append(self._consume_ws_client_bridge())
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for i, result in enumerate(results):
@@ -116,6 +262,13 @@ class ScoutAgent:
                 logger.error(f"Error closing connection {exchange}: {e}")
 
         self.connections.clear()
+        for bridge in self._ws_client_bridges:
+            bridge.stop()
+        for worker in self._trade_ingest_workers:
+            worker.cancel()
+        if self._trade_ingest_workers:
+            await asyncio.gather(*self._trade_ingest_workers, return_exceptions=True)
+        self._trade_ingest_workers.clear()
 
     async def _monitor_binance_market(self, market_type: str):
         """Monitor the Binance trade stream for a specific market type using 2026 API format."""
@@ -130,12 +283,23 @@ class ScoutAgent:
         while self.running:
             try:
                 # Build streams for all watchlist symbols: btcusdt@trade, ethusdt@trade, etc.
-                streams = "/".join([f"{symbol.lower()}@trade" for symbol in self.get_watchlist()])
+                streams = "/".join(
+                    [f"{symbol.lower()}@trade" for symbol in self.get_watchlist()] +
+                    [f"{symbol.lower()}@bookTicker" for symbol in self.get_watchlist()]
+                )
                 uri = f"{ws_base}/{streams}"
 
-                async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as websocket:
+                async with websockets.connect(
+                    uri,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=4,
+                    max_queue=max(1024, Config.BINANCE_WS_MAX_QUEUE),
+                    compression=None,
+                ) as websocket:
                     self.connections[f'binance_{market_type}'] = websocket
-                    self._ws_retry_count = 0  # Reset on successful connect
+                    retry_key = f'binance_{market_type}'
+                    self._retry_counts[retry_key] = 0
                     logger.info(f"✓ Connected to Binance {market_type.upper()} WebSocket")
 
                     async for message in websocket:
@@ -147,9 +311,10 @@ class ScoutAgent:
             except (websockets.exceptions.ConnectionClosed,
                     websockets.exceptions.InvalidStatusCode,
                     ConnectionRefusedError, OSError) as e:
-                self._ws_retry_count = getattr(self, '_ws_retry_count', 0) + 1
-                backoff = min(Config.get_agent_config('scout')['reconnect_delay'] * (2 ** min(self._ws_retry_count - 1, 5)), 120)
-                logger.warning(f"✗ Binance {market_type} WS disconnected (#{self._ws_retry_count}): {e} — reconnecting in {backoff}s")
+                retry_key = f'binance_{market_type}'
+                self._retry_counts[retry_key] = self._retry_counts.get(retry_key, 0) + 1
+                backoff = min(Config.get_agent_config('scout')['reconnect_delay'] * (2 ** min(self._retry_counts[retry_key] - 1, 4)), 45)
+                logger.warning(f"✗ Binance {market_type} WS disconnected (#{self._retry_counts[retry_key]}): {e} — reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
             except Exception as e:
                 logger.error(f"✗ Binance {market_type} WebSocket error: {e}")
@@ -157,16 +322,22 @@ class ScoutAgent:
 
     async def _monitor_bybit_market(self, market_type: str):
         """Monitor the Bybit trade stream using V5 API format."""
-        if market_type == 'spot':
-            ws_url = Config.BYBIT_SPOT_WS_URL
-        else:
-            ws_url = Config.BYBIT_FUTURES_WS_URL
-            
         while self.running:
             try:
-                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as websocket:
+                candidates = Config.get_bybit_ws_candidates(market_type)
+                ws_url = candidates[self._bybit_ws_attempts.get(market_type, 0) % max(len(candidates), 1)]
+                async with websockets.connect(
+                    ws_url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=4,
+                    max_queue=max(1024, Config.BYBIT_WS_MAX_QUEUE),
+                    compression=None,
+                ) as websocket:
                     self.connections[f'bybit_{market_type}'] = websocket
-                    self._ws_retry_count = 0  # Reset on successful connect
+                    retry_key = f'bybit_{market_type}'
+                    self._retry_counts[retry_key] = 0
+                    self._bybit_ws_attempts[market_type] = 0
                     logger.info(f"✓ Connected to Bybit {market_type.upper()} WebSocket: {ws_url}")
 
                     # Bybit V5 API: subscribe to publicTrade channel for each symbol
@@ -186,11 +357,14 @@ class ScoutAgent:
             except (websockets.exceptions.ConnectionClosed,
                     websockets.exceptions.InvalidStatusCode,
                     ConnectionRefusedError, OSError) as e:
-                self._ws_retry_count = getattr(self, '_ws_retry_count', 0) + 1
-                backoff = min(Config.get_agent_config('scout')['reconnect_delay'] * (2 ** min(self._ws_retry_count - 1, 5)), 120)
-                logger.warning(f"✗ Bybit {market_type} WS disconnected (#{self._ws_retry_count}): {e} — reconnecting in {backoff}s")
+                retry_key = f'bybit_{market_type}'
+                self._retry_counts[retry_key] = self._retry_counts.get(retry_key, 0) + 1
+                self._bybit_ws_attempts[market_type] = self._bybit_ws_attempts.get(market_type, 0) + 1
+                backoff = min(Config.get_agent_config('scout')['reconnect_delay'] * (2 ** min(self._retry_counts[retry_key] - 1, 3)), 20)
+                logger.warning(f"✗ Bybit {market_type} WS disconnected (#{self._retry_counts[retry_key]}): {e} — reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
             except Exception as e:
+                self._bybit_ws_attempts[market_type] = self._bybit_ws_attempts.get(market_type, 0) + 1
                 logger.error(f"✗ Bybit {market_type} WebSocket error: {e}")
                 await asyncio.sleep(Config.get_agent_config('scout')['reconnect_delay'])
 
@@ -204,14 +378,16 @@ class ScoutAgent:
             try:
                 await asyncio.sleep(fetch_interval)
                 
-                # Fetch from Binance only (WebSocket handles Bybit; REST fallback for emergency)
+                # Slow safety net for all exchanges. Fast Bybit recovery runs in a dedicated loop.
                 active_symbols = self.get_watchlist()
                 tasks = []
                 for symbol in active_symbols:
                     tasks.append(self._fetch_binance_rest('spot', symbol))
                     tasks.append(self._fetch_binance_rest('futures', symbol))
-                    tasks.append(self._fetch_bybit_rest('spot', symbol))
-                    tasks.append(self._fetch_bybit_rest('futures', symbol))
+                    if self._exchange_is_stale('bybit', 'spot'):
+                        tasks.append(self._fetch_bybit_rest('spot', symbol))
+                    if self._exchange_is_stale('bybit', 'futures'):
+                        tasks.append(self._fetch_bybit_rest('futures', symbol))
                 
                 await asyncio.gather(*tasks, return_exceptions=True)
                 logger.debug(f"REST API fallback fetch completed for {len(active_symbols)} symbols ({self.trade_counter} total trades)")
@@ -245,8 +421,8 @@ class ScoutAgent:
                             'trade_id': f"binance_{market_type}_{symbol}_{trade['id']}"
                         }
                         
-                        await self.db.insert_trade(trade_data)
                         self.price_cache[symbol] = price
+                        self._queue_trade(trade_data)
                     
                     logger.debug(f"Fetched {len(trades)} trades from Binance {market_type}: {symbol}")
                 else:
@@ -257,26 +433,36 @@ class ScoutAgent:
 
     async def _fetch_bybit_rest(self, market_type: str, symbol: str):
         """Fetch recent trades from Bybit REST API (V5 format)."""
-        try:
-            endpoint = f"{Config.BYBIT_REST_API}/v5/market/recent-trade"
-            category = "spot" if market_type == "spot" else "linear"
-            params = {
-                "category": category,
-                "symbol": symbol,
-                "limit": Config.get_agent_config('scout').get('rest_fetch_limit', 100)
-            }
-            
-            async with self.http_session.get(endpoint, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
+        cooldown_key = f"{market_type}:{symbol}"
+        now = datetime.utcnow()
+        last_fetch = self._last_bybit_rest_fetch_at.get(cooldown_key)
+        if last_fetch and (now - last_fetch).total_seconds() < self._bybit_rest_symbol_cooldown_seconds:
+            return
+        self._last_bybit_rest_fetch_at[cooldown_key] = now
+
+        category = "spot" if market_type == "spot" else "linear"
+        params = {
+            "category": category,
+            "symbol": symbol,
+            "limit": Config.get_agent_config('scout').get('rest_fetch_limit', 100)
+        }
+
+        for base_url in Config.get_bybit_rest_candidates():
+            try:
+                endpoint = f"{base_url}/v5/market/recent-trade"
+                async with self.http_session.get(endpoint, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Bybit REST API error for {symbol} ({market_type}) via {base_url}: status {resp.status}")
+                        continue
+
                     data = await resp.json()
                     trades = data.get('result', {}).get('list', [])
-                    
                     for trade in trades:
                         price = float(trade['price'])
                         quantity = float(trade['size'])
                         side = 'buy' if trade['side'] == 'Buy' else 'sell'
                         timestamp = datetime.utcfromtimestamp(int(trade['time']) / 1000)
-                        
+
                         trade_data = {
                             'exchange': 'bybit',
                             'market_type': market_type,
@@ -287,16 +473,15 @@ class ScoutAgent:
                             'side': side,
                             'trade_id': f"bybit_{market_type}_{symbol}_{trade['execId']}"
                         }
-                        
-                        await self.db.insert_trade(trade_data)
+
                         self.price_cache[symbol] = price
-                    
-                    logger.debug(f"Fetched {len(trades)} trades from Bybit {market_type}: {symbol}")
-                else:
-                    logger.warning(f"Bybit REST API error for {symbol} ({market_type}): status {resp.status}")
-                    
-        except Exception as e:
-            logger.debug(f"Bybit REST fetch error for {symbol} ({market_type}): {e}")
+                        self._exchange_last_trade_at[f"bybit:{market_type}"] = timestamp
+                        self._queue_trade(trade_data)
+
+                    logger.debug(f"Fetched {len(trades)} trades from Bybit {market_type}: {symbol} via {base_url}")
+                    return
+            except Exception as e:
+                logger.debug(f"Bybit REST fetch error for {symbol} ({market_type}) via {base_url}: {e}")
 
     async def _process_binance_message(self, message: str, market_type: str):
         """Process Binance trade events from WebSocket."""
@@ -312,6 +497,9 @@ class ScoutAgent:
                 
             # Binance newer format sends event type differently
             event_type = data.get('e') or payload.get('e')
+            if event_type == 'bookTicker':
+                await self._process_binance_book_message(data, market_type)
+                return
             if event_type not in ['trade', 'aggTrade']:
                 return
 
@@ -342,9 +530,8 @@ class ScoutAgent:
                     'trade_id': f"binance_{market_type}_{symbol}_{data.get('t', int(timestamp.timestamp() * 1000))}"
                 }
 
-                await self.db.insert_trade(trade_data)
                 self.price_cache[symbol] = price
-                self.trade_counter += 1
+                self._queue_trade(trade_data)
             except (ValueError, KeyError) as e:
                 logger.warning(f"Failed to parse Binance trade data: {e}")
 
@@ -352,6 +539,82 @@ class ScoutAgent:
             logger.debug(f"JSON decode error in Binance message: {e}")
         except Exception as e:
             logger.error(f"Error processing Binance message: {e}")
+
+    async def _process_binance_book_message(self, data: Dict[str, Any], market_type: str):
+        try:
+            symbol = str(data.get('s', '')).upper()
+            if not symbol or symbol not in self.get_watchlist():
+                return
+
+            bid_price = float(data.get('b', 0) or 0)
+            ask_price = float(data.get('a', 0) or 0)
+            bid_size = float(data.get('B', 0) or 0)
+            ask_size = float(data.get('A', 0) or 0)
+            timestamp_ms = int(data.get('T') or data.get('E') or 0)
+            ts = datetime.utcfromtimestamp(timestamp_ms / 1000) if timestamp_ms else datetime.utcnow()
+            state_key = f"binance:{market_type}:{symbol}"
+            previous = self._orderbook_state.get(state_key)
+
+            if previous:
+                mid = max((bid_price + ask_price) / 2.0, 1e-9)
+                bid_delta = bid_size - previous.get('bid_size', 0.0)
+                ask_delta = ask_size - previous.get('ask_size', 0.0)
+
+                if abs(bid_delta) > 0:
+                    await self._publish_orderbook_update({
+                        'symbol': symbol,
+                        'exchange': 'binance',
+                        'market_type': market_type,
+                        'bid_price': bid_price,
+                        'ask_price': ask_price,
+                        'bid_size': bid_size,
+                        'ask_size': ask_size,
+                        'order_size': abs(bid_delta),
+                        'order_side': 'bid',
+                        'event_type': 'add' if bid_delta > 0 else 'cancel',
+                        'mid_price': mid,
+                        'timestamp': ts.isoformat(),
+                    })
+
+                if abs(ask_delta) > 0:
+                    await self._publish_orderbook_update({
+                        'symbol': symbol,
+                        'exchange': 'binance',
+                        'market_type': market_type,
+                        'bid_price': bid_price,
+                        'ask_price': ask_price,
+                        'bid_size': bid_size,
+                        'ask_size': ask_size,
+                        'order_size': abs(ask_delta),
+                        'order_side': 'ask',
+                        'event_type': 'add' if ask_delta > 0 else 'cancel',
+                        'mid_price': mid,
+                        'timestamp': ts.isoformat(),
+                    })
+
+            await self._publish_orderbook_update({
+                'symbol': symbol,
+                'exchange': 'binance',
+                'market_type': market_type,
+                'bid_price': bid_price,
+                'ask_price': ask_price,
+                'bid_size': bid_size,
+                'ask_size': ask_size,
+                'order_size': max(bid_size, ask_size),
+                'order_side': 'both',
+                'event_type': 'quote',
+                'mid_price': (bid_price + ask_price) / 2.0 if bid_price and ask_price else 0.0,
+                'timestamp': ts.isoformat(),
+            })
+
+            self._orderbook_state[state_key] = {
+                'bid_price': bid_price,
+                'ask_price': ask_price,
+                'bid_size': bid_size,
+                'ask_size': ask_size,
+            }
+        except Exception as e:
+            logger.debug(f"Binance bookTicker parse error: {e}")
 
     async def _process_bybit_message(self, message: str, market_type: str):
         """Process Bybit trade messages from WebSocket (V5 API format)."""
@@ -392,8 +655,9 @@ class ScoutAgent:
                         'trade_id': f"bybit_{market_type}_{symbol}_{trade.get('execId', int(timestamp.timestamp() * 1000))}"
                     }
 
-                    await self.db.insert_trade(trade_data)
                     self.price_cache[symbol] = price
+                    self._exchange_last_trade_at[f"bybit:{market_type}"] = timestamp
+                    self._queue_trade(trade_data)
                     logger.debug(f"Bybit {market_type} trade: {symbol} {side} @ {price} x {quantity}")
 
                 except (ValueError, KeyError) as e:
@@ -416,6 +680,17 @@ class ScoutAgent:
             except Exception as e:
                 logger.error(f"Price movement detector error: {e}")
                 await asyncio.sleep(30)
+
+    async def _consume_ws_client_bridge(self):
+        while self.running and self._ws_client_bridges:
+            for bridge in self._ws_client_bridges:
+                try:
+                    payload = await asyncio.wait_for(bridge.queue.get(), timeout=2.0)
+                    await self._process_binance_message(payload.get("raw", ""), payload.get("market_type", "spot"))
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    logger.debug(f"websocket-client bridge consume error: {e}")
 
     async def _check_price_movement_tf(self, symbol: str, market_type: str,
                                         tf_key: str, tf_minutes: int):
@@ -600,8 +875,31 @@ class ScoutAgent:
                 'movement_id': movement_id,
             }
             sig_id = await self.db.insert_historical_signature(sig_data)
+            snapshot = self.vector_store.build_feature_snapshot(
+                symbol=symbol,
+                prices=pre_prices.tolist(),
+                volumes=[float(t.get('quantity', 0) or 0) for t in pre_trades],
+                timeframe=tf_key,
+                market_type=market_type,
+                exchange=move_trades[0].get('exchange', 'mixed'),
+                metadata={
+                    'direction': direction,
+                    'magnitude': float(change_pct),
+                    'movement_id': movement_id,
+                    'signature_id': sig_id,
+                    'day_context': day_context or {},
+                    'buy_ratio': float(volume_profile.get('buy_ratio', 0.5)),
+                },
+                observed_at=move_start,
+            )
+            vector_id = self.vector_store.upsert_pattern_snapshot(
+                snapshot,
+                reference_id=f"sig:{sig_id}",
+                direction=direction,
+                magnitude=float(change_pct),
+            )
             logger.info(f"🔖 Historical signature captured [{tf_key}] {symbol} "
-                         f"{direction} {change_pct:+.2%} (sig_id={sig_id})")
+                         f"{direction} {change_pct:+.2%} (sig_id={sig_id}, vector_id={vector_id})")
 
         except Exception as e:
             logger.error(f"Error capturing signature {symbol} {tf_key}: {e}")
@@ -634,6 +932,11 @@ class ScoutAgent:
                 "watchlist": self._active_watchlist,
                 "price_cache_size": len(self.price_cache),
                 "trade_counter": self.trade_counter,
+                "trade_queue_depth": self.trade_ingest_queue.qsize(),
+                "trade_queue_drops": self._trade_queue_drops,
+                "bybit_spot_candidates": Config.get_bybit_ws_candidates('spot'),
+                "bybit_futures_candidates": Config.get_bybit_ws_candidates('futures'),
+                "bybit_rest_candidates": Config.get_bybit_rest_candidates(),
             }
         except Exception as e:
             return {"healthy": False, "error": str(e)}
@@ -652,10 +955,11 @@ class ScoutAgent:
         except Exception as e:
             logger.debug(f"Watchlist DB save: {e}")
 
-        # Anında REST API'den veri çek (Binance only; Bybit uses WebSocket)
+        # Anında REST API'den veri çek (Binance + Bybit fallback)
         logger.info(f"🆕 Fetching data for new symbol: {symbol}")
         for market_type in ['spot', 'futures']:
             await self._fetch_binance_rest(market_type, symbol)
+            await self._fetch_bybit_rest(market_type, symbol)
 
         logger.info(f"🆕 Live tracking started: {symbol}")
 
@@ -677,7 +981,7 @@ class ScoutAgent:
         """Watchlist'i periyodik olarak DB'den güncelle - eklenen ve kaldırılan coinleri yönet"""
         while self.running:
             try:
-                await asyncio.sleep(10)  # 10 saniyede bir kontrol (daha hızlı tepki)
+                await asyncio.sleep(120)  # 2 dakikada bir kontrol (event-driven watchlist trigger eklendi)
                 old_watchlist = set(self._active_watchlist)
                 await self._refresh_watchlist()
                 new_watchlist = set(self._active_watchlist)
@@ -694,6 +998,7 @@ class ScoutAgent:
                         self.price_cache[symbol] = 0.0
                         for market_type in ['spot', 'futures']:
                             await self._fetch_binance_rest(market_type, symbol)
+                            await self._fetch_bybit_rest(market_type, symbol)
 
                 if removed_symbols:
                     logger.info(f"➖ Watchlist'ten çıkarıldı: {removed_symbols}")
@@ -708,3 +1013,33 @@ class ScoutAgent:
 
             except Exception as e:
                 logger.debug(f"Watchlist refresh error: {e}")
+
+    def _exchange_is_stale(self, exchange: str, market_type: str) -> bool:
+        key = f"{exchange}:{market_type}"
+        last_seen = self._exchange_last_trade_at.get(key)
+        if not last_seen:
+            return True
+        return (datetime.utcnow() - last_seen).total_seconds() >= self._bybit_stale_after_seconds
+
+    async def _bybit_stale_recovery_loop(self):
+        while self.running:
+            try:
+                await asyncio.sleep(self._bybit_fast_poll_seconds)
+                active_symbols = self.get_watchlist()
+                if not active_symbols:
+                    continue
+
+                tasks = []
+                for market_type in ['spot', 'futures']:
+                    if not self._exchange_is_stale('bybit', market_type):
+                        continue
+                    for symbol in active_symbols:
+                        tasks.append(self._fetch_bybit_rest(market_type, symbol))
+
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for item in results:
+                        if isinstance(item, Exception):
+                            logger.debug(f"Bybit stale recovery fetch error: {item}")
+            except Exception as e:
+                logger.debug(f"Bybit stale recovery loop error: {e}")

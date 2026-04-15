@@ -10,6 +10,7 @@ from typing import Dict, List, Any, Optional
 
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity as sk_cosine
+from event_bus import Event, EventType, get_event_bus
 
 from config import Config
 from database import Database
@@ -22,6 +23,7 @@ from strategy import (
     compare_similarity
 )
 from intelligence_core import FeatureEngine, MarketRegimeDetector
+from market_activity_tracker import get_market_tracker
 
 # glibc malloc_trim — bellegi OS'a geri ver
 try:
@@ -52,6 +54,15 @@ TIMEFRAME_WINDOWS = {
     '1h': 60,
 }
 
+TARGET_HORIZONS = [
+    ('15m', 15, 1.0),
+    ('1h', 60, 1.2),
+    ('2h', 120, 1.45),
+    ('4h', 240, 1.8),
+    ('8h', 480, 2.1),
+    ('12h', 720, 2.35),
+]
+
 
 class StrategistAgent:
     def __init__(self, db: Database, brain=None, state_tracker=None, risk_manager=None):
@@ -70,16 +81,107 @@ class StrategistAgent:
         self._min_quality_score = float(os.getenv("QUENBOT_MIN_QUALITY_SCORE", "0.68"))
         self._last_signal_emit: Dict[str, float] = {}
         self._last_signal_window: Dict[str, int] = {}
+        self._event_bus = get_event_bus()
+        self._mamis_signal_ttl_seconds = int(os.getenv("QUENBOT_MAMIS_SIGNAL_TTL_SECONDS", "1200"))
+        self._mamis_weight = float(os.getenv("QUENBOT_MAMIS_ENSEMBLE_WEIGHT", "0.35"))
+        self._strategist_weight = float(os.getenv("QUENBOT_STRATEGIST_ENSEMBLE_WEIGHT", "0.65"))
+        self._mamis_signal_cache: Dict[str, Dict[str, Any]] = {}
+        self._mamis_fusions = 0
+        self._historical_lookback_hours = max(24, int(os.getenv("QUENBOT_HISTORICAL_LOOKBACK_HOURS", str(Config.HISTORICAL_LOOKBACK_HOURS))))
+        self._signature_limit = max(200, int(os.getenv("QUENBOT_SIGNATURE_CACHE_LIMIT", str(Config.SIGNATURE_CACHE_LIMIT))))
 
     async def initialize(self):
         logger.info("Initializing Strategist Agent...")
+        self._event_bus.subscribe(EventType.MICROSTRUCTURE_SIGNAL, self._on_mamis_signal)
+
+    async def _on_mamis_signal(self, event: Event):
+        signal = event.data or {}
+        symbol = str(signal.get("symbol", "")).upper()
+        if not symbol:
+            return
+        self._mamis_signal_cache[symbol] = {
+            **signal,
+            "_cached_at": time.time(),
+        }
+
+    def _get_mamis_signal(self, symbol: str) -> Optional[Dict[str, Any]]:
+        cached = self._mamis_signal_cache.get(symbol.upper())
+        if not cached:
+            return None
+        age = time.time() - float(cached.get("_cached_at", 0) or 0)
+        if age > self._mamis_signal_ttl_seconds:
+            self._mamis_signal_cache.pop(symbol.upper(), None)
+            return None
+        return cached
+
+    def _apply_mamis_ensemble(
+        self,
+        *,
+        symbol: str,
+        direction: str,
+        confidence: float,
+        target_pct: float,
+    ) -> Dict[str, Any]:
+        mamis = self._get_mamis_signal(symbol)
+        if not mamis:
+            return {
+                "direction": direction,
+                "confidence": float(confidence),
+                "target_pct": float(target_pct),
+                "ensemble": None,
+            }
+
+        mamis_dir = str(mamis.get("signal_direction", "neutral")).lower()
+        mamis_conf = float(mamis.get("confidence_score", 0) or 0)
+        strategist_score = float(confidence)
+        aligned = mamis_dir == direction
+        opposite = mamis_dir in {"long", "short"} and mamis_dir != direction
+
+        if aligned:
+            fused_conf = self._strategist_weight * strategist_score + self._mamis_weight * mamis_conf
+            fused_target = float(target_pct) * 1.12
+        elif opposite:
+            conflict_penalty = 1.0 - min(0.75, self._mamis_weight * mamis_conf)
+            fused_conf = strategist_score * conflict_penalty
+            fused_target = float(target_pct) * 0.8
+        else:
+            fused_conf = self._strategist_weight * strategist_score + self._mamis_weight * mamis_conf * 0.5
+            fused_target = float(target_pct)
+
+        self._mamis_fusions += 1
+        return {
+            "direction": direction,
+            "confidence": float(min(max(fused_conf, 0.0), 1.0)),
+            "target_pct": float(max(fused_target, 0.005)),
+            "ensemble": {
+                "mamis_direction": mamis_dir,
+                "mamis_confidence": mamis_conf,
+                "aligned": aligned,
+                "opposite": opposite,
+                "weights": {
+                    "strategist": self._strategist_weight,
+                    "mamis": self._mamis_weight,
+                },
+                "pattern_type": mamis.get("detected_pattern_type"),
+                "estimated_volatility": float(mamis.get("estimated_volatility", 0) or 0),
+            },
+        }
 
     async def start(self):
         self.running = True
         logger.info("Starting Strategist Agent...")
+        tracker = get_market_tracker()
 
         while self.running:
             try:
+                # Piyasa aktif olana kadar bekle (max 60s), düşük güçte idle
+                is_active = await tracker.wait_for_activity(timeout=60)
+                if not is_active:
+                    # Low-power: sadece correction notes ve outcome güncelleme
+                    await self._apply_correction_notes()
+                    await self._update_pattern_outcomes()
+                    continue
+
                 await self._apply_correction_notes()
                 await self._analyze_strategies()
                 await self._signature_matching()
@@ -87,7 +189,7 @@ class StrategistAgent:
                 await self._update_pattern_outcomes()
             except Exception as e:
                 logger.error(f"Strategist cycle error: {e}")
-            await asyncio.sleep(30)  # 30s döngü — daha hızlı sinyal tepkisi
+            await asyncio.sleep(15)  # Aktif modda 15s döngü
 
     async def stop(self):
         self.running = False
@@ -104,12 +206,71 @@ class StrategistAgent:
         return Config.WATCHLIST
 
     def _signal_quality_score(self, confidence: float, target_pct: float) -> float:
-        # 15m horizon quality: confidence dominates; overly tiny/huge targets are penalized.
+        # 15m+ horizon quality: only high-conviction >=2% moves should pass.
         c = min(max(float(confidence), 0.0), 1.0)
         tp = abs(float(target_pct))
-        ideal = 0.012  # ~1.2%
+        ideal = 0.025
         target_component = 1.0 - min(abs(tp - ideal) / 0.03, 1.0)
         return min(max(c * 0.8 + target_component * 0.2, 0.0), 1.0)
+
+    def _normalize_target_pct(self, value: float) -> float:
+        numeric = abs(float(value or 0.0))
+        if numeric > 0.5:
+            numeric /= 100.0
+        return numeric
+
+    def _estimate_data_density(self, metadata: Optional[Dict[str, Any]] = None) -> float:
+        meta = metadata or {}
+        explicit = meta.get('data_density')
+        if explicit is not None:
+            return min(max(float(explicit), 0.0), 1.0)
+        sample_count = float(meta.get('sample_count') or meta.get('trade_count') or 0)
+        if sample_count <= 0:
+            return 0.45
+        return min(max(sample_count / 80.0, 0.0), 1.0)
+
+    def _build_target_horizons(
+        self,
+        *,
+        entry_price: float,
+        direction: str,
+        target_pct: float,
+        confidence: float,
+        data_density: float,
+    ) -> List[Dict[str, Any]]:
+        base_target = max(self._normalize_target_pct(target_pct), 0.02)
+        strength = min(max((float(confidence) * 0.7) + (float(data_density) * 0.3), 0.0), 1.0)
+        horizons: List[Dict[str, Any]] = []
+
+        for label, eta_minutes, multiplier in TARGET_HORIZONS:
+            if eta_minutes > 15:
+                required_strength = {
+                    60: 0.35,
+                    120: 0.45,
+                    240: 0.58,
+                    480: 0.72,
+                    720: 0.82,
+                }.get(eta_minutes, 0.4)
+                if strength < required_strength:
+                    continue
+
+            horizon_target = min(max(base_target * multiplier, 0.02), 0.18)
+            target_price = entry_price * (1.0 + horizon_target) if direction == 'long' else entry_price * (1.0 - horizon_target)
+            horizons.append({
+                'label': label,
+                'eta_minutes': eta_minutes,
+                'target_pct': float(horizon_target),
+                'target_price': float(target_price),
+                'strength': round(strength, 4),
+            })
+
+        return horizons or [{
+            'label': '15m',
+            'eta_minutes': 15,
+            'target_pct': float(base_target),
+            'target_price': float(entry_price * (1.0 + base_target) if direction == 'long' else entry_price * (1.0 - base_target)),
+            'strength': round(strength, 4),
+        }]
 
     def _can_emit_signal(
         self,
@@ -119,6 +280,18 @@ class StrategistAgent:
         confidence: float,
         target_pct: float,
     ) -> bool:
+        fusion = self._apply_mamis_ensemble(
+            symbol=symbol,
+            direction=direction,
+            confidence=confidence,
+            target_pct=target_pct,
+        )
+        confidence = float(fusion["confidence"])
+        target_pct = float(fusion["target_pct"])
+
+        if self._normalize_target_pct(target_pct) < 0.02:
+            return False
+
         if confidence < self._min_signal_confidence:
             return False
 
@@ -153,15 +326,36 @@ class StrategistAgent:
         eta_minutes: int,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        safe_target_pct = abs(float(target_pct))
-        safe_target_pct = max(safe_target_pct, 0.005)
+        fusion = self._apply_mamis_ensemble(
+            symbol=symbol,
+            direction=direction,
+            confidence=confidence,
+            target_pct=target_pct,
+        )
+        confidence = float(fusion["confidence"])
+        target_pct = float(fusion["target_pct"])
+        safe_target_pct = self._normalize_target_pct(target_pct)
+        safe_target_pct = max(safe_target_pct, 0.02)
         max_target_15m = float(os.getenv("QUENBOT_15M_MAX_TARGET_PCT", "0.03"))
         safe_target_pct = min(safe_target_pct, min(float(Config.STRATEGY_MAX_TARGET_PCT), max_target_15m))
         if direction == 'short':
             # Prevent impossible negative target prices on short signals.
             safe_target_pct = min(safe_target_pct, 0.95)
         safe_entry = float(entry_price)
-        target_price = safe_entry * (1.0 + safe_target_pct) if direction == 'long' else safe_entry * (1.0 - safe_target_pct)
+        density = self._estimate_data_density(metadata)
+        target_horizons = list((metadata or {}).get('target_horizons') or [])
+        if not target_horizons:
+            target_horizons = self._build_target_horizons(
+                entry_price=safe_entry,
+                direction=direction,
+                target_pct=safe_target_pct,
+                confidence=confidence,
+                data_density=density,
+            )
+        selected_horizon = max(target_horizons, key=lambda item: int(item.get('eta_minutes', 15) or 15)) if target_horizons else None
+        effective_eta = int((selected_horizon or {}).get('eta_minutes', eta_minutes) or eta_minutes)
+        target_price = float((selected_horizon or {}).get('target_price') or (safe_entry * (1.0 + safe_target_pct) if direction == 'long' else safe_entry * (1.0 - safe_target_pct)))
+        safe_target_pct = float((selected_horizon or {}).get('target_pct') or safe_target_pct)
         ts = datetime.utcnow()
         base_meta = {
             'position_bias': direction,
@@ -171,8 +365,23 @@ class StrategistAgent:
             'entry_price': safe_entry,
             'current_price_at_signal': safe_entry,
             'target_price': float(target_price),
-            'estimated_duration_to_target_minutes': int(max(1, eta_minutes)),
+            'estimated_duration_to_target_minutes': int(max(15, effective_eta)),
+            'target_horizons': target_horizons,
+            'selected_horizon': (selected_horizon or {}).get('label', '15m'),
+            'data_density': density,
+            'quality_score': round(self._signal_quality_score(confidence, safe_target_pct), 4),
+            'strategy_approved': True,
+            'dashboard_candidate': True,
+            'target_candidate': True,
         }
+        if fusion.get("ensemble"):
+            base_meta['mamis_ensemble'] = fusion["ensemble"]
+            base_meta['mamis_context'] = {
+                'direction': fusion['ensemble'].get('mamis_direction', 'neutral'),
+                'confidence': fusion['ensemble'].get('mamis_confidence', 0),
+                'pattern_type': fusion['ensemble'].get('pattern_type', 'none'),
+                'volatility': float(fusion['ensemble'].get('estimated_volatility', 0) or 0),
+            }
         if metadata:
             base_meta.update(metadata)
 
@@ -456,7 +665,12 @@ class StrategistAgent:
                         if movement_vector is None or movement_vector.size == 0:
                             continue
 
-                        historical_profiles = await self.db.get_movement_profiles(symbol, hours=24, market_type=market_type, limit=50)
+                        historical_profiles = await self.db.get_movement_profiles(
+                            symbol,
+                            hours=self._historical_lookback_hours,
+                            market_type=market_type,
+                            limit=200,
+                        )
                         historical_vectors = []
                         for profile in historical_profiles:
                             try:
@@ -641,7 +855,11 @@ class StrategistAgent:
                             continue
 
                         # Fetch historical signatures for this symbol
-                        signatures = await self.db.get_historical_signatures(symbol=symbol, limit=100)
+                        signatures = await self.db.get_historical_signatures(
+                            symbol=symbol,
+                            limit=self._signature_limit,
+                            lookback_hours=self._historical_lookback_hours,
+                        )
                         if not signatures:
                             continue
 
@@ -761,6 +979,7 @@ class StrategistAgent:
                 "last_activity": self.last_activity.isoformat() if self.last_activity else None,
                 "analysis_count": self.analysis_count,
                 "signals_generated": self.signals_generated,
+                "mamis_fusions": self._mamis_fusions,
                 "brain_connected": self.brain is not None,
                 "recent_movements_analyzed": len(recent_movements),
                 "similarity_threshold": Config.SIMILARITY_THRESHOLD
