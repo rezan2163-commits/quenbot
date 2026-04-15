@@ -223,7 +223,7 @@ class GemmaDecisionCore:
         self.vector_store = get_vector_store()
         self.event_bus = get_event_bus()
         self._decision_model = os.getenv("QUENBOT_DECISION_MODEL", "supergemma-26b")
-        self._decision_timeout = int(os.getenv("QUENBOT_DECISION_TIMEOUT", "35"))
+        self._decision_timeout = int(os.getenv("QUENBOT_DECISION_TIMEOUT", "120"))
         self._decision_lock = asyncio.Lock()
         self._decision_history: List[GemmaDecision] = []
         self._last_decision_time: float = 0

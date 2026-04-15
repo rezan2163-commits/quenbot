@@ -514,7 +514,7 @@ class CriticAgent:
                 system=system,
                 temperature=0.1,
                 json_mode=True,
-                timeout_override=35,
+                timeout_override=120,
                 max_retries_override=0,
                 prefer_fast_fail=True,
             )
