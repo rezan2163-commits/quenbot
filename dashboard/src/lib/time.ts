@@ -1,4 +1,4 @@
-const DEFAULT_TIME_ZONE = process.env.NEXT_PUBLIC_QUENBOT_TIMEZONE || "Europe/Istanbul";
+const DEFAULT_TIME_ZONE = process.env.NEXT_PUBLIC_QUENBOT_TIMEZONE || "Europe/Vienna";
 
 type DateLike = string | number | Date | null | undefined;
 
