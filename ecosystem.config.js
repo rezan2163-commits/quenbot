@@ -85,7 +85,7 @@ module.exports = {
       restart_delay: 10000,
       exp_backoff_restart_delay: 500,
       kill_timeout: 30000,
-      max_memory_restart: "28G",
+      max_memory_restart: "30G",
       error_file: "./logs/agents-error.log",
       out_file: "./logs/agents-out.log",
       merge_logs: true,
