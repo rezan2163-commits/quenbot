@@ -251,6 +251,58 @@ class ExperienceVectorStore:
         )
         return doc_id
 
+    def query_similar_experiences(
+        self,
+        symbol: str,
+        *,
+        action: Optional[str] = None,
+        outcome: Optional[str] = None,
+        max_age_hours: int = 168,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Belirli sembol/aksiyon/sonuç için geçmiş deneyimleri getir."""
+        predicates: List[Dict[str, Any]] = [{"symbol": symbol.upper()}]
+        if action:
+            predicates.append({"action": action})
+        if outcome:
+            predicates.append({"outcome": outcome})
+        cutoff = int((_utc_now() - timedelta(hours=max_age_hours)).timestamp())
+        predicates.append({"occurred_at": {"$gte": cutoff}})
+        where: Dict[str, Any] = {"$and": predicates} if len(predicates) > 1 else predicates[0]
+        try:
+            results = self._experiences.get(
+                where=where, limit=max(limit, 1),
+                include=["metadatas", "documents"],
+            )
+        except Exception as exc:
+            logger.debug("Experience similarity query failed: %s", exc)
+            return []
+        out: List[Dict[str, Any]] = []
+        for raw in (results.get("documents") or []):
+            try:
+                out.append(json.loads(raw))
+            except json.JSONDecodeError:
+                continue
+        return out
+
+    def get_outcome_stats(self, *, max_age_hours: int = 168, limit: int = 200) -> Dict[str, int]:
+        """Son N deneyimin outcome dağılımını döndür."""
+        cutoff = int((_utc_now() - timedelta(hours=max_age_hours)).timestamp())
+        try:
+            results = self._experiences.get(
+                where={"occurred_at": {"$gte": cutoff}},
+                limit=limit,
+                include=["metadatas"],
+            )
+        except Exception:
+            return {"success": 0, "failure": 0, "neutral": 0, "error": 0, "total": 0}
+        stats: Dict[str, int] = {"success": 0, "failure": 0, "neutral": 0, "error": 0, "total": 0}
+        for meta in (results.get("metadatas") or []):
+            outcome = meta.get("outcome", "neutral")
+            stats[outcome] = stats.get(outcome, 0) + 1
+            stats["total"] += 1
+        return stats
+
     def build_learning_context(self, symbol: Optional[str] = None, limit: int = 5) -> str:
         where = {"symbol": symbol.upper()} if symbol else None
         try:

@@ -143,6 +143,221 @@ Tüm verileri (özellikle imza eşleşmesi kanıtlarını) sentezle ve nihai kar
 Kararında "neden girdik" sorusuna imza eşleşmesi verilerinden yanıt ver."""
 
 
+class AdaptiveEngine:
+    """
+    Dinamik Eşik & Öğrenme Motoru
+    ==============================
+    Son N işlemin başarı oranına (Win Rate) göre karar parametrelerini
+    yumuşak geçişlerle (learning rate) ayarlar.
+
+    Üç ana mekanizma:
+    1. Dynamic Thresholding — similarity/confidence eşiklerini Win Rate'e göre ayarla
+    2. Experience-Augmented Decision — RAG ile geçmiş benzer deneyimleri çekerek güven ayarla
+    3. Feedback Loop — Her işlem sonucunda iç parametreleri güncelle
+    """
+
+    # Öğrenme oranı — parametre değişimleri bu oranda uygulanır (oscillation önleme)
+    LEARNING_RATE = 0.05
+    # Minimum gözlem sayısı — bu kadar veri olmadan adaptasyon yapma
+    MIN_OBSERVATIONS = 10
+    # Target win rate — sistem bu orana yakınsama hedefler
+    TARGET_WIN_RATE = 0.55
+    # Parametre sınırları — aşırı uçlara kaymayı önle
+    BOUNDS = {
+        'similarity_threshold': (0.45, 0.85),
+        'confidence_weight_similarity': (0.20, 0.60),
+        'confidence_weight_brain': (0.10, 0.40),
+        'confidence_weight_mamis': (0.10, 0.35),
+        'confidence_weight_direction': (0.05, 0.25),
+        'magnitude_min': (0.005, 0.03),
+        'risk_appetite': (0.3, 1.0),
+        'sensitivity': (0.3, 1.0),
+    }
+
+    def __init__(self):
+        # Dinamik parametreler — başlangıç değerleri mevcut sabitlerle uyumlu
+        self._params: Dict[str, float] = {
+            'similarity_threshold': 0.60,
+            'confidence_weight_similarity': 0.40,
+            'confidence_weight_brain': 0.25,
+            'confidence_weight_mamis': 0.20,
+            'confidence_weight_direction': 0.15,
+            'magnitude_min': 0.01,
+            'risk_appetite': 0.7,     # 1.0 = agresif, 0.3 = muhafazakâr
+            'sensitivity': 0.7,       # 1.0 = fazla sinyal, 0.3 = az sinyal
+        }
+        # Kayan pencere istatistikleri
+        self._outcome_window: List[str] = []  # son N sonuç: "success" / "failure"
+        self._window_size = 50
+        self._total_adjustments = 0
+        self._last_adjustment_time: float = 0
+        self._adjustment_cooldown = 30.0  # saniye — çok sık güncellemeyi önle
+
+    @property
+    def params(self) -> Dict[str, float]:
+        return dict(self._params)
+
+    @property
+    def win_rate(self) -> float:
+        if not self._outcome_window:
+            return 0.5
+        successes = sum(1 for o in self._outcome_window if o == 'success')
+        return successes / len(self._outcome_window)
+
+    @property
+    def false_positive_rate(self) -> float:
+        """Onay verilip kaybedilen işlem oranı."""
+        if not self._outcome_window:
+            return 0.0
+        failures = sum(1 for o in self._outcome_window if o == 'failure')
+        return failures / len(self._outcome_window)
+
+    def get_similarity_threshold(self) -> float:
+        return self._params['similarity_threshold']
+
+    def get_magnitude_min(self) -> float:
+        return self._params['magnitude_min']
+
+    def compute_confidence(self, similarity: float, brain_accuracy: float,
+                           mamis_alignment: float, direction_accuracy: float) -> float:
+        """Dinamik ağırlıklarla güven skoru hesapla."""
+        w = self._params
+        confidence = (
+            similarity * w['confidence_weight_similarity'] +
+            brain_accuracy * w['confidence_weight_brain'] +
+            mamis_alignment * w['confidence_weight_mamis'] +
+            (direction_accuracy if direction_accuracy > 0 else 0.5) * w['confidence_weight_direction']
+        )
+        # Risk appetite modülatörü
+        confidence *= (0.7 + 0.3 * w['risk_appetite'])
+        return min(max(confidence, 0.0), 1.0)
+
+    def adjust_confidence_from_experiences(self, confidence: float,
+                                            past_experiences: List[Dict]) -> Tuple[float, str]:
+        """
+        RAG-Based Learning: Geçmiş benzer deneyimlerden güven ayarla.
+        Eğer geçmişte benzer paternler başarısızsa, güveni düşür.
+        """
+        if not past_experiences:
+            return confidence, ""
+
+        successes = sum(1 for e in past_experiences if e.get('outcome') == 'success')
+        failures = sum(1 for e in past_experiences if e.get('outcome') == 'failure')
+        total = successes + failures
+
+        if total == 0:
+            return confidence, ""
+
+        historical_win_rate = successes / total
+        avg_pnl = sum(float(e.get('pnl_pct', 0) or 0) for e in past_experiences) / len(past_experiences)
+
+        adjustment_reason = ""
+
+        if historical_win_rate < 0.35 and total >= 3:
+            # Geçmişte benzer sinyaller çoğunlukla başarısız — ghost risk
+            penalty = (0.35 - historical_win_rate) * self._params['sensitivity']
+            confidence *= (1.0 - penalty)
+            adjustment_reason = (
+                f"⚠️ Geçmiş benzer deneyimler olumsuz "
+                f"(win={historical_win_rate:.0%}, n={total}, avg_pnl={avg_pnl:+.2f}%) "
+                f"→ güven {penalty:.0%} düşürüldü"
+            )
+        elif historical_win_rate > 0.70 and total >= 3:
+            # Geçmişte başarılı pattern — güven artır
+            boost = (historical_win_rate - 0.70) * 0.3 * self._params['sensitivity']
+            confidence = min(1.0, confidence * (1.0 + boost))
+            adjustment_reason = (
+                f"✅ Geçmiş benzer deneyimler olumlu "
+                f"(win={historical_win_rate:.0%}, n={total}, avg_pnl={avg_pnl:+.2f}%) "
+                f"→ güven {boost:.0%} artırıldı"
+            )
+
+        return min(max(confidence, 0.0), 1.0), adjustment_reason
+
+    def record_outcome(self, outcome: str):
+        """Bir işlem sonucunu kaydet ve pencereyi sınırla."""
+        normalized = 'success' if outcome in ('success',) else 'failure' if outcome in ('failure', 'error') else None
+        if normalized is None:
+            return
+        self._outcome_window.append(normalized)
+        if len(self._outcome_window) > self._window_size:
+            self._outcome_window = self._outcome_window[-self._window_size:]
+
+    def _adjust_internal_parameters(self, outcome: str):
+        """
+        Feedback Loop: İşlem sonucuna göre iç parametreleri yumuşakça güncelle.
+        Win Rate'e göre eşikleri daralt veya genişlet.
+        """
+        now = time.monotonic()
+        if now - self._last_adjustment_time < self._adjustment_cooldown:
+            return
+        if len(self._outcome_window) < self.MIN_OBSERVATIONS:
+            return
+
+        self._last_adjustment_time = now
+        wr = self.win_rate
+        fpr = self.false_positive_rate
+        lr = self.LEARNING_RATE
+        delta = wr - self.TARGET_WIN_RATE  # pozitif = iyi, negatif = kötü
+
+        # ─── False Positive yüksek → eşikleri sıkılaştır ───
+        if fpr > 0.50:
+            tighten = lr * (fpr - 0.50)
+            self._nudge('similarity_threshold', +tighten)
+            self._nudge('magnitude_min', +tighten * 0.5)
+            self._nudge('risk_appetite', -tighten)
+            self._nudge('sensitivity', -tighten * 0.5)
+        # ─── Win Rate çok düşük → muhafazakâr ol ───
+        elif delta < -0.10:
+            conserve = lr * abs(delta)
+            self._nudge('similarity_threshold', +conserve)
+            self._nudge('magnitude_min', +conserve * 0.3)
+            self._nudge('risk_appetite', -conserve)
+        # ─── Win Rate yeterince yüksek → fırsatları artır (False Negative azalt) ───
+        elif delta > 0.10:
+            relax = lr * delta * 0.5  # yarı hızda gevşet (asimetrik)
+            self._nudge('similarity_threshold', -relax)
+            self._nudge('magnitude_min', -relax * 0.3)
+            self._nudge('risk_appetite', +relax)
+            self._nudge('sensitivity', +relax * 0.3)
+
+        # ─── Confidence ağırlıklarını normalleştir ───
+        self._normalize_confidence_weights()
+        self._total_adjustments += 1
+
+        logger.info(
+            f"🔧 AdaptiveEngine güncelleme #{self._total_adjustments}: "
+            f"WR={wr:.0%} FPR={fpr:.0%} "
+            f"sim_th={self._params['similarity_threshold']:.3f} "
+            f"risk_app={self._params['risk_appetite']:.2f} "
+            f"sens={self._params['sensitivity']:.2f}"
+        )
+
+    def _nudge(self, param: str, delta: float):
+        """Parametreyi sınırlar içinde yumuşakça kaydır."""
+        lo, hi = self.BOUNDS[param]
+        self._params[param] = min(hi, max(lo, self._params[param] + delta))
+
+    def _normalize_confidence_weights(self):
+        """Confidence ağırlıklarının toplamını 1.0'a normalleştir."""
+        keys = ['confidence_weight_similarity', 'confidence_weight_brain',
+                'confidence_weight_mamis', 'confidence_weight_direction']
+        total = sum(self._params[k] for k in keys)
+        if total > 0:
+            for k in keys:
+                self._params[k] = self._params[k] / total
+
+    def get_stats(self) -> Dict[str, Any]:
+        return {
+            'params': dict(self._params),
+            'win_rate': self.win_rate,
+            'false_positive_rate': self.false_positive_rate,
+            'observation_count': len(self._outcome_window),
+            'total_adjustments': self._total_adjustments,
+            'window_size': self._window_size,
+        }
+
+
 class GemmaDecision:
     """Gemma'nın tek bir karar çıktısı"""
     __slots__ = ('decision', 'direction', 'confidence', 'magnitude',
@@ -222,6 +437,7 @@ class GemmaDecisionCore:
         self.redis_bridge = redis_bridge
         self.vector_store = get_vector_store()
         self.event_bus = get_event_bus()
+        self.adaptive = AdaptiveEngine()
         self._decision_model = os.getenv("QUENBOT_DECISION_MODEL", "supergemma-26b")
         self._decision_timeout = int(os.getenv("QUENBOT_DECISION_TIMEOUT", "120"))
         self._decision_lock = asyncio.Lock()
@@ -267,11 +483,18 @@ class GemmaDecisionCore:
         # ─── Context toplama ───
         context = self._build_context(pattern_data, scout_data, strategist_data)
 
-        # ─── Similarity Trigger Gate (≥60%) ───
+        # ─── Experience-Augmented Decision (RAG) ───
+        past_experiences = self.vector_store.query_similar_experiences(
+            symbol, max_age_hours=168, limit=10,
+        )
+        context['_past_experiences'] = past_experiences
+
+        # ─── Similarity Trigger Gate (dinamik eşik) ───
         similarity_score = context.get('similarity', 0)
-        if similarity_score < self.SIMILARITY_TRIGGER_THRESHOLD:
+        dynamic_threshold = self.adaptive.get_similarity_threshold()
+        if similarity_score < dynamic_threshold:
             decision = self._fallback_evaluate(symbol, timeframe, context)
-            decision.reasoning = f"{decision.reasoning} | Similarity {similarity_score:.1%} < %60 eşik — SuperGemma tetiklenmedi"
+            decision.reasoning = f"{decision.reasoning} | Similarity {similarity_score:.1%} < %{dynamic_threshold:.0%} dinamik eşik — SuperGemma tetiklenmedi"
             self._stats['fallback_calls'] += 1
         elif self._decision_lock.locked():
             decision = self._fallback_evaluate(symbol, timeframe, context)
@@ -286,6 +509,14 @@ class GemmaDecisionCore:
                     logger.warning(f"SuperGemma Decision Core fallback: {e}")
                     decision = self._fallback_evaluate(symbol, timeframe, context)
                     self._stats['fallback_calls'] += 1
+
+        # ─── Experience-Augmented Confidence Adjustment ───
+        adj_confidence, adj_reason = self.adaptive.adjust_confidence_from_experiences(
+            decision.confidence, past_experiences,
+        )
+        if adj_reason:
+            decision.confidence = adj_confidence
+            decision.reasoning = f"{decision.reasoning} | {adj_reason}"
 
         # ─── İstatistik güncelle ───
         decision.latency_ms = int((time.monotonic() - t0) * 1000)
@@ -309,8 +540,9 @@ class GemmaDecisionCore:
         logger.info(
             f"🎯 SuperGemmaDecision: {symbol} {timeframe} → "
             f"{'✅ APPROVE' if decision.approved else '🚫 REJECT'} "
-            f"(sim={context.get('similarity', 0):.1%}, {decision.direction}, güven={decision.confidence:.0%}, "
-            f"{decision.latency_ms}ms)"
+            f"(sim={context.get('similarity', 0):.1%}, th={dynamic_threshold:.0%}, "
+            f"{decision.direction}, güven={decision.confidence:.0%}, "
+            f"{decision.latency_ms}ms, WR={self.adaptive.win_rate:.0%})"
         )
 
         envelope = self.build_command_envelope(pattern_data, decision)
@@ -498,14 +730,17 @@ class GemmaDecisionCore:
         approved = True
         reasons = []
 
-        # ─── Hard Gates ───
-        if similarity < self.FALLBACK_MIN_SIMILARITY:
-            approved = False
-            reasons.append(f"Benzerlik düşük: {similarity:.4f} < {self.FALLBACK_MIN_SIMILARITY}")
+        # ─── Hard Gates (dinamik eşiklerle) ───
+        dyn_sim_threshold = self.adaptive.get_similarity_threshold()
+        dyn_mag_min = self.adaptive.get_magnitude_min()
 
-        if abs(predicted_magnitude) < 0.01:
+        if similarity < dyn_sim_threshold:
             approved = False
-            reasons.append(f"Beklenen hareket çok küçük: {predicted_magnitude:+.2%}")
+            reasons.append(f"Benzerlik düşük: {similarity:.4f} < {dyn_sim_threshold:.3f}")
+
+        if abs(predicted_magnitude) < dyn_mag_min:
+            approved = False
+            reasons.append(f"Beklenen hareket çok küçük: {predicted_magnitude:+.2%} < {dyn_mag_min:.2%}")
 
         if consecutive_losses >= 5:
             approved = False
@@ -527,18 +762,17 @@ class GemmaDecisionCore:
         # ─── Market Activity Mode ───
         tracker = get_market_tracker()
         if not tracker.is_active:
-            # Piyasa durgunken onay eşiğini yükselt
-            if similarity < 0.70:
+            quiet_threshold = max(0.70, dyn_sim_threshold + 0.10)
+            if similarity < quiet_threshold:
                 approved = False
-                reasons.append(f"Piyasa durgun — yüksek benzerlik gerekli: {similarity:.4f} < 0.70")
+                reasons.append(f"Piyasa durgun — yüksek benzerlik gerekli: {similarity:.4f} < {quiet_threshold:.2f}")
 
         # ─── Direction-specific accuracy gate ───
         if direction_accuracy > 0 and direction_accuracy < 0.35:
             approved = False
             reasons.append(f"Bu yön ({predicted_direction}) başarı oranı düşük: {direction_accuracy:.1%}")
 
-        # ─── Confidence calculation ───
-        # Weighted: similarity(40%) + brain_accuracy(25%) + mamis_alignment(20%) + direction_accuracy(15%)
+        # ─── Confidence calculation (dinamik ağırlıklar) ───
         mamis_alignment = 0.5
         if mamis_bias == predicted_direction:
             mamis_alignment = mamis_confidence
@@ -547,13 +781,16 @@ class GemmaDecisionCore:
         else:
             mamis_alignment = max(0.1, 1.0 - mamis_confidence)
 
-        confidence = (
-            similarity * 0.40 +
-            brain_accuracy * 0.25 +
-            mamis_alignment * 0.20 +
-            (direction_accuracy if direction_accuracy > 0 else 0.5) * 0.15
+        confidence = self.adaptive.compute_confidence(
+            similarity, brain_accuracy, mamis_alignment, direction_accuracy,
         )
-        confidence = min(max(confidence, 0.0), 1.0)
+
+        # ─── Experience-Augmented (RAG) güven ayarı ───
+        past_exp = context.get('_past_experiences', [])
+        adj_confidence, adj_reason = self.adaptive.adjust_confidence_from_experiences(confidence, past_exp)
+        if adj_reason:
+            confidence = adj_confidence
+            reasons.append(adj_reason)
 
         # ─── Risk level determination ───
         if abs(drawdown) > 5 or consecutive_losses >= 3:
@@ -684,6 +921,11 @@ class GemmaDecisionCore:
             context=feedback.details,
         )
         exp_id = self.vector_store.record_experience(experience)
+
+        # ─── Feedback Loop: Adaptive Engine güncelle ───
+        self.adaptive.record_outcome(outcome)
+        self.adaptive._adjust_internal_parameters(outcome)
+
         await self.event_bus.publish(Event(
             type=EventType.EXPERIENCE_RECORDED,
             source="supergemma_decision_core",
@@ -726,6 +968,7 @@ class GemmaDecisionCore:
             'approval_rate': approval_rate,
             'decision_history_count': len(self._decision_history),
             'last_decision': self._decision_history[-1].to_dict() if self._decision_history else None,
+            'adaptive': self.adaptive.get_stats(),
         }
 
     def get_symbol_summary(self, symbol: str) -> Dict[str, Any]:
