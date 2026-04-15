@@ -891,3 +891,34 @@ export function useLearningStats() {
     refreshInterval: 15000,
   });
 }
+
+/* ─── Signature Matches (Neuro-Symbolic Engine) ─── */
+
+export interface SignatureMatchRecord {
+  id: number;
+  symbol: string;
+  timeframe: string;
+  direction: string;
+  similarity: number;
+  dtw_score: number;
+  fft_score: number;
+  cosine_score: number;
+  poly_score: number;
+  matched_signature_id: number | null;
+  match_label: string | null;
+  pattern_name: string | null;
+  historical_timestamp: string | null;
+  historical_price: number;
+  historical_end_price: number;
+  historical_volume_ratio: number;
+  context_string: string | null;
+  current_price: number;
+  created_at: string;
+}
+
+export function useSignatureMatches(symbol?: string) {
+  const key = symbol
+    ? `${API}/api/signature-matches?symbol=${symbol}`
+    : `${API}/api/signature-matches`;
+  return useSWR<SignatureMatchRecord[]>(key, fetcher, { refreshInterval: 10000 });
+}

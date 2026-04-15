@@ -1611,6 +1611,64 @@ app.get("/api/signatures", async (req, res) => {
   }
 });
 
+// ─── Signature Matches (Neuro-Symbolic Engine) ───
+app.get("/api/signature-matches", async (req, res) => {
+  try {
+    const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
+    const minSimilarity = Math.max(0, Math.min(1, Number(req.query.min_similarity || 0.6)));
+    const limit = Math.min(100, Number(req.query.limit || 20));
+    const hours = Math.min(168, Number(req.query.hours || 24));
+    const cutoff = new Date(Date.now() - hours * 3600 * 1000);
+
+    let rows;
+    if (symbol) {
+      rows = await sql`
+        SELECT s.id, s.symbol, s.timeframe, s.direction,
+               s.similarity::double precision AS similarity,
+               s.dtw_score::double precision AS dtw_score,
+               s.fft_score::double precision AS fft_score,
+               s.cosine_score::double precision AS cosine_score,
+               s.poly_score::double precision AS poly_score,
+               s.matched_signature_id, s.match_label, s.pattern_name,
+               s.historical_timestamp, s.historical_price::double precision AS historical_price,
+               s.historical_end_price::double precision AS historical_end_price,
+               s.historical_volume_ratio::double precision AS historical_volume_ratio,
+               s.context_string, s.current_price::double precision AS current_price,
+               s.created_at
+        FROM signature_matches s
+        WHERE s.symbol = ${symbol}
+          AND s.similarity >= ${minSimilarity}
+          AND s.created_at >= ${cutoff}
+        ORDER BY s.similarity DESC, s.created_at DESC
+        LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT s.id, s.symbol, s.timeframe, s.direction,
+               s.similarity::double precision AS similarity,
+               s.dtw_score::double precision AS dtw_score,
+               s.fft_score::double precision AS fft_score,
+               s.cosine_score::double precision AS cosine_score,
+               s.poly_score::double precision AS poly_score,
+               s.matched_signature_id, s.match_label, s.pattern_name,
+               s.historical_timestamp, s.historical_price::double precision AS historical_price,
+               s.historical_end_price::double precision AS historical_end_price,
+               s.historical_volume_ratio::double precision AS historical_volume_ratio,
+               s.context_string, s.current_price::double precision AS current_price,
+               s.created_at
+        FROM signature_matches s
+        WHERE s.similarity >= ${minSimilarity}
+          AND s.created_at >= ${cutoff}
+        ORDER BY s.similarity DESC, s.created_at DESC
+        LIMIT ${limit}
+      `;
+    }
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 // ─── State History ───
 app.get("/api/state/history", async (req, res) => {
   try {

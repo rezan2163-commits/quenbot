@@ -596,6 +596,33 @@ class Database:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_historical_signatures_symbol ON historical_signatures(symbol, timeframe)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_pattern_match_results_symbol ON pattern_match_results(symbol, created_at)")
 
+            # Signature matches table (Neuro-Symbolic Engine results)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS signature_matches (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(20) NOT NULL,
+                    timeframe VARCHAR(10) NOT NULL,
+                    direction VARCHAR(10) NOT NULL DEFAULT 'neutral',
+                    similarity DECIMAL(6, 4) NOT NULL,
+                    dtw_score DECIMAL(6, 4) DEFAULT 0,
+                    fft_score DECIMAL(6, 4) DEFAULT 0,
+                    cosine_score DECIMAL(6, 4) DEFAULT 0,
+                    poly_score DECIMAL(6, 4) DEFAULT 0,
+                    matched_signature_id INTEGER,
+                    match_label VARCHAR(100),
+                    pattern_name VARCHAR(200),
+                    historical_timestamp TIMESTAMP,
+                    historical_price DECIMAL(20, 8) DEFAULT 0,
+                    historical_end_price DECIMAL(20, 8) DEFAULT 0,
+                    historical_volume_ratio DECIMAL(8, 4) DEFAULT 0,
+                    context_string TEXT,
+                    current_price DECIMAL(20, 8) DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_signature_matches_symbol ON signature_matches(symbol, created_at DESC)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_signature_matches_similarity ON signature_matches(similarity DESC)")
+
             # ── Migrations: widen VARCHAR columns that were too narrow ──
             await conn.execute("""
                 ALTER TABLE signals ALTER COLUMN signal_type TYPE VARCHAR(50)

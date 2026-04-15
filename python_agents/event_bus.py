@@ -53,6 +53,7 @@ class EventType(str, Enum):
     PATTERN_MATCH = "pattern.match"
     PATTERN_NO_MATCH = "pattern.no_match"
     PATTERN_DETECTED = "pattern.detected"
+    SIGNATURE_MATCH = "signature.match"
 
     # Directive events
     DIRECTIVE_UPDATED = "directive.updated"

@@ -126,12 +126,19 @@ SYNTHESIS_PROMPT_TEMPLATE = """## KARAR İSTEĞİ — {symbol} ({timeframe})
 ### 📚 ÖĞRENME BİRİKİMİ
 {learning_context}
 
+### 🔍 İMZA EŞLEŞMESİ (Signature Match)
+- İmza Eşleşme Sayısı: {signature_match_count}
+- En Yüksek Benzerlik: {signature_top_similarity:.1%}
+- İmza Yönü: {signature_direction}
+{signature_provenance}
+
 ### ⚡ PİYASA AKTİVİTE
 - Piyasa Modu: {market_mode}
 - Aktif Sembol Sayısı: {active_symbol_count}
 
 ---
-Bu verileri sentezle ve nihai kararını JSON formatında ver."""
+Tüm verileri (özellikle imza eşleşmesi kanıtlarını) sentezle ve nihai kararını JSON formatında ver.
+Kararında "neden girdik" sorusuna imza eşleşmesi verilerinden yanıt ver."""
 
 
 class GemmaDecision:
@@ -417,6 +424,11 @@ class GemmaDecisionCore:
             # Market Activity
             'market_mode': get_market_tracker().mode.value,
             'active_symbol_count': len(get_market_tracker().get_active_symbols()),
+            # Signature provenance
+            'signature_match_count': pattern_data.get('signature_match_count', 0),
+            'signature_top_similarity': pattern_data.get('signature_top_similarity', 0),
+            'signature_direction': pattern_data.get('signature_direction', 'neutral'),
+            'signature_provenance': pattern_data.get('signature_provenance', 'İmza eşleşmesi bulunamadı.'),
         }
 
     async def _gemma_evaluate(self, symbol: str, timeframe: str,

@@ -35,6 +35,14 @@ from database import Database
 from event_bus import get_event_bus, Event, EventType
 from vector_memory import get_vector_store
 from market_activity_tracker import get_market_tracker
+from signature_engine import (
+    extract_shape_descriptor,
+    query_signature_vault,
+    build_match_context,
+    persist_signature_matches,
+    SignatureMatch,
+    MATCH_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -204,43 +212,68 @@ class PatternMatcherAgent:
                 if abs(recent_change) < SIGNIFICANT_MOVE_THRESHOLD:
                     continue
 
-                snapshot = self.vector_store.build_feature_snapshot(
-                    symbol=symbol,
-                    prices=recent_prices,
-                    volumes=recent_volumes,
-                    timeframe=tf_key,
-                    metadata={'buy_ratio': 0.5},
+                # 3. Shape-aware Signature Engine matching (DTW + FFT + Cosine + Poly)
+                live_descriptor = extract_shape_descriptor(
+                    np.array(recent_prices, dtype=np.float64)
                 )
-                # 3. Compare against all historical signatures
-                vector_matches = self.vector_store.query_recent_pattern_matches(
-                    symbol,
-                    snapshot.feature_vector,
-                    timeframe=tf_key,
-                    max_age_hours=self._vector_match_lookback_hours,
-                    min_similarity=SIMILARITY_THRESHOLD,
-                    limit=MAX_MATCHES_PER_SCAN,
-                )
-                matches = self._find_euclidean_matches(current_vector, signatures)
+
+                signature_matches: list[SignatureMatch] = []
+                if live_descriptor and len(live_descriptor.normalized_profile) >= 10:
+                    signature_matches = await query_signature_vault(
+                        live_descriptor=live_descriptor,
+                        symbol=symbol,
+                        timeframe=tf_key,
+                        db=self.db,
+                        vector_store=self.vector_store,
+                        min_similarity=MATCH_THRESHOLD,
+                        top_k=MAX_MATCHES_PER_SCAN,
+                    )
                 self.total_comparisons += len(signatures)
 
-                if vector_matches:
-                    vector_match_payloads = [
-                        {
-                            'signature_id': item.reference_id,
+                # Fallback: Euclidean matches for symbols with few DB signatures
+                euclidean_matches = self._find_euclidean_matches(current_vector, signatures)
+
+                # Merge: signature engine matches take priority
+                matches = []
+                if signature_matches:
+                    for sm in signature_matches:
+                        matches.append({
+                            'signature_id': sm.db_signature_id or sm.signature_id,
+                            'signature_label': sm.signature_id,
                             'symbol': symbol,
-                            'timeframe': item.timeframe,
-                            'direction': 'up' if item.direction == 'long' else 'down' if item.direction == 'short' else 'neutral',
-                            'change_pct': float(item.magnitude),
-                            'similarity': float(item.similarity),
-                            'euclidean_distance': float(max(0.0, 1.0 - item.similarity)),
+                            'timeframe': tf_key,
+                            'direction': sm.historical_direction,
+                            'change_pct': sm.historical_change_pct,
+                            'similarity': sm.similarity,
+                            'euclidean_distance': 0.0,
+                            'dtw_score': sm.dtw_score,
+                            'fft_score': sm.fft_score,
+                            'cosine_score': sm.cosine_score,
+                            'poly_score': sm.poly_score,
                             'vector_length': len(current_vector),
-                            'volume_profile': item.metadata,
-                            'pre_move_indicators': item.metadata,
-                            'source': 'chromadb',
-                        }
-                        for item in vector_matches
-                    ]
-                    matches = sorted(vector_match_payloads + matches, key=lambda row: row['similarity'], reverse=True)[:MAX_MATCHES_PER_SCAN]
+                            'volume_profile': {},
+                            'pre_move_indicators': {},
+                            'historical_timestamp': sm.historical_timestamp.isoformat() if sm.historical_timestamp else None,
+                            'historical_price': sm.historical_price,
+                            'historical_end_price': sm.historical_end_price,
+                            'historical_volume_ratio': sm.historical_volume_ratio,
+                            'match_label': sm.match_label,
+                            'pattern_name': sm.pattern_name,
+                            'context_string': sm.to_context_string(),
+                            'source': sm.source,
+                        })
+
+                # Add euclidean as secondary if not enough signature matches
+                if len(matches) < MAX_MATCHES_PER_SCAN and euclidean_matches:
+                    existing_ids = {m.get('signature_id') for m in matches}
+                    for em in euclidean_matches:
+                        if em.get('signature_id') not in existing_ids:
+                            matches.append(em)
+                        if len(matches) >= MAX_MATCHES_PER_SCAN:
+                            break
+
+                matches.sort(key=lambda x: x['similarity'], reverse=True)
+                matches = matches[:MAX_MATCHES_PER_SCAN]
 
                 if not matches:
                     continue
@@ -252,7 +285,7 @@ class PatternMatcherAgent:
                 if similarity > self.best_similarity_ever:
                     self.best_similarity_ever = similarity
 
-                if similarity >= SIMILARITY_THRESHOLD:
+                if similarity >= MATCH_THRESHOLD:
                     await self._handle_match(symbol, tf_key, current_vector,
                                              matches, best_match, current_price, recent_change)
 
@@ -424,7 +457,7 @@ class PatternMatcherAgent:
             'symbol': symbol,
             'timeframe': tf_key,
             'similarity': best['similarity'],
-            'euclidean_distance': best['euclidean_distance'],
+            'euclidean_distance': best.get('euclidean_distance', 0),
             'predicted_direction': prediction['direction'],
             'predicted_magnitude': prediction['magnitude'],
             'current_price': current_price,
@@ -439,7 +472,27 @@ class PatternMatcherAgent:
             'volume_profile': best.get('volume_profile', {}),
             'source': best.get('source', 'historical_signatures'),
             'lookback_hours': 24,
-            'similarity_threshold': SIMILARITY_THRESHOLD,
+            'similarity_threshold': MATCH_THRESHOLD,
+            # Signature Engine provenance
+            'signature_label': best.get('signature_label'),
+            'match_label': best.get('match_label'),
+            'pattern_name': best.get('pattern_name'),
+            'historical_timestamp': best.get('historical_timestamp'),
+            'historical_price': best.get('historical_price', 0),
+            'historical_end_price': best.get('historical_end_price', 0),
+            'historical_volume_ratio': best.get('historical_volume_ratio', 0),
+            'dtw_score': best.get('dtw_score', 0),
+            'fft_score': best.get('fft_score', 0),
+            'cosine_score': best.get('cosine_score', 0),
+            'poly_score': best.get('poly_score', 0),
+            'context_string': best.get('context_string', ''),
+            # Aggregated signature provenance for DecisionCore
+            'signature_match_count': sum(1 for m in matches if m.get('context_string')),
+            'signature_top_similarity': max((m.get('similarity', 0) for m in matches if m.get('context_string')), default=0),
+            'signature_direction': prediction['direction'],
+            'signature_provenance': '\n'.join(
+                f"  - {m.get('context_string', '')}" for m in matches[:3] if m.get('context_string')
+            ) or 'İmza eşleşmesi bulunamadı.',
         }
 
         await self.event_bus.publish(Event(
@@ -452,6 +505,49 @@ class PatternMatcherAgent:
             source="pattern_matcher",
             data=event_payload,
         ))
+
+        # Publish SIGNATURE_MATCH if signature provenance exists
+        if event_payload.get('signature_match_count', 0) > 0:
+            await self.event_bus.publish(Event(
+                type=EventType.SIGNATURE_MATCH,
+                source="pattern_matcher",
+                data=event_payload,
+            ))
+
+        # Persist signature matches to DB for dashboard
+        sig_matches = [m for m in matches if isinstance(m, SignatureMatch)]
+        if not sig_matches:
+            # Convert dict matches that have context_string (from signature engine)
+            sig_matches_raw = [m for m in matches if m.get('context_string')]
+            if sig_matches_raw:
+                for m in sig_matches_raw[:5]:
+                    try:
+                        sm = SignatureMatch(
+                            signature_id=m.get('signature_id', ''),
+                            similarity=m.get('similarity', 0),
+                            dtw_score=m.get('dtw_score', 0),
+                            fft_score=m.get('fft_score', 0),
+                            cosine_score=m.get('cosine_score', 0),
+                            poly_score=m.get('poly_score', 0),
+                            historical_timestamp=None,
+                            historical_price=m.get('historical_price', 0),
+                            historical_end_price=m.get('historical_end_price', 0),
+                            historical_volume_ratio=m.get('historical_volume_ratio', 0),
+                            historical_direction=m.get('direction', 'neutral'),
+                            historical_change_pct=m.get('change_pct', 0),
+                            historical_symbol=symbol,
+                            historical_timeframe=tf_key,
+                            db_signature_id=m.get('db_id'),
+                            source=m.get('source', 'historical_signatures'),
+                        )
+                        sig_matches.append(sm)
+                    except Exception:
+                        pass
+        if sig_matches and self.db:
+            try:
+                await persist_signature_matches(self.db, sig_matches, symbol, tf_key, current_price)
+            except Exception as e:
+                logger.debug("Signature persist error: %s", e)
 
     def _compute_weighted_prediction(self, matches: List[Dict]) -> Dict[str, Any]:
         """

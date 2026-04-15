@@ -17,10 +17,11 @@ import SignalHistory from "@/components/SignalHistory";
 import LearningLog from "@/components/LearningLog";
 import InterAgentTerminal from "@/components/InterAgentTerminal";
 import MamisPanel from "@/components/MamisPanel";
+import SimilarityPanel from "@/components/SimilarityPanel";
 import IntegrationPanel from "@/components/IntegrationPanel";
 import MobileLiteDashboard from "@/components/MobileLiteDashboard";
 import { swrConfig } from "@/lib/api";
-import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain, TerminalSquare, Radar, Activity, PanelLeft, X } from "lucide-react";
+import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain, TerminalSquare, Radar, Activity, PanelLeft, X, Fingerprint } from "lucide-react";
 
 // Heavy components with lightweight-charts — lazy load
 const ChartCanvas = dynamic(() => import("@/components/ChartCanvas"), { ssr: false, loading: () => <div className="flex-1 bg-surface animate-pulse" /> });
@@ -54,7 +55,7 @@ class ErrorBoundary extends Component<{ children: ReactNode; fallback?: string }
 }
 
 function RightPanel() {
-  const [tab, setTab] = useState<"market" | "signals" | "backtest" | "flow" | "integration" | "mamis" | "patterns" | "history" | "learning" | "intercom">("market");
+  const [tab, setTab] = useState<"market" | "signals" | "backtest" | "flow" | "integration" | "mamis" | "patterns" | "similarity" | "history" | "learning" | "intercom">("market");
 
   const tabs = [
     { key: "market" as const, icon: Radio, label: "Piyasa" },
@@ -64,6 +65,7 @@ function RightPanel() {
     { key: "integration" as const, icon: Activity, label: "Entegrasyon" },
     { key: "mamis" as const, icon: Radar, label: "MAMIS" },
     { key: "patterns" as const, icon: Database, label: "Paternler" },
+    { key: "similarity" as const, icon: Fingerprint, label: "İmza" },
     { key: "history" as const, icon: History, label: "Geçmiş" },
     { key: "learning" as const, icon: Brain, label: "Öğrenme" },
     { key: "intercom" as const, icon: TerminalSquare, label: "İletişim" },
@@ -95,6 +97,7 @@ function RightPanel() {
         {tab === "integration" && <IntegrationPanel />}
         {tab === "mamis" && <MamisPanel />}
         {tab === "patterns" && <PatternLibrary />}
+        {tab === "similarity" && <SimilarityPanel />}
         {tab === "history" && <SignalHistory />}
         {tab === "learning" && <LearningLog />}
         {tab === "intercom" && <InterAgentTerminal />}
