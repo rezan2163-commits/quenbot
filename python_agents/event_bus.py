@@ -75,6 +75,9 @@ class EventType(str, Enum):
     ERROR_OBSERVED = "learning.error_observed"
     CLEANUP_COMPLETED = "system.cleanup_completed"
     REDIS_MESSAGE = "system.redis_message"
+    SYSTEM_ALERT = "system.alert"
+    STORAGE_PRUNING_STARTED = "storage.pruning_started"
+    STORAGE_PRUNING_COMPLETED = "storage.pruning_completed"
 
     # MAMIS microstructure events
     MICROSTRUCTURE_BAR = "mamis.bar"
