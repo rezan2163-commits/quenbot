@@ -35,7 +35,11 @@ GGUF_NUM_THREADS = int(os.getenv("QUENBOT_GGUF_NUM_THREADS", "12"))  # Tek model
 GGUF_NUM_CTX = int(os.getenv("QUENBOT_GGUF_NUM_CTX", "4096"))
 GGUF_NUM_GPU_LAYERS = int(os.getenv("QUENBOT_GGUF_GPU_LAYERS", "0"))  # CPU-only (pure RAM)
 GGUF_MAX_TOKENS = int(os.getenv("QUENBOT_GGUF_MAX_TOKENS", "384"))
-GGUF_BATCH_SIZE = int(os.getenv("QUENBOT_GGUF_BATCH_SIZE", "768"))
+GGUF_BATCH_SIZE = int(os.getenv("QUENBOT_GGUF_BATCH_SIZE", "256"))
+# n_ubatch, tek seferde CPU'da işlenen prompt parçası; n_batch'ten küçük olmalı.
+# Gemma 3 ISWA cache ile n_batch=512+ durumunda ggml_compute_forward_set_rows
+# assertion fail atabiliyor; 128 daha güvenli.
+GGUF_UBATCH_SIZE = int(os.getenv("QUENBOT_GGUF_UBATCH_SIZE", "128"))
 GGUF_CONCURRENCY = int(os.getenv("QUENBOT_GGUF_CONCURRENCY", "1"))
 GGUF_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_GGUF_MAX_PROMPT_CHARS", "4500"))
 GGUF_TIMEOUT = int(os.getenv("QUENBOT_GGUF_TIMEOUT", "25"))  # 12B Q4 tek model: hızlı
@@ -195,7 +199,7 @@ class GGUFEngine:
 
         n_threads = GGUF_NUM_THREADS or None  # None = auto-detect
 
-        model = Llama(
+        kwargs = dict(
             model_path=model_path,
             n_ctx=GGUF_NUM_CTX,
             n_threads=n_threads,
@@ -207,6 +211,18 @@ class GGUFEngine:
             use_mlock=False,       # Don't lock all pages (allows OS to manage)
             seed=-1,               # Random seed
         )
+        # n_ubatch desteklenen llama-cpp-python sürümlerinde micro-batch'i
+        # kontrol eder. Gemma 3 + ISWA kombinasyonunda büyük n_batch ile
+        # ggml_compute_forward_set_rows native assertion hatası alıyoruz.
+        # Parametre yoksa sessizce yoksay.
+        try:
+            import inspect
+            if "n_ubatch" in inspect.signature(Llama).parameters:
+                kwargs["n_ubatch"] = GGUF_UBATCH_SIZE
+        except Exception:
+            pass
+
+        model = Llama(**kwargs)
 
         # Warm up with a small inference
         try:
