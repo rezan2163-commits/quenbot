@@ -212,7 +212,7 @@ async function buildLocalChatFallback() {
       SELECT symbol
       FROM signals
       WHERE status IN ('pending', 'active', 'open')
-        AND COALESCE(target_pct, 0) >= 0.02
+        AND COALESCE((metadata->>'target_pct')::double precision, 0) >= 0.02
         AND LOWER(COALESCE(source, '')) IN ('strategist', 'pattern_matcher')
       ORDER BY timestamp DESC, confidence DESC
       LIMIT 3
