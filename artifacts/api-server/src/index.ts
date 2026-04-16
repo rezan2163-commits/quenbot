@@ -2152,20 +2152,30 @@ app.get("/api/integration/overview", async (_req, res) => {
         LIMIT 12
       `,
       Promise.race([
-        sql`
-        SELECT
-          exchange,
-          market_type,
-          MAX(timestamp) AS last_trade_at,
-          COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '5 minutes')::int AS trades_5m,
-          COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '1 hour')::int AS trades_1h,
-          EXTRACT(EPOCH FROM (NOW() - MAX(timestamp)))::double precision AS age_seconds
-        FROM trades
-        WHERE timestamp >= NOW() - INTERVAL '24 hours'
-        GROUP BY exchange, market_type
-        ORDER BY exchange, market_type
-        `,
-        new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 3000)),
+        (async () => {
+          try {
+            return await sql.begin(async (tx) => {
+              await tx`SET LOCAL statement_timeout = 3000`;
+              return await tx`
+                SELECT
+                  exchange,
+                  market_type,
+                  MAX(timestamp) AS last_trade_at,
+                  COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '5 minutes')::int AS trades_5m,
+                  COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '1 hour')::int AS trades_1h,
+                  EXTRACT(EPOCH FROM (NOW() - MAX(timestamp)))::double precision AS age_seconds
+                FROM trades
+                WHERE timestamp >= NOW() - INTERVAL '1 hour'
+                GROUP BY exchange, market_type
+                ORDER BY exchange, market_type
+              `;
+            });
+          } catch (e) {
+            console.warn("[integration] trades flow query skipped:", String(e));
+            return [] as any[];
+          }
+        })(),
+        new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 4000)),
       ]) as Promise<any[]>,
       sql`
         SELECT
