@@ -199,6 +199,10 @@ class GGUFEngine:
 
         n_threads = GGUF_NUM_THREADS or None  # None = auto-detect
 
+        # Gemma 3 ISWA + quantized repack için stabil kombinasyon: n_batch=512
+        # ve eşdeğer n_ubatch. Daha küçük değerler repack.cpp assertion'ına,
+        # daha büyük değerler set_rows assertion'ına yol açabiliyor
+        # (llama-cpp-python 0.3.20, Gemma 3 12B Q4_K_M).
         kwargs = dict(
             model_path=model_path,
             n_ctx=GGUF_NUM_CTX,
@@ -207,18 +211,18 @@ class GGUFEngine:
             n_batch=GGUF_BATCH_SIZE,
             n_gpu_layers=GGUF_NUM_GPU_LAYERS,
             verbose=False,
-            use_mmap=True,         # Memory-mapped I/O for efficient RAM usage
-            use_mlock=False,       # Don't lock all pages (allows OS to manage)
-            seed=-1,               # Random seed
+            use_mmap=True,
+            use_mlock=False,
+            seed=-1,
         )
-        # n_ubatch desteklenen llama-cpp-python sürümlerinde micro-batch'i
-        # kontrol eder. Gemma 3 + ISWA kombinasyonunda büyük n_batch ile
-        # ggml_compute_forward_set_rows native assertion hatası alıyoruz.
-        # Parametre yoksa sessizce yoksay.
         try:
             import inspect
-            if "n_ubatch" in inspect.signature(Llama).parameters:
+            params = inspect.signature(Llama).parameters
+            if "n_ubatch" in params:
                 kwargs["n_ubatch"] = GGUF_UBATCH_SIZE
+            if "flash_attn" in params:
+                # Flash-attn genellikle Gemma 3'te daha kararlı ve hızlı.
+                kwargs["flash_attn"] = True
         except Exception:
             pass
 
