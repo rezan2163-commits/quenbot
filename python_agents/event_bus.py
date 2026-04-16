@@ -107,6 +107,12 @@ class EventBus:
         self._mirrors: list[Callable[..., Coroutine]] = []
         self._history: list[dict] = []
         self._significant_history: list[dict] = []
+        # Pinned per-agent heartbeat snapshots so the Inter-Agent Terminal
+        # always shows every agent regardless of ring-buffer churn.
+        self._latest_heartbeats: dict[str, dict] = {}
+        # Pinned recent meta-events (horizons, llm status, resource warnings)
+        # that are sparse but important for the terminal feed.
+        self._pinned_meta: list[dict] = []
         self._max_history = max_history
         self._event_count = 0
         # High-frequency event types that drown out terminal visibility.
@@ -114,6 +120,13 @@ class EventBus:
         self._spam_types = {
             "scout.order_book_update",
             "scout.price_update",
+        }
+        self._meta_types = {
+            "signal.horizon_resolved",
+            "llm.status_change",
+            "system.resource_warning",
+            "health.report",
+            "brain.learning_update",
         }
 
     def _safe_preview(self, data: dict) -> dict:
@@ -169,6 +182,14 @@ class EventBus:
             self._significant_history.append(entry)
             if len(self._significant_history) > self._max_history:
                 self._significant_history = self._significant_history[-self._max_history:]
+        # Pin per-agent heartbeat snapshot (always latest one per agent).
+        if key == "agent.heartbeat":
+            self._latest_heartbeats[str(event.source)] = entry
+        # Pin sparse meta events so they aren't washed out.
+        if key in self._meta_types:
+            self._pinned_meta.append(entry)
+            if len(self._pinned_meta) > 100:
+                self._pinned_meta = self._pinned_meta[-100:]
 
         handlers = self._subscribers.get(key, [])
         for handler in handlers:
@@ -189,11 +210,27 @@ class EventBus:
         except Exception:
             limit = 200
         source = self._history if include_spam else self._significant_history
+        # Always surface latest per-agent heartbeats + pinned meta events so
+        # they never get drowned out by high-volume topics.
+        heartbeats = list(self._latest_heartbeats.values())
+        pinned = list(self._pinned_meta[-30:])
+        merged = source[-limit:] + heartbeats + pinned
+        # Deduplicate by (type, source, timestamp) and order by timestamp asc.
+        seen = set()
+        unique: list[dict] = []
+        for item in merged:
+            k = (item.get("type"), item.get("source"), item.get("timestamp"))
+            if k in seen:
+                continue
+            seen.add(k)
+            unique.append(item)
+        unique.sort(key=lambda e: e.get("timestamp") or 0)
         return {
             "total_events": self._event_count,
             "subscriber_count": sum(len(v) for v in self._subscribers.values()),
             "topics": {k: len(v) for k, v in self._subscribers.items() if v},
-            "recent_events": source[-limit:],
+            "recent_events": unique[-max(limit, len(heartbeats) + len(pinned) + 50):],
+            "latest_heartbeats": heartbeats,
         }
 
 
