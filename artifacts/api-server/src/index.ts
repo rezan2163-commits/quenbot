@@ -2108,8 +2108,10 @@ app.post("/api/chat", express.json(), async (req, res) => {
   try {
     // Forward to Python agents on port 3002 with a bounded timeout for snappy UX.
     const controller = new AbortController();
-    // Gemma 3 12B model needs ~5-15s for quality responses - allow 30s timeout.
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    // Gemma 3 12B Q4 CPU inference typically 15-35s; allow 50s total to cover
+    // cold KV cache + context collection. Warm turns usually finish <20s.
+    const chatTimeout = Number(process.env.QUENBOT_API_CHAT_TIMEOUT_MS || 50000);
+    const timeoutId = setTimeout(() => controller.abort(), chatTimeout);
 
     try {
       const agentResponse = await fetch("http://127.0.0.1:3002/api/chat", {

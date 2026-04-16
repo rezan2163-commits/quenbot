@@ -59,6 +59,16 @@ module.exports = {
         QUENBOT_LLM_NUM_THREAD: "6",
         QUENBOT_CHAT_MODEL: "gemma-3-12b-it",
         QUENBOT_DECISION_MODEL: "gemma-3-12b-it",
+        // Chat speed tuning — 12B Q4 CPU inference realistik 15-35s.
+        // Budget genis tutulur ama prompt/context kisaltilir; kullanici
+        // ikinci mesajdan itibaren KV cache ile daha hizli yanit alir.
+        QUENBOT_CHAT_LLM_TIMEOUT: "45",
+        QUENBOT_CHAT_FULL_TIMEOUT: "45",
+        QUENBOT_CHAT_QUICK_TIMEOUT: "25",
+        QUENBOT_CHAT_MAX_TOTAL_LATENCY: "45",
+        QUENBOT_CHAT_CONTEXT_CHARS: "900",
+        QUENBOT_CHAT_FULL_MAX_TOKENS: "180",
+        QUENBOT_CHAT_QUICK_MAX_TOKENS: "100",
         QUENBOT_GGUF_MODEL_DIR: process.env.QUENBOT_GGUF_MODEL_DIR || "/root/models",
         QUENBOT_GGUF_MODEL_FILE: process.env.QUENBOT_GGUF_MODEL_FILE || "gemma-3-12b-it-Q4_K_M.gguf",
         QUENBOT_GGUF_NUM_THREADS: "6",
