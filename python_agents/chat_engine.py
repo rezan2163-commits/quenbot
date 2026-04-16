@@ -196,7 +196,7 @@ class ChatEngine:
             system=DIRECT_COMMAND_SYSTEM_PROMPT,
             temperature=0.05,
             json_mode=True,
-            timeout_override=10,
+            timeout_override=20,  # Gemma 3 12B için yeterli
             prefer_fast_fail=False,
             max_tokens_override=220,
             max_retries_override=0,
@@ -506,13 +506,13 @@ class ChatEngine:
         user_msg: str,
         context: str,
         lightweight: bool = False,
-        budget_seconds: float = 12.0,
+        budget_seconds: float = 25.0,  # Gemma 3 12B için yeterli budget
     ) -> str:
         t0 = time.monotonic()
 
         # Use dedicated chat client — own semaphore, never blocked by long decision calls.
         client = self._get_chat_client()
-        timeout_sec = max(4, int(min(QUICK_CHAT_TIMEOUT if lightweight else CHAT_DEDICATED_TIMEOUT, budget_seconds)))
+        timeout_sec = max(8, int(min(QUICK_CHAT_TIMEOUT if lightweight else CHAT_DEDICATED_TIMEOUT, budget_seconds)))
 
         prompt = (
             f"Kullanici mesaji:\n{user_msg}\n\n"
