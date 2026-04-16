@@ -1073,6 +1073,7 @@ class AgentOrchestrator:
             self._resilient_task("DirectiveAPI", self._directive_api_server),
             self._resilient_task("SelfCorrection", self._self_correction_loop),
             self._resilient_task("HorizonTracker", self._horizon_outcome_tracker),
+            self._resilient_task("HeartbeatPulse", self._agent_heartbeat_pulse),
         ]
 
         if self.efom:
@@ -1242,6 +1243,61 @@ class AgentOrchestrator:
     # ═══════════════════════════════════════════════════════════════════
     # HORIZON OUTCOME TRACKER — 15m/1h/4h hedef süre takibi
     # ═══════════════════════════════════════════════════════════════════
+    async def _agent_heartbeat_pulse(self):
+        """Independent, lightweight task that reads agent_heartbeat table and
+        re-broadcasts AGENT_HEARTBEAT events to the event bus every 20s so the
+        Inter-Agent Terminal always shows every agent, decoupled from the heavy
+        _health_monitor loop."""
+        logger.info("💓 Agent heartbeat pulse started — 20s interval")
+        while self.running:
+            try:
+                await asyncio.sleep(20)
+                rows = []
+                try:
+                    rows = await self.db.fetch(
+                        "SELECT agent_name, status, metadata, "
+                        "EXTRACT(EPOCH FROM (NOW() - last_heartbeat))::float AS age_seconds "
+                        "FROM agent_heartbeat ORDER BY agent_name"
+                    )
+                except Exception:
+                    rows = []
+                for row in rows or []:
+                    try:
+                        agent_name = row.get("agent_name") if isinstance(row, dict) else row["agent_name"]
+                        status = row.get("status") if isinstance(row, dict) else row["status"]
+                        age = float(row.get("age_seconds") if isinstance(row, dict) else row["age_seconds"] or 0)
+                        metadata = row.get("metadata") if isinstance(row, dict) else row["metadata"]
+                        if isinstance(metadata, str):
+                            try:
+                                metadata = json.loads(metadata)
+                            except Exception:
+                                metadata = {}
+                        metadata = metadata or {}
+                        summary = {
+                            k: v for k, v in metadata.items()
+                            if isinstance(v, (int, float, bool, str)) or v is None
+                        }
+                        # Keep summary compact
+                        if len(summary) > 8:
+                            summary = dict(list(summary.items())[:8])
+                        healthy = bool(status == "running" and age < 180)
+                        await self.event_bus.publish(Event(
+                            type=EventType.AGENT_HEARTBEAT,
+                            source=str(agent_name),
+                            data={
+                                "agent": str(agent_name),
+                                "status": str(status or "unknown"),
+                                "age_seconds": round(age, 1),
+                                "healthy": healthy,
+                                "summary": summary,
+                            },
+                            priority=0,
+                        ))
+                    except Exception as e:
+                        logger.debug(f"heartbeat pulse row skipped: {e}")
+            except Exception as e:
+                logger.debug(f"heartbeat pulse cycle error: {e}")
+
     async def _horizon_outcome_tracker(self):
         """
         Periyodik olarak aktif sinyallerin hedef zaman dilimlerini (15m/1h/4h) kontrol eder.
