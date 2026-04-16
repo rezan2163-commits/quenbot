@@ -1876,7 +1876,8 @@ app.get("/api/system/summary", async (req, res) => {
 
 app.get("/api/system/events", async (req, res) => {
   try {
-    const r = await fetch(`${DIRECTIVE_API}/api/system/events`);
+    const limit = Number(req.query.limit || 200);
+    const r = await fetch(`${DIRECTIVE_API}/api/system/events?limit=${limit}`);
     res.json(await r.json());
   } catch { res.json({ total_events: 0, recent_events: [], error: "Event API unavailable" }); }
 });

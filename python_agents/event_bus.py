@@ -171,12 +171,16 @@ class EventBus:
             except Exception as e:
                 logger.error(f"Event mirror error for {key}: {e}")
 
-    def get_stats(self) -> dict:
+    def get_stats(self, recent_limit: int = 200) -> dict:
+        try:
+            limit = max(1, min(int(recent_limit), self._max_history))
+        except Exception:
+            limit = 200
         return {
             "total_events": self._event_count,
             "subscriber_count": sum(len(v) for v in self._subscribers.values()),
             "topics": {k: len(v) for k, v in self._subscribers.items() if v},
-            "recent_events": self._history[-20:],
+            "recent_events": self._history[-limit:],
         }
 
 

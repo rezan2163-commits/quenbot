@@ -2156,7 +2156,11 @@ class AgentOrchestrator:
 
         async def get_event_log(request):
             """Recent event bus activity."""
-            stats = self.event_bus.get_stats()
+            try:
+                limit = int(request.rel_url.query.get("limit", "200"))
+            except Exception:
+                limit = 200
+            stats = self.event_bus.get_stats(recent_limit=limit)
             return web.json_response(stats)
 
         async def get_mamis_status(request):
