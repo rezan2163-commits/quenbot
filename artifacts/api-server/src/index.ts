@@ -693,7 +693,31 @@ app.get("/api/signals", async (req, res) => {
       ORDER BY timestamp DESC, confidence DESC
       LIMIT 200
     `;
-    res.json(signals.map(normalizeSignalRow).filter(isActionableTargetCard));
+    res.json((() => {
+      const all = signals.map(normalizeSignalRow).filter(isActionableTargetCard);
+      // Sembol-seviyesinde dedup: aynı coin (spot/futures/exchange ayrımı yok)
+      // sadece en yüksek güvenli kartla temsil edilsin. Ayrıca aynı coin için
+      // son 15 dakikada zaten kart varsa yenisini listelemiyoruz.
+      const bestBySymbol = new Map<string, any>();
+      for (const s of all) {
+        const key = String(s.symbol || '').toUpperCase();
+        if (!key) continue;
+        const existing = bestBySymbol.get(key);
+        if (!existing) { bestBySymbol.set(key, s); continue; }
+        const existingTs = new Date(existing.signal_time || existing.timestamp).getTime();
+        const currentTs = new Date(s.signal_time || s.timestamp).getTime();
+        // 15dk içinde eski kayıt varsa yeni olanı düşür; yoksa en güveniliri tut.
+        if (Math.abs(currentTs - existingTs) < 15 * 60 * 1000) {
+          const keep = Number(existing.confidence || 0) >= Number(s.confidence || 0) ? existing : s;
+          bestBySymbol.set(key, keep);
+        } else if (currentTs > existingTs) {
+          bestBySymbol.set(key, s);
+        }
+      }
+      return Array.from(bestBySymbol.values()).sort(
+        (a, b) => new Date(b.signal_time || b.timestamp).getTime() - new Date(a.signal_time || a.timestamp).getTime()
+      );
+    })());
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }

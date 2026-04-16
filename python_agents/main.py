@@ -1093,7 +1093,9 @@ class AgentOrchestrator:
             except Exception:
                 latest_price = 0.0
 
-        target_pct = max(0.02, min(0.08, estimated_volatility * 6.0 + 0.02))
+        # Taban %2; üst sınır kullanıcı talebiyle kaldırıldı — volatiliteye bağlı hedef
+        # %2-%50 arası (matematiksel emniyet), %2 altı sinyal olmaz.
+        target_pct = max(0.02, min(0.50, estimated_volatility * 6.0 + 0.02))
         mamis_target_candidate = self._is_mamis_target_candidate(confidence, target_pct, estimated_volatility)
         if not mamis_target_candidate:
             logger.info(

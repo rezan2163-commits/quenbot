@@ -354,11 +354,10 @@ class StrategistAgent:
         confidence = float(fusion["confidence"])
         target_pct = float(fusion["target_pct"])
         safe_target_pct = self._normalize_target_pct(target_pct)
+        # Taban %2; üst sınır kullanıcı talebiyle kaldırıldı — sistem %2'nin üzerindeki her
+        # hedefi geçerli sayar. Sadece short için matematiksel sınır (<=%95) korunur.
         safe_target_pct = max(safe_target_pct, 0.02)
-        max_target_15m = float(os.getenv("QUENBOT_15M_MAX_TARGET_PCT", "0.03"))
-        safe_target_pct = min(safe_target_pct, min(float(Config.STRATEGY_MAX_TARGET_PCT), max_target_15m))
         if direction == 'short':
-            # Prevent impossible negative target prices on short signals.
             safe_target_pct = min(safe_target_pct, 0.95)
         safe_entry = float(entry_price)
         density = self._estimate_data_density(metadata)
