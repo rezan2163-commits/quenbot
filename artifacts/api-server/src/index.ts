@@ -2151,7 +2151,8 @@ app.get("/api/integration/overview", async (_req, res) => {
         ORDER BY total_signals DESC, avg_pnl_pct DESC
         LIMIT 12
       `,
-      sql`
+      Promise.race([
+        sql`
         SELECT
           exchange,
           market_type,
@@ -2163,7 +2164,9 @@ app.get("/api/integration/overview", async (_req, res) => {
         WHERE timestamp >= NOW() - INTERVAL '24 hours'
         GROUP BY exchange, market_type
         ORDER BY exchange, market_type
-      `,
+        `,
+        new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 3000)),
+      ]) as Promise<any[]>,
       sql`
         SELECT
           COUNT(*)::int AS total,
