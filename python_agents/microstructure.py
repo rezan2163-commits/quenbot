@@ -117,6 +117,13 @@ class MicrostructureEngine:
         side = str(d.get("side", "buy")).lower()
         ts = time.time()
 
+        # Ensure snapshot exists before any feature updates touch it
+        snap = self._snapshots.setdefault(symbol, MicroSnapshot(symbol=symbol))
+        snap.ts = ts
+        if snap.mid_price == 0:
+            snap.mid_price = price
+            snap.micro_price = price
+
         trades = self._trades.setdefault(symbol, deque(maxlen=self.MAX_TRADES))
         trades.append((ts, price, qty, side))
 
@@ -124,12 +131,6 @@ class MicrostructureEngine:
         self._update_kyle(symbol)
         self._update_aggressor(symbol)
         self._update_intensity(symbol)
-
-        snap = self._snapshots.setdefault(symbol, MicroSnapshot(symbol=symbol))
-        snap.ts = ts
-        if snap.mid_price == 0:
-            snap.mid_price = price
-            snap.micro_price = price
 
         await self._maybe_publish(symbol, snap)
 
@@ -155,7 +156,8 @@ class MicrostructureEngine:
             st["cur_buy"] = 0.0; st["cur_sell"] = 0.0; st["cur_vol"] = 0.0
 
         vpin = sum(st["buckets"]) / max(len(st["buckets"]), 1) if st["buckets"] else 0.0
-        self._snapshots[symbol].vpin = float(vpin)
+        snap = self._snapshots.setdefault(symbol, MicroSnapshot(symbol=symbol))
+        snap.vpin = float(vpin)
 
     def _update_kyle(self, symbol: str) -> None:
         """λ ≈ Δp / signed_vol via OLS on a rolling window.
@@ -186,8 +188,9 @@ class MicrostructureEngine:
         den = sum((xs[i] - mx) ** 2 for i in range(n))
         lam = num / den if den > 1e-12 else 0.0
         # normalize by price for cross-symbol comparability
-        mid = self._snapshots[symbol].mid_price or prices[-1] or 1.0
-        self._snapshots[symbol].kyle_lambda = float(lam / mid * 1e6)  # per million units of notional
+        snap = self._snapshots.setdefault(symbol, MicroSnapshot(symbol=symbol))
+        mid = snap.mid_price or prices[-1] or 1.0
+        snap.kyle_lambda = float(lam / mid * 1e6)  # per million units of notional
 
     def _update_aggressor(self, symbol: str) -> None:
         trades = self._trades.get(symbol)
@@ -197,7 +200,8 @@ class MicrostructureEngine:
         buy = sum(t[2] for t in recent if t[3].startswith("b"))
         sell = sum(t[2] for t in recent if not t[3].startswith("b"))
         tot = buy + sell
-        self._snapshots[symbol].aggressor_buy_ratio = float(buy / tot) if tot > 0 else 0.5
+        snap = self._snapshots.setdefault(symbol, MicroSnapshot(symbol=symbol))
+        snap.aggressor_buy_ratio = float(buy / tot) if tot > 0 else 0.5
 
     def _update_intensity(self, symbol: str) -> None:
         trades = self._trades.get(symbol)
@@ -205,7 +209,8 @@ class MicrostructureEngine:
             return
         recent = list(trades)[-60:]
         dt = recent[-1][0] - recent[0][0]
-        self._snapshots[symbol].trade_intensity = len(recent) / dt if dt > 0 else 0.0
+        snap = self._snapshots.setdefault(symbol, MicroSnapshot(symbol=symbol))
+        snap.trade_intensity = len(recent) / dt if dt > 0 else 0.0
 
     # ─────────── Publish ───────────
     async def _maybe_publish(self, symbol: str, snap: MicroSnapshot) -> None:
