@@ -117,10 +117,9 @@ class LLMClient:
             engine = self._get_engine()
             if not engine._initialized:
                 ok = await engine.initialize()
-                if ok:
-                    self.model = engine._model_name
+                # Keep canonical logical label regardless of GGUF file stem so
+                # dashboard shows a single model identity across roles.
                 return ok
-            self.model = engine._model_name
             return True
         except Exception:
             return False
@@ -129,15 +128,13 @@ class LLMClient:
         """List available GGUF model (single model architecture)."""
         engine = self._get_engine()
         if engine._initialized:
-            return [engine._model_name]
+            return [self.model]
         return []
 
     async def ensure_model(self) -> bool:
         """Ensure GGUF model is loaded."""
         engine = self._get_engine()
         ok = await engine.initialize()
-        if ok:
-            self.model = engine._model_name
         return ok
 
     async def generate(

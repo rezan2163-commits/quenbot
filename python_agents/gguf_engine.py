@@ -31,14 +31,14 @@ logger = logging.getLogger("quenbot.gguf_engine")
 # ─── Model Configuration ───
 GGUF_MODEL_DIR = os.getenv("QUENBOT_GGUF_MODEL_DIR", "/root/models")
 GGUF_MODEL_FILE = os.getenv("QUENBOT_GGUF_MODEL_FILE", "gemma-3-12b-it-Q4_K_M.gguf")
-GGUF_NUM_THREADS = int(os.getenv("QUENBOT_GGUF_NUM_THREADS", "6"))  # 6 thread Gemma'ya, 10 vCPU agent işlerine
-GGUF_NUM_CTX = int(os.getenv("QUENBOT_GGUF_NUM_CTX", "8192"))
+GGUF_NUM_THREADS = int(os.getenv("QUENBOT_GGUF_NUM_THREADS", "12"))  # Tek model: daha fazla thread inference için
+GGUF_NUM_CTX = int(os.getenv("QUENBOT_GGUF_NUM_CTX", "4096"))
 GGUF_NUM_GPU_LAYERS = int(os.getenv("QUENBOT_GGUF_GPU_LAYERS", "0"))  # CPU-only (pure RAM)
-GGUF_MAX_TOKENS = int(os.getenv("QUENBOT_GGUF_MAX_TOKENS", "512"))
-GGUF_BATCH_SIZE = int(os.getenv("QUENBOT_GGUF_BATCH_SIZE", "512"))
+GGUF_MAX_TOKENS = int(os.getenv("QUENBOT_GGUF_MAX_TOKENS", "384"))
+GGUF_BATCH_SIZE = int(os.getenv("QUENBOT_GGUF_BATCH_SIZE", "768"))
 GGUF_CONCURRENCY = int(os.getenv("QUENBOT_GGUF_CONCURRENCY", "1"))
-GGUF_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_GGUF_MAX_PROMPT_CHARS", "6000"))
-GGUF_TIMEOUT = int(os.getenv("QUENBOT_GGUF_TIMEOUT", "30"))  # 12B çok hızlı
+GGUF_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_GGUF_MAX_PROMPT_CHARS", "4500"))
+GGUF_TIMEOUT = int(os.getenv("QUENBOT_GGUF_TIMEOUT", "25"))  # 12B Q4 tek model: hızlı
 
 # Fallback GGUF model names (in order of preference)
 GGUF_MODEL_CANDIDATES = [
