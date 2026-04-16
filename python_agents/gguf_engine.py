@@ -274,7 +274,8 @@ class GGUFEngine:
 
         if prefer_fast_fail:
             try:
-                await asyncio.wait_for(self._semaphore.acquire(), timeout=1.5)
+                # Gemma 4 MoE takes ~15-25s per inference, so wait at least 30s for semaphore
+                await asyncio.wait_for(self._semaphore.acquire(), timeout=30.0)
             except asyncio.TimeoutError:
                 return GGUFResponse(
                     text="", model=self._model_name,
