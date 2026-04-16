@@ -18,16 +18,17 @@ ACTIVE_LLM_MODEL = os.getenv("QUENBOT_LLM_MODEL", "supergemma-26b")
 CHAT_CACHE_TTL = int(os.getenv("QUENBOT_CHAT_CACHE_TTL", "8"))
 HEALTH_CACHE_TTL = int(os.getenv("QUENBOT_HEALTH_CACHE_TTL", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("QUENBOT_CHAT_CONTEXT_CHARS", "1800"))
-CHAT_TIMEOUT = int(os.getenv("QUENBOT_CHAT_FULL_TIMEOUT", "50"))
-QUICK_CHAT_TIMEOUT = int(os.getenv("QUENBOT_CHAT_QUICK_TIMEOUT", "12"))
+CHAT_TIMEOUT = int(os.getenv("QUENBOT_CHAT_FULL_TIMEOUT", "60"))
+QUICK_CHAT_TIMEOUT = int(os.getenv("QUENBOT_CHAT_QUICK_TIMEOUT", "25"))
 CHAT_QUICK_MAX_TOKENS = int(os.getenv("QUENBOT_CHAT_QUICK_MAX_TOKENS", "140"))
 CHAT_FULL_MAX_TOKENS = int(os.getenv("QUENBOT_CHAT_FULL_MAX_TOKENS", "280"))
-CHAT_MAX_TOTAL_LATENCY = float(os.getenv("QUENBOT_CHAT_MAX_TOTAL_LATENCY", "12"))
+# Gemma 4 MoE model needs ~20-30s for quality responses
+CHAT_MAX_TOTAL_LATENCY = float(os.getenv("QUENBOT_CHAT_MAX_TOTAL_LATENCY", "45"))
 
 # Dedicated chat LLM lane — completely separate from the decision/pattern LLM pool.
 # Prevents chat from ever competing with 18-second decision calls.
 CHAT_DEDICATED_MODEL = os.getenv("QUENBOT_CHAT_MODEL", ACTIVE_LLM_MODEL)
-CHAT_DEDICATED_TIMEOUT = int(os.getenv("QUENBOT_CHAT_LLM_TIMEOUT", "14"))
+CHAT_DEDICATED_TIMEOUT = int(os.getenv("QUENBOT_CHAT_LLM_TIMEOUT", "40"))
 CHAT_DEDICATED_NUM_THREAD = int(os.getenv("QUENBOT_CHAT_LLM_NUM_THREAD", "8"))
 CHAT_DEDICATED_NUM_CTX = int(os.getenv("QUENBOT_CHAT_LLM_NUM_CTX", "3072"))
 
