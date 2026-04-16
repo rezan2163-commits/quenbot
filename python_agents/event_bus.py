@@ -210,26 +210,23 @@ class EventBus:
         except Exception:
             limit = 200
         source = self._history if include_spam else self._significant_history
-        # Always surface latest per-agent heartbeats + pinned meta events so
-        # they never get drowned out by high-volume topics.
         heartbeats = list(self._latest_heartbeats.values())
         pinned = list(self._pinned_meta[-30:])
-        merged = source[-limit:] + heartbeats + pinned
-        # Deduplicate by (type, source, timestamp) and order by timestamp asc.
-        seen = set()
-        unique: list[dict] = []
-        for item in merged:
-            k = (item.get("type"), item.get("source"), item.get("timestamp"))
-            if k in seen:
-                continue
-            seen.add(k)
-            unique.append(item)
-        unique.sort(key=lambda e: e.get("timestamp") or 0)
+        # Build feed: recent slice of main history, then ensure every pinned
+        # heartbeat + meta event is present (appended at tail so they are
+        # never clipped by high-volume topics).
+        feed = list(source[-limit:])
+        seen = {(e.get("type"), e.get("source"), e.get("timestamp")) for e in feed}
+        for extra in heartbeats + pinned:
+            k = (extra.get("type"), extra.get("source"), extra.get("timestamp"))
+            if k not in seen:
+                feed.append(extra)
+                seen.add(k)
         return {
             "total_events": self._event_count,
             "subscriber_count": sum(len(v) for v in self._subscribers.values()),
             "topics": {k: len(v) for k, v in self._subscribers.items() if v},
-            "recent_events": unique[-max(limit, len(heartbeats) + len(pinned) + 50):],
+            "recent_events": feed,
             "latest_heartbeats": heartbeats,
         }
 
