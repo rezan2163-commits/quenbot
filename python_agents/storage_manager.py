@@ -1,7 +1,7 @@
 """
-Storage Manager — Akıllı Veri Yönetimi ve 70GB Pruning Stratejisi
-=================================================================
-Disk kullanımını izler, 70GB eşiğine yaklaştığında otomatik veri pruning
+Storage Manager — Akıllı Veri Yönetimi ve 150GB Pruning Stratejisi
+==================================================================
+Disk kullanımını izler, 150GB eşiğine yaklaştığında otomatik veri pruning
 işlemi başlatır. Ham veri silinirken matematiksel özetler korunur.
 
 MİMARİ KONUM: Altyapı Katmanı (Background Service)
@@ -547,14 +547,14 @@ class DataArchiver:
 
 class StorageManager:
     """
-    Ana Depolama Yöneticisi — 70GB Pruning Stratejisi
+    Ana Depolama Yöneticisi — 150GB Pruning Stratejisi
     ==================================================
     Disk kullanımını izler, eşik aşıldığında otomatik pruning başlatır.
     Asenkron çalışır, sistem donmaz.
     """
     
     # Eşik değerleri
-    THRESHOLD_BYTES = int(os.getenv("QUENBOT_STORAGE_THRESHOLD_GB", "70")) * (1024**3)
+    THRESHOLD_BYTES = int(os.getenv("QUENBOT_STORAGE_THRESHOLD_GB", "150")) * (1024**3)
     SCAN_INTERVAL_SECONDS = int(os.getenv("QUENBOT_STORAGE_SCAN_INTERVAL", "3600"))  # 1 saat
     MIN_FREE_BYTES = int(os.getenv("QUENBOT_MIN_FREE_GB", "20")) * (1024**3)  # Min 20GB boş
     
