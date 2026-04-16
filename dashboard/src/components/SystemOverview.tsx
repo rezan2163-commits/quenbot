@@ -211,6 +211,15 @@ export default function SystemOverview() {
   const recentMatches = (sigMatches || []).slice(0, 5);
   const accuracy = toNumber(learningStats?.accuracy);
 
+  // PnL formatla - büyük sayılar için K/M notasyonu
+  const formatPnL = (pnl: number) => {
+    const abs = Math.abs(pnl);
+    const sign = pnl >= 0 ? "+" : "-";
+    if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(1)}M`;
+    if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(1)}K`;
+    return `${sign}$${abs.toFixed(2)}`;
+  };
+
   return (
     <div className="h-full flex flex-col gap-3 p-3 overflow-y-auto custom-scrollbar bg-[radial-gradient(ellipse_at_top,_rgba(59,130,246,0.06),_transparent_50%)]">
       {/* KPI Row */}
@@ -224,8 +233,8 @@ export default function SystemOverview() {
         />
         <MetricCard
           label="Toplam PnL"
-          value={`${s.total_pnl >= 0 ? "+" : ""}${s.total_pnl.toFixed(2)}%`}
-          sub={`${s.winning_simulations}K / ${s.losing_simulations}M`}
+          value={formatPnL(s.total_pnl)}
+          sub={`${s.winning_simulations} kazanç / ${s.losing_simulations} kayıp`}
           icon={s.total_pnl >= 0 ? TrendingUp : TrendingDown}
           accent={s.total_pnl >= 0 ? "text-emerald-400" : "text-rose-400"}
         />

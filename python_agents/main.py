@@ -2528,6 +2528,180 @@ class AgentOrchestrator:
 
         app.router.add_get("/api/target-cards", get_target_cards)
 
+        # ─── Dashboard Summary endpoint ───
+        async def get_dashboard_summary(request):
+            """Dashboard için özet istatistikleri döndür."""
+            try:
+                summary = await self.db.get_dashboard_summary()
+                
+                # Closed simulations'dan win/loss ayır
+                closed_count = summary.get("strategy_closed_trades", 0)
+                wins = summary.get("strategy_wins", 0)
+                losses = closed_count - wins
+                
+                return web.json_response({
+                    "total_trades": summary.get("total_trades", 0),
+                    "active_signals": summary.get("active_signals", 0),
+                    "open_simulations": summary.get("open_simulations", 0),
+                    "total_pnl": summary.get("total_pnl", 0),
+                    "win_rate": summary.get("win_rate", 0),
+                    "closed_simulations": closed_count,
+                    "winning_simulations": wins,
+                    "losing_simulations": losses,
+                    "market_ticks_total": summary.get("market_ticks_total", 0),
+                    "recent_movements_24h": summary.get("recent_movements_24h", 0),
+                    "risk_rejected_24h": summary.get("risk_rejected_24h", 0),
+                })
+            except Exception as e:
+                logger.error(f"Dashboard summary endpoint error: {e}")
+                return web.json_response({
+                    "total_trades": 0, "active_signals": 0, "open_simulations": 0,
+                    "total_pnl": 0, "win_rate": 0, "closed_simulations": 0,
+                    "winning_simulations": 0, "losing_simulations": 0,
+                    "error": str(e)
+                })
+
+        app.router.add_get("/api/dashboard/summary", get_dashboard_summary)
+
+        # ─── Simulations endpoint ───
+        async def get_simulations(request):
+            """Açık ve kapalı simülasyonları döndür."""
+            try:
+                status_filter = request.query.get("status")
+                limit = int(request.query.get("limit", "50"))
+                
+                async with self.db.pool.acquire() as conn:
+                    if status_filter:
+                        rows = await conn.fetch("""
+                            SELECT id, symbol, entry_price, side, status, pnl, pnl_pct,
+                                   entry_time, exit_time, exit_price, created_at
+                            FROM simulations
+                            WHERE status = $1
+                            ORDER BY created_at DESC
+                            LIMIT $2
+                        """, status_filter, limit)
+                    else:
+                        rows = await conn.fetch("""
+                            SELECT id, symbol, entry_price, side, status, pnl, pnl_pct,
+                                   entry_time, exit_time, exit_price, created_at
+                            FROM simulations
+                            ORDER BY created_at DESC
+                            LIMIT $1
+                        """, limit)
+                    
+                    simulations = []
+                    for row in rows:
+                        simulations.append({
+                            "id": row["id"],
+                            "symbol": row["symbol"],
+                            "entry_price": float(row["entry_price"]) if row["entry_price"] else 0,
+                            "side": row["side"],
+                            "status": row["status"],
+                            "pnl": float(row["pnl"]) if row["pnl"] else None,
+                            "pnl_pct": float(row["pnl_pct"]) if row["pnl_pct"] else None,
+                            "entry_time": row["entry_time"].isoformat() if row["entry_time"] else None,
+                            "exit_time": row["exit_time"].isoformat() if row["exit_time"] else None,
+                            "exit_price": float(row["exit_price"]) if row["exit_price"] else None,
+                        })
+                    
+                    return web.json_response(simulations)
+            except Exception as e:
+                logger.error(f"Simulations endpoint error: {e}")
+                return web.json_response([], status=500)
+
+        app.router.add_get("/api/simulations", get_simulations)
+
+        # ─── Signals endpoint ───
+        async def get_signals(request):
+            """Aktif ve son sinyalleri döndür."""
+            try:
+                status_filter = request.query.get("status", "pending")
+                limit = int(request.query.get("limit", "50"))
+                
+                async with self.db.pool.acquire() as conn:
+                    if status_filter == "all":
+                        rows = await conn.fetch("""
+                            SELECT id, symbol, signal_type, direction, confidence, price,
+                                   entry_price, target_price, status, timestamp, source,
+                                   expires_at, exchange, market_type, metadata
+                            FROM signals
+                            ORDER BY timestamp DESC
+                            LIMIT $1
+                        """, limit)
+                    else:
+                        rows = await conn.fetch("""
+                            SELECT id, symbol, signal_type, direction, confidence, price,
+                                   entry_price, target_price, status, timestamp, source,
+                                   expires_at, exchange, market_type, metadata
+                            FROM signals
+                            WHERE status = $1
+                            ORDER BY timestamp DESC
+                            LIMIT $2
+                        """, status_filter, limit)
+                    
+                    signals = []
+                    for row in rows:
+                        entry = float(row["entry_price"]) if row["entry_price"] else float(row["price"]) if row["price"] else 0
+                        target = float(row["target_price"]) if row["target_price"] else 0
+                        target_pct = ((target - entry) / entry) if entry > 0 and target > 0 else 0
+                        
+                        signals.append({
+                            "id": row["id"],
+                            "symbol": row["symbol"],
+                            "signal_type": row["signal_type"],
+                            "direction": row["direction"],
+                            "confidence": float(row["confidence"]) if row["confidence"] else 0,
+                            "price": float(row["price"]) if row["price"] else 0,
+                            "entry_price": entry,
+                            "target_price": target,
+                            "target_pct": target_pct,
+                            "status": row["status"],
+                            "timestamp": row["timestamp"].isoformat() if row["timestamp"] else None,
+                            "signal_time": row["timestamp"].isoformat() if row["timestamp"] else None,
+                            "source": row["source"],
+                            "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
+                            "exchange": row["exchange"],
+                            "market_type": row["market_type"],
+                        })
+                    
+                    return web.json_response(signals)
+            except Exception as e:
+                logger.error(f"Signals endpoint error: {e}")
+                return web.json_response([], status=500)
+
+        async def dismiss_signal(request):
+            """Sinyali dismiss et."""
+            try:
+                signal_id = int(request.match_info["signal_id"])
+                async with self.db.pool.acquire() as conn:
+                    await conn.execute("""
+                        UPDATE signals SET status = 'dismissed' WHERE id = $1
+                    """, signal_id)
+                return web.json_response({"success": True, "id": signal_id})
+            except Exception as e:
+                logger.error(f"Dismiss signal error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        async def clear_signals(request):
+            """Birden fazla sinyali temizle."""
+            try:
+                data = await request.json()
+                ids = data.get("ids", [])
+                if not ids:
+                    return web.json_response({"error": "No IDs provided"}, status=400)
+                async with self.db.pool.acquire() as conn:
+                    await conn.execute("""
+                        UPDATE signals SET status = 'dismissed' WHERE id = ANY($1::int[])
+                    """, ids)
+                return web.json_response({"success": True, "cleared": len(ids)})
+            except Exception as e:
+                logger.error(f"Clear signals error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        app.router.add_get("/api/signals", get_signals)
+        app.router.add_post("/api/signals/{signal_id}/dismiss", dismiss_signal)
+        app.router.add_post("/api/signals/clear", clear_signals)
+
         # ─── Storage Manager API endpoints ───
         async def get_storage_status(request):
             """StorageManager durumunu döndür."""
