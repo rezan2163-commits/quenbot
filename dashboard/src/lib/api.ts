@@ -689,7 +689,21 @@ export interface IntegrationOverview {
       win_rate: number;
       total_trades: number;
     }>;
+    evolution: Array<{
+      day: string;
+      total: number;
+      correct: number;
+      accuracy: number;
+      avg_pnl: number;
+    }>;
   };
+  agent_intelligence: Array<{
+    name: string;
+    iq: number;
+    freshness: number;
+    activity_index: number;
+    healthy: boolean;
+  }>;
   brain_control: {
     mode: string;
     health: string;

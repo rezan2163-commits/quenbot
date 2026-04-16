@@ -2208,6 +2208,52 @@ app.get("/api/integration/overview", async (_req, res) => {
       fallbackData[row.agent_name] = meta;
     }
 
+    // Brain evolution: daily accuracy & avg PnL over last 14 days
+    const brainEvolution = await sql`
+      SELECT
+        DATE_TRUNC('day', created_at) AS day,
+        COUNT(*)::int AS total,
+        COUNT(CASE WHEN was_correct THEN 1 END)::int AS correct,
+        COALESCE(AVG(pnl_pct), 0)::double precision AS avg_pnl
+      FROM brain_learning_log
+      WHERE created_at >= NOW() - INTERVAL '14 days'
+      GROUP BY 1
+      ORDER BY 1 ASC
+    `;
+    const brainEvolutionSeries = (brainEvolution as any[]).map((row) => {
+      const total = Number(row.total || 0);
+      const correct = Number(row.correct || 0);
+      return {
+        day: row.day,
+        total,
+        correct,
+        accuracy: total > 0 ? (correct / total) * 100 : 0,
+        avg_pnl: Number(row.avg_pnl || 0),
+      };
+    });
+
+    // Per-agent intelligence score: combines activity freshness + contribution
+    const agentIntelligence = (heartbeats as any[]).map((hb: any) => {
+      const metadata = typeof hb.metadata === "string" ? JSON.parse(hb.metadata) : (hb.metadata || {});
+      const ageSeconds = Math.max(0, Math.round(Number(hb.age_seconds || 0)));
+      const freshness = Math.max(0, 1 - ageSeconds / (AGENT_STALE_SECONDS * 2));
+      const activity = Number(
+        metadata.trade_counter ?? metadata.scans ?? metadata.analysis_count ??
+        metadata.signals_generated ?? metadata.audit_count ?? metadata.match_count ??
+        metadata.logged_trades ?? metadata.gemma_calls ?? metadata.total_requests ?? 0
+      );
+      const activityIndex = Math.min(1, Math.log10(activity + 1) / 4);
+      const healthy = hb.status === "running" ? 1 : hb.status === "degraded" ? 0.5 : 0;
+      const iq = Math.round((freshness * 0.3 + activityIndex * 0.5 + healthy * 0.2) * 100);
+      return {
+        name: hb.agent_name,
+        iq,
+        freshness: Math.round(freshness * 100),
+        activity_index: Math.round(activityIndex * 100),
+        healthy: Boolean(healthy),
+      };
+    }).sort((a, b) => b.iq - a.iq);
+
     const agentRows = heartbeats.map((hb: any) => {
       const metadata = typeof hb.metadata === "string" ? JSON.parse(hb.metadata) : (hb.metadata || {});
       const ageSeconds = Math.max(0, Math.round(Number(hb.age_seconds || 0)));
@@ -2322,7 +2368,9 @@ app.get("/api/integration/overview", async (_req, res) => {
         accuracy,
         avg_pnl: Number(learning.avg_pnl || 0),
         history: stateHistory,
+        evolution: brainEvolutionSeries,
       },
+      agent_intelligence: agentIntelligence,
       brain_control: {
         mode: String(systemMode || "unknown"),
         health: String(systemHealth || "unknown"),

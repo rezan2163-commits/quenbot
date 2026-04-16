@@ -244,12 +244,14 @@ class StrategistAgent:
         horizons: List[Dict[str, Any]] = []
 
         for label, eta_minutes, multiplier in TARGET_HORIZONS:
-            if eta_minutes > 15:
+            if eta_minutes > 60:
+                # 15m and 1h are ALWAYS emitted so every signal card has a
+                # one-hour close/learning resolution. Longer horizons remain
+                # strength-gated.
                 required_strength = {
-                    60: 0.30,
                     240: 0.40,
                     1440: 0.50,
-                }.get(eta_minutes, 0.30)
+                }.get(eta_minutes, 0.40)
                 if strength < required_strength:
                     continue
 

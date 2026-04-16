@@ -68,9 +68,12 @@ export default function IntegrationPanel() {
   const exchanges = data?.exchanges || [];
   const performance = data?.signals?.performance || [];
   const history = data?.brain?.history || [];
+  const evolution = data?.brain?.evolution || [];
+  const agentIntel = data?.agent_intelligence || [];
   const brainControl = data?.brain_control;
   const topPerformance = performance.slice(0, 5);
   const maxTrades = Math.max(...history.map((item) => toNumber(item.total_trades, 0)), 1);
+  const maxEvoTotal = Math.max(...evolution.map((item) => toNumber(item.total, 0)), 1);
   const efomTrials = efomData?.optuna?.trials || [];
   const efomPostMortem = efomData?.post_mortem;
   const efomBest = efomData?.optuna?.best_trial;
@@ -309,7 +312,60 @@ export default function IntegrationPanel() {
               </>
             )}
           </div>
+
+          {/* Günlük doğruluk (brain evolution) çizgisi */}
+          <div className="mt-3 rounded-xl border border-white/6 bg-[linear-gradient(180deg,rgba(15,42,74,0.2),rgba(17,24,39,0.3))] p-3">
+            <div className="flex items-center justify-between text-[10px] text-gray-500 mb-2">
+              <span>Günlük Doğruluk Evrimi (14 gün)</span>
+              <span>{evolution.length} gün • brain_learning_log</span>
+            </div>
+            {evolution.length === 0 ? <EmptyState message="Günlük öğrenme kaydı bekleniyor." /> : (
+              <div className="flex items-end gap-1.5 h-24">
+                {evolution.slice(-14).map((e) => {
+                  const accHeight = Math.max(4, Math.round((toNumber(e.accuracy) / 100) * 96));
+                  const volHeight = Math.max(4, Math.round((toNumber(e.total) / maxEvoTotal) * 40));
+                  const pnl = toNumber(e.avg_pnl);
+                  const tint = pnl >= 0 ? "bg-[linear-gradient(180deg,#22d3ee,#0ea5e9)]" : "bg-[linear-gradient(180deg,#fda4af,#e11d48)]";
+                  return (
+                    <div key={String(e.day)} className="flex-1 flex flex-col items-center justify-end gap-0.5"
+                      title={`${new Date(e.day).toLocaleDateString()} · doğruluk %${toNumber(e.accuracy).toFixed(1)} · ${e.total} örnek · ortPnL ${toNumber(e.avg_pnl).toFixed(2)}%`}>
+                      <div className={`w-full rounded-t-md ${tint}`} style={{ height: accHeight }} />
+                      <div className="w-full rounded-sm bg-white/15" style={{ height: volHeight }} />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <div className="mt-2 text-[10px] text-gray-500">Üst bar = doğruluk %, alt gri = örnek hacmi. Her 1 saatlik hedef kapanışı bu grafiği besler.</div>
+          </div>
         </section>
+
+        {/* Ajan Zeka Skoru */}
+        <section className="rounded-2xl border border-white/8 bg-black/20 p-3">
+          <div className="flex items-center gap-2 text-[11px] text-gray-300 font-semibold mb-3"><BrainCircuit size={13} className="text-cyan-300" /> Ajan Zeka Skoru</div>
+          {agentIntel.length === 0 ? <EmptyState message="Ajan zeka verisi henüz yok." /> : (
+            <div className="space-y-1.5">
+              {agentIntel.map((a) => (
+                <div key={a.name} className="rounded-xl border border-white/6 bg-white/[0.03] px-3 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-[11px] text-white font-medium">{a.name.replaceAll("_", " ")}</div>
+                    <div className={`text-[11px] font-semibold ${a.iq >= 70 ? "text-emerald-300" : a.iq >= 40 ? "text-cyan-200" : "text-amber-300"}`}>IQ {a.iq}</div>
+                  </div>
+                  <div className="mt-1 h-1.5 rounded-full bg-white/5 overflow-hidden">
+                    <div
+                      className={`h-full ${a.iq >= 70 ? "bg-emerald-400" : a.iq >= 40 ? "bg-cyan-400" : "bg-amber-400"}`}
+                      style={{ width: `${Math.min(100, Math.max(0, a.iq))}%` }}
+                    />
+                  </div>
+                  <div className="mt-1 flex gap-3 text-[9px] text-gray-500">
+                    <span>Tazelik %{a.freshness}</span>
+                    <span>Aktivite %{a.activity_index}</span>
+                    <span className={a.healthy ? "text-emerald-300" : "text-rose-300"}>{a.healthy ? "sağlıklı" : "askıda"}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
         <section className="rounded-2xl border border-white/8 bg-black/20 p-3">
           <div className="flex items-center gap-2 text-[11px] text-gray-300 font-semibold mb-3"><Radar size={13} className="text-sky-300" /> Model Dağılımı</div>

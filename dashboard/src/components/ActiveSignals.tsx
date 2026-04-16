@@ -260,6 +260,40 @@ export default function ActiveSignals() {
                     </div>
                   </div>
 
+                  {/* ── ⏰ 1 SAAT SONUÇ ROZETİ (brain learning) ── */}
+                  {(() => {
+                    const h1 = horizons.find((h: any) => h.label === "1h");
+                    if (!h1) return null;
+                    const st = h1.status || "active";
+                    const change = toNumber(h1.actual_change_pct, 0) * 100;
+                    const remain = horizonCountdown(signalAt, toNumber(h1.eta_minutes, 60));
+                    const base = "mb-2 rounded-lg border px-2.5 py-1.5 flex items-center justify-between text-[10px]";
+                    if (st === "hit") return (
+                      <div className={`${base} bg-emerald-400/15 border-emerald-400/30 text-emerald-200`}>
+                        <span className="font-bold">⏰ 1 SAAT SONUÇ</span>
+                        <span className="font-bold">✓ KAR +{change.toFixed(2)}% — Ana beyne öğretildi</span>
+                      </div>
+                    );
+                    if (st === "missed") return (
+                      <div className={`${base} bg-rose-400/15 border-rose-400/30 text-rose-200`}>
+                        <span className="font-bold">⏰ 1 SAAT SONUÇ</span>
+                        <span className="font-bold">✗ ZARAR {change >= 0 ? "+" : ""}{change.toFixed(2)}% — Ana beyne öğretildi</span>
+                      </div>
+                    );
+                    if (st === "near_miss") return (
+                      <div className={`${base} bg-amber-400/15 border-amber-400/30 text-amber-200`}>
+                        <span className="font-bold">⏰ 1 SAAT SONUÇ</span>
+                        <span className="font-bold">⚡ YAKIN KAÇIŞ {change >= 0 ? "+" : ""}{change.toFixed(2)}%</span>
+                      </div>
+                    );
+                    return (
+                      <div className={`${base} bg-cyan-400/10 border-cyan-400/25 text-cyan-200`}>
+                        <span className="font-bold">⏰ 1 SAAT SONUÇ</span>
+                        <span>{remain ? `${remain} sonra değerlendirilecek` : "Değerlendiriliyor..."}</span>
+                      </div>
+                    );
+                  })()}
+
                   {/* ── 🎯 HEDEF ZAMANLARI (15m / 1h / 4h / 24h) ── */}
                   {horizons.length > 0 && (
                     <div className="mb-2 rounded-lg bg-black/30 border border-white/8 p-2">

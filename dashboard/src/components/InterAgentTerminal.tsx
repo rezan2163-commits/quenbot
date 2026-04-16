@@ -9,8 +9,31 @@ function fmtTime(ts: number) {
   return formatTimeOnly(ts * 1000);
 }
 
+function toPct(value: unknown) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n === 0) return "";
+  return `${(n * 100).toFixed(2)}%`;
+}
+
 function summarize(preview: Record<string, any> | undefined, type: string) {
   if (!preview) return "";
+  if (type === "agent.heartbeat") {
+    const agent = preview.agent || "?";
+    const healthy = preview.healthy ?? true;
+    const summary = preview.summary || {};
+    const parts: string[] = [];
+    for (const [k, v] of Object.entries(summary)) {
+      if (["healthy", "last_activity", "brain_connected"].includes(k)) continue;
+      if (typeof v === "number") parts.push(`${k}=${v}`);
+      else if (typeof v === "string" && v.length < 40) parts.push(`${k}=${v}`);
+      if (parts.length >= 3) break;
+    }
+    return `${agent} ${healthy ? "OK" : "DEGRADED"} ${parts.join(" ")}`.trim();
+  }
+  if (type === "signal.horizon_resolved") {
+    const hit = preview.hit ? "✓ İSABET" : "✗ ISKALANDI";
+    return `${preview.symbol ?? "?"} ${preview.label ?? ""} ${hit} ${toPct(preview.actual_change_pct)}`;
+  }
   if (type === "decision.made") {
     const decision = preview.decision as Record<string, any> | undefined;
     const command = preview.command as Record<string, any> | undefined;
@@ -64,10 +87,16 @@ export default function InterAgentTerminal() {
             const isCommand = e.type.startsWith("command.");
             const isDecision = e.type === "decision.made";
             const isRedis = e.type === "system.redis_message";
+            const isHeartbeat = e.type === "agent.heartbeat";
+            const isHorizon = e.type === "signal.horizon_resolved";
             const levelClass = isCommand
               ? "text-accent"
               : isDecision
                 ? "text-emerald-300"
+                : isHorizon
+                  ? e.data_preview?.hit ? "text-emerald-300" : "text-rose-300"
+                : isHeartbeat
+                  ? e.data_preview?.healthy === false ? "text-amber-300" : "text-cyan-200"
                 : isRedis
                   ? "text-sky-300"
               : e.type.includes("rejected") || e.type.includes("failed")

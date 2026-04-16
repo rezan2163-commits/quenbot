@@ -85,6 +85,10 @@ class EventType(str, Enum):
     MICROSTRUCTURE_CLASSIFIED = "mamis.classified"
     MICROSTRUCTURE_SIGNAL = "mamis.signal"
 
+    # Agent activity broadcast (for inter-agent terminal visibility)
+    AGENT_HEARTBEAT = "agent.heartbeat"
+    HORIZON_RESOLVED = "signal.horizon_resolved"
+
 
 @dataclass
 class Event:
@@ -98,7 +102,7 @@ class Event:
 class EventBus:
     """Lock-free async event bus with topic-based pub/sub."""
 
-    def __init__(self, max_history: int = 200):
+    def __init__(self, max_history: int = 400):
         self._subscribers: dict[str, list[Callable]] = {}
         self._mirrors: list[Callable[..., Coroutine]] = []
         self._history: list[dict] = []

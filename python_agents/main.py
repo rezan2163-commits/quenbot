@@ -894,7 +894,7 @@ class AgentOrchestrator:
                         'strength': round(horizon_strength, 4),
                     }]
                     for label, eta_minutes, multiplier, required_strength in [
-                        ('1h', 60, 1.2, 0.35),
+                        ('1h', 60, 1.2, 0.0),  # 1h ALWAYS emitted for consistent 1-hour learning
                         ('2h', 120, 1.45, 0.45),
                         ('4h', 240, 1.8, 0.58),
                         ('8h', 480, 2.1, 0.72),
@@ -1332,6 +1332,26 @@ class AgentOrchestrator:
                 signal_type = f"{signal.get('signal_type', 'unknown')}_{h['label']}"
                 self.brain.update_learning(signal_type, hit, actual_change_pct * 100)
 
+            # Publish to event bus so inter-agent terminal reflects the resolution
+            try:
+                await self.event_bus.publish(Event(
+                    type=EventType.HORIZON_RESOLVED,
+                    source="horizon_tracker",
+                    data={
+                        'signal_id': signal.get('id'),
+                        'symbol': symbol,
+                        'direction': direction,
+                        'label': h['label'],
+                        'eta_minutes': int(h.get('eta_minutes', 0)),
+                        'hit': bool(hit),
+                        'target_price': float(target_price),
+                        'actual_price': float(current_price),
+                        'actual_change_pct': float(actual_change_pct),
+                    },
+                ))
+            except Exception as _hz_pub_err:
+                logger.debug(f"Horizon event publish skipped: {_hz_pub_err}")
+
             emoji = "✅" if hit else "❌"
             logger.info(
                 f"🎯 Horizon {h['label']} {emoji} | {symbol} {direction} "
@@ -1602,6 +1622,43 @@ class AgentOrchestrator:
                 resource_data["agent_breakdown"] = component_breakdown
                 resource_data["market_activity"] = self.market_tracker.get_stats() if hasattr(self, 'market_tracker') else {}
                 await self.db.update_heartbeat('system_resources', 'running', resource_data)
+
+                # ─── Broadcast per-agent heartbeats on event bus so all agents
+                #     appear in the Inter-Agent Terminal, not just publishers. ───
+                try:
+                    agent_beats = [
+                        ("scout", scout_health),
+                        ("strategist", strategist_health),
+                        ("ghost_simulator", ghost_health),
+                        ("auditor", auditor_health),
+                        ("pattern_matcher", pm_health),
+                        ("mamis", mamis_health),
+                        ("efom", efom_health),
+                        ("brain", brain_status),
+                        ("decision_core", decision_core_stats),
+                        ("system_resources", {
+                            "cpu_percent": resource_data.get("cpu_percent"),
+                            "ram_percent": resource_data.get("ram_percent"),
+                            "mode": self._system_mode,
+                        }),
+                    ]
+                    for agent_name, beat in agent_beats:
+                        summary = {
+                            k: v for k, v in (beat or {}).items()
+                            if isinstance(v, (int, float, bool, str)) or v is None
+                        }
+                        await self.event_bus.publish(Event(
+                            type=EventType.AGENT_HEARTBEAT,
+                            source=agent_name,
+                            data={
+                                "agent": agent_name,
+                                "healthy": bool((beat or {}).get("healthy", True)),
+                                "summary": summary,
+                            },
+                            priority=0,
+                        ))
+                except Exception as _hb_pub_err:
+                    logger.debug(f"Heartbeat broadcast skipped: {_hb_pub_err}")
 
                 if warnings:
                     await self.event_bus.publish(Event(
