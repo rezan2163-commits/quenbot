@@ -182,10 +182,10 @@ class DataArchiver:
     # Tablolar ve retention süreleri (gün)
     TABLE_RETENTION = {
         "trades": 7,              # 7 gün sonra özetle
-        "price_movements": 14,    # 14 gün sonra özetle
-        "signals": 30,            # 30 gün sonra özetle
-        "simulations": 30,        # 30 gün sonra özetle
-        "pattern_records": 60,    # 60 gün sonra özetle
+        "price_movements": 90,    # 90 gün sonra özetle
+        "signals": 90,            # 90 gün sonra özetle
+        "simulations": 90,        # 90 gün sonra özetle
+        "pattern_records": 90,    # 90 gün sonra özetle
         "historical_signatures": 90,  # 90 gün sonra özetle
         "pattern_match_results": 30,  # 30 gün sonra özetle
         "signature_matches": 30,  # 30 gün sonra özetle
