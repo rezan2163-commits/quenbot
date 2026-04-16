@@ -13,6 +13,7 @@ const TARGET_CARD_MIN_CONFIDENCE = Number(process.env.QUENBOT_TARGET_CARD_MIN_CO
 const TARGET_CARD_MIN_QUALITY = Number(process.env.QUENBOT_TARGET_CARD_MIN_QUALITY || 0.64);
 const MAMIS_TARGET_CARD_MIN_CONFIDENCE = Number(process.env.QUENBOT_MAMIS_TARGET_CARD_MIN_CONF || 0.72);
 const MAMIS_TARGET_CARD_MIN_VOLATILITY = Number(process.env.QUENBOT_MAMIS_TARGET_CARD_MIN_VOLATILITY || 0.0035);
+const META_LABELER_VETO_PROBA = Number(process.env.QUENBOT_META_LABELER_VETO_PROBA || 0.15);
 
 function normalizeTimestamp(value: unknown): string | null {
   if (value == null) return null;
@@ -104,9 +105,10 @@ function isActionableTargetCard(signal: any) {
 
   if (!['strategist', 'pattern_matcher'].includes(source)) return false;
 
-  // Meta-labeler advisory: only reject if explicitly untrusted
+  // Meta-labeler advisory: tavsiye niteliğinde; sadece çok düşük olasılıkta veto et.
+  // Kullanıcı felsefesi: sistem mantıklı bulduğu sinyalleri versin, sonuçlardan öğrensin.
   const meta = signal.metadata?.meta_labeler;
-  if (meta && typeof meta === 'object' && meta.accept === false && typeof meta.proba === 'number' && meta.proba < 0.45) {
+  if (meta && typeof meta === 'object' && meta.accept === false && typeof meta.proba === 'number' && meta.proba < META_LABELER_VETO_PROBA) {
     return false;
   }
 
