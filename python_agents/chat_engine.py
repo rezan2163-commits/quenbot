@@ -171,7 +171,7 @@ class ChatEngine:
             if routed_actions:
                 context = f"{context}\n\nUYGULANAN KOMUTLAR:\n{self._format_routed_actions(routed_actions)}"
             elapsed = time.monotonic() - t0
-            budget_left = max(2.0, CHAT_MAX_TOTAL_LATENCY - elapsed)
+            budget_left = max(8.0, CHAT_MAX_TOTAL_LATENCY - elapsed)  # Minimum 8s budget
             return await self._ask_gemma(
                 msg,
                 context,
@@ -179,7 +179,8 @@ class ChatEngine:
                 budget_seconds=budget_left,
             )
         except Exception as exc:
-            logger.error("Chat error: %s", exc)
+            import traceback
+            logger.error("Chat error: %s\n%s", exc, traceback.format_exc())
             return "Modelden yanit alirken teknik bir sorun oldu. Lutfen tekrar dener misin?"
 
     async def interpret_direct_command(self, message: str) -> Dict[str, Any]:
