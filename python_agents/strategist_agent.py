@@ -79,6 +79,9 @@ class StrategistAgent:
         self._min_quality_score = float(os.getenv("QUENBOT_MIN_QUALITY_SCORE", "0.68"))
         self._last_signal_emit: Dict[str, float] = {}
         self._last_signal_window: Dict[str, int] = {}
+        # Günlük sinyal limiti 
+        self._max_daily_signals_per_symbol = int(os.getenv("QUENBOT_MAX_DAILY_SIGNALS_PER_SYMBOL", "4"))
+        self._daily_signal_timestamps: Dict[str, list] = {}  # {symbol: [timestamp1, ...]}
         self._event_bus = get_event_bus()
         self._mamis_signal_ttl_seconds = int(os.getenv("QUENBOT_MAMIS_SIGNAL_TTL_SECONDS", "1200"))
         self._mamis_weight = float(os.getenv("QUENBOT_MAMIS_ENSEMBLE_WEIGHT", "0.35"))

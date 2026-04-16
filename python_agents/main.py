@@ -127,6 +127,9 @@ class AgentOrchestrator:
         self._last_pattern_signal_window: dict[str, int] = {}
         self._last_pattern_eval_at: dict[str, float] = {}
         self._pattern_eval_semaphore = asyncio.Semaphore(1)
+        # Günlük sinyal limiti - her coin için günde max 4 sinyal
+        self._max_daily_signals_per_symbol = int(os.getenv("QUENBOT_MAX_DAILY_SIGNALS_PER_SYMBOL", "4"))
+        self._daily_signal_timestamps: dict[str, list[float]] = {}  # {symbol: [timestamp1, timestamp2, ...]}
         self._historical_warmup_task = None
         # Thread pool for CPU-bound work (pattern matching, similarity calc)
         self._thread_pool = ThreadPoolExecutor(
@@ -920,10 +923,28 @@ class AgentOrchestrator:
                         )
                         return
 
+                    # ─── GÜNLÜK SİNYAL LİMİTİ ─── (max 4 sinyal/gün/coin)
+                    now_ts = time.time()
+                    one_day_ago = now_ts - 86400  # 24 saat
+                    if symbol not in self._daily_signal_timestamps:
+                        self._daily_signal_timestamps[symbol] = []
+                    # Eski sinyalleri temizle (24 saatten önce)
+                    self._daily_signal_timestamps[symbol] = [
+                        ts for ts in self._daily_signal_timestamps[symbol] if ts > one_day_ago
+                    ]
+                    # Günlük limit kontrolü
+                    if len(self._daily_signal_timestamps[symbol]) >= self._max_daily_signals_per_symbol:
+                        logger.info(
+                            f"🚫 Daily signal limit reached: {symbol} has {len(self._daily_signal_timestamps[symbol])}/{self._max_daily_signals_per_symbol} signals today"
+                        )
+                        return
+
                     pattern_window = int(time.time() // max(self._pattern_signal_window_seconds, 1))
                     if self._last_pattern_signal_window.get(symbol) == pattern_window:
                         return
                     self._last_pattern_signal_window[symbol] = pattern_window
+                    # Günlük sayaca ekle
+                    self._daily_signal_timestamps[symbol].append(now_ts)
 
                     envelope = self.decision_core.build_command_envelope_from_dict(match_data, decision) if self.decision_core else None
 
