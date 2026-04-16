@@ -433,18 +433,53 @@ app.use(express.json());
 
 const AGENT_STALE_SECONDS = Number(process.env.AGENT_STALE_SECONDS || 600);
 
-async function fetchJsonOrNull(url: string, timeoutMs = 4000) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) return null;
-    return await response.json();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeoutId);
+// Python agents API cache - prevents repeated failed requests
+const agentApiCache = new Map<string, { data: any; updatedAt: number; errorCount: number }>();
+const AGENT_API_CACHE_TTL = 5000; // 5 seconds cache
+const AGENT_API_ERROR_BACKOFF = 30000; // 30s backoff on errors
+
+async function fetchJsonOrNull(url: string, timeoutMs = 8000, retries = 2): Promise<any> {
+  // Check cache first
+  const cached = agentApiCache.get(url);
+  const now = Date.now();
+  if (cached) {
+    // If we had errors, use longer backoff
+    const backoffTime = cached.errorCount > 0 ? AGENT_API_ERROR_BACKOFF : AGENT_API_CACHE_TTL;
+    if (now - cached.updatedAt < backoffTime) {
+      return cached.data;
+    }
   }
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!response.ok) {
+        // Cache null result with error count
+        const errorCount = (cached?.errorCount || 0) + 1;
+        agentApiCache.set(url, { data: null, updatedAt: now, errorCount });
+        return null;
+      }
+      const data = await response.json();
+      // Cache successful result
+      agentApiCache.set(url, { data, updatedAt: now, errorCount: 0 });
+      return data;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (attempt < retries) {
+        // Wait before retry (exponential backoff)
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+        continue;
+      }
+      // Cache null with error count on final failure
+      const errorCount = (cached?.errorCount || 0) + 1;
+      agentApiCache.set(url, { data: cached?.data || null, updatedAt: now, errorCount });
+      return cached?.data || null; // Return stale data if available
+    }
+  }
+  return null;
 }
 
 async function buildAgentStatusResponse() {
@@ -2158,8 +2193,20 @@ app.get("/api/integration/overview", async (_req, res) => {
           post_mortem: postMortem,
           optuna_trials: Array.isArray(trials) ? trials : [],
         };
-      })
+      }),
     ]);
+
+    // Separate query for fallback data (decision_core, brain, efom, system heartbeats)
+    const fallbackRows = await sql`
+      SELECT agent_name, metadata 
+      FROM agent_heartbeat 
+      WHERE agent_name IN ('decision_core', 'brain', 'efom', 'system')
+    `;
+    const fallbackData: Record<string, any> = {};
+    for (const row of fallbackRows) {
+      const meta = typeof row.metadata === "string" ? JSON.parse(row.metadata) : (row.metadata || {});
+      fallbackData[row.agent_name] = meta;
+    }
 
     const agentRows = heartbeats.map((hb: any) => {
       const metadata = typeof hb.metadata === "string" ? JSON.parse(hb.metadata) : (hb.metadata || {});
@@ -2222,9 +2269,20 @@ app.get("/api/integration/overview", async (_req, res) => {
     const learning = learningStats[0] || { total: 0, correct: 0, avg_pnl: 0 };
     const accuracy = Number(learning.total || 0) > 0 ? (Number(learning.correct || 0) / Number(learning.total || 1)) * 100 : 0;
     const systemSummaryData = systemSummary && typeof systemSummary === "object" && !Array.isArray(systemSummary) ? (systemSummary as any) : {};
-    const learningWeights = systemSummaryData?.brain?.learning_weights || {};
-    const decisionCore = systemSummaryData?.decision_core || {};
-    const efom = systemSummaryData?.efom || {};
+    
+    // Use fallback from heartbeat if Python API unavailable
+    const dcFallback = fallbackData['decision_core'] || {};
+    const brainFallback = fallbackData['brain'] || {};
+    const efomFallback = fallbackData['efom'] || {};
+    const systemFallback = fallbackData['system'] || {};
+    
+    const learningWeights = systemSummaryData?.brain?.learning_weights || brainFallback?.learning_weights || {};
+    const decisionCore = systemSummaryData?.decision_core || dcFallback || {};
+    const efom = systemSummaryData?.efom || efomFallback || {};
+    const systemMode = systemSummaryData?.mode || systemFallback?.mode || "unknown";
+    const systemHealth = systemSummaryData?.health || systemFallback?.llm_available ? "healthy" : "degraded";
+    const llmModel = systemSummaryData?.llm?.model || dcFallback?.active_model || "unknown";
+    
     const masterDirective = String(directives?.master_directive || "").trim();
     const postMortem = efomOverview?.post_mortem || null;
     const optunaTrials: Array<{ value?: number; [key: string]: any }> = Array.isArray(efomOverview?.optuna_trials) ? efomOverview.optuna_trials : [];
@@ -2266,30 +2324,30 @@ app.get("/api/integration/overview", async (_req, res) => {
         history: stateHistory,
       },
       brain_control: {
-        mode: String(systemSummaryData?.mode || "unknown"),
-        health: String(systemSummaryData?.health || "unknown"),
+        mode: String(systemMode || "unknown"),
+        health: String(systemHealth || "unknown"),
         directive_updated_at: directives?.updated_at || null,
         directive_preview: masterDirective ? masterDirective.slice(0, 180) : null,
         decision_core: {
-          ok: Boolean(decisionCore?.ok),
-          model: String(decisionCore?.model || systemSummaryData?.llm?.model || "unknown"),
-          approval_rate: Number(decisionCore?.approval_rate || 0),
-          total_requests: Number(decisionCore?.total_requests || 0),
-          gemma_calls: Number(decisionCore?.gemma_calls || 0),
-          fallback_calls: Number(decisionCore?.fallback_calls || 0),
-          avg_latency_ms: Number(decisionCore?.avg_latency_ms || 0),
+          ok: Boolean(decisionCore?.ok ?? (dcFallback?.active_model ? true : false)),
+          model: String(decisionCore?.model || llmModel || "unknown"),
+          approval_rate: Number(decisionCore?.approval_rate || dcFallback?.approval_rate || 0),
+          total_requests: Number(decisionCore?.total_requests || dcFallback?.total_requests || 0),
+          gemma_calls: Number(decisionCore?.gemma_calls || dcFallback?.gemma_calls || 0),
+          fallback_calls: Number(decisionCore?.fallback_calls || dcFallback?.fallback_calls || 0),
+          avg_latency_ms: Number(decisionCore?.avg_latency_ms || dcFallback?.avg_latency_ms || 0),
         },
         learning_weights: {
-          similarity: Number(learningWeights?.similarity || 0),
-          volume_match: Number(learningWeights?.volume_match || 0),
-          direction_match: Number(learningWeights?.direction_match || 0),
-          confidence_history: Number(learningWeights?.confidence_history || 0),
+          similarity: Number(learningWeights?.similarity || brainFallback?.pattern_match?.learning_weights?.similarity || 0),
+          volume_match: Number(learningWeights?.volume_match || brainFallback?.pattern_match?.learning_weights?.volume_match || 0),
+          direction_match: Number(learningWeights?.direction_match || brainFallback?.pattern_match?.learning_weights?.direction_match || 0),
+          confidence_history: Number(learningWeights?.confidence_history || brainFallback?.pattern_match?.learning_weights?.confidence_history || 0),
         },
         efom: {
-          ok: Boolean(efom?.ok),
-          logged_trades: Number(efom?.logged_trades || 0),
-          optimizations_run: Number(efom?.optimizations_run || 0),
-          config_path: efom?.config_path || null,
+          ok: Boolean(efom?.ok ?? efomFallback?.healthy),
+          logged_trades: Number(efom?.logged_trades || efomFallback?.logged_trades || 0),
+          optimizations_run: Number(efom?.optimizations_run || efomFallback?.optimizations_run || 0),
+          config_path: efom?.config_path || efomFallback?.config_path || null,
           latest_report_summary: postMortem?.summary || null,
           latest_report_sample_size: Number(postMortem?.sample_size || 0),
           failure_patterns: Array.isArray(postMortem?.failure_patterns) ? postMortem.failure_patterns : [],

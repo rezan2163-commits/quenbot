@@ -2,27 +2,50 @@ import useSWR from "swr";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
+// Connection state tracking
+let lastSuccessfulFetch = Date.now();
+let connectionHealthy = true;
+
 async function fetcher<T>(url: string): Promise<T> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), 12000); // Increased timeout
   try {
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) throw new Error(`API ${res.status}`);
-    return res.json();
+    const data = await res.json();
+    lastSuccessfulFetch = Date.now();
+    connectionHealthy = true;
+    return data;
+  } catch (error) {
+    // Track connection health
+    if (Date.now() - lastSuccessfulFetch > 30000) {
+      connectionHealthy = false;
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
 }
 
+// Check if connection is healthy
+export function isConnectionHealthy(): boolean {
+  return connectionHealthy && Date.now() - lastSuccessfulFetch < 60000;
+}
+
 export const swrConfig = {
-  onErrorRetry: (_error: Error, _key: string, _config: any, revalidate: any, { retryCount }: { retryCount: number }) => {
-    if (retryCount >= 2) return;
-    setTimeout(() => revalidate({ retryOnFocus: false }), 30000);
+  onErrorRetry: (error: Error, key: string, _config: any, revalidate: any, { retryCount }: { retryCount: number }) => {
+    // More retries for integration endpoints
+    const maxRetries = key.includes('/integration/') ? 4 : 2;
+    if (retryCount >= maxRetries) return;
+    // Shorter retry interval for connection issues
+    const retryDelay = retryCount < 2 ? 5000 : 15000;
+    setTimeout(() => revalidate({ retryOnFocus: false }), retryDelay);
   },
   shouldRetryOnError: true,
-  dedupingInterval: 10000,
-  revalidateOnFocus: false,
-  revalidateOnReconnect: false,
+  dedupingInterval: 8000,
+  revalidateOnFocus: true,
+  revalidateOnReconnect: true,
+  errorRetryInterval: 5000,
 };
 
 /* ─── Types ─── */

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEfomOverview, useIntegrationOverview } from "@/lib/api";
-import { Activity, BrainCircuit, Cpu, Database, FlaskConical, HardDrive, Network, Radar, Settings2, Trophy } from "lucide-react";
+import { useEfomOverview, useIntegrationOverview, isConnectionHealthy } from "@/lib/api";
+import { Activity, BrainCircuit, Cpu, Database, FlaskConical, HardDrive, Network, Radar, Settings2, Trophy, WifiOff, RefreshCw, AlertTriangle } from "lucide-react";
 import { formatInQuenbotTimeZone, formatTimeOnly } from "@/lib/time";
+import { useState, useEffect } from "react";
 
 function toNumber(value: unknown, fallback = 0) {
   const numeric = Number(value);
@@ -26,14 +27,47 @@ function EmptyState({ message }: { message: string }) {
   return <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] px-3 py-4 text-[11px] text-gray-500">{message}</div>;
 }
 
+function ConnectionWarning({ isLoading, onRetry }: { isLoading: boolean; onRetry: () => void }) {
+  return (
+    <div className="rounded-xl border border-amber-400/30 bg-amber-400/5 px-4 py-3 flex items-center justify-between gap-3">
+      <div className="flex items-center gap-2">
+        <AlertTriangle size={14} className="text-amber-400" />
+        <div>
+          <div className="text-[11px] text-amber-300 font-medium">Bağlantı Bekleniyor</div>
+          <div className="text-[10px] text-gray-500">Python ajanları ile iletişim kuruluyor...</div>
+        </div>
+      </div>
+      <button 
+        onClick={onRetry}
+        disabled={isLoading}
+        className="px-2 py-1 rounded-lg bg-amber-400/20 text-amber-300 text-[10px] hover:bg-amber-400/30 disabled:opacity-50 flex items-center gap-1"
+      >
+        <RefreshCw size={10} className={isLoading ? "animate-spin" : ""} />
+        {isLoading ? "Bağlanıyor" : "Tekrar Dene"}
+      </button>
+    </div>
+  );
+}
+
 export default function IntegrationPanel() {
-  const { data } = useIntegrationOverview();
+  const { data, error, isLoading, mutate } = useIntegrationOverview();
   const { data: efomData } = useEfomOverview();
+  const [retryCount, setRetryCount] = useState(0);
+
+  // Check for initial load with no data
+  const hasNoData = !data && !isLoading;
+  const hasPartialData = data && (!data.agents?.length && !data.brain_control);
+
+  const handleRetry = () => {
+    setRetryCount(c => c + 1);
+    mutate();
+  };
+
   const agents = data?.agents || [];
   const models = data?.models || [];
   const exchanges = data?.exchanges || [];
-  const performance = data?.signals.performance || [];
-  const history = data?.brain.history || [];
+  const performance = data?.signals?.performance || [];
+  const history = data?.brain?.history || [];
   const brainControl = data?.brain_control;
   const topPerformance = performance.slice(0, 5);
   const maxTrades = Math.max(...history.map((item) => toNumber(item.total_trades, 0)), 1);
@@ -50,10 +84,18 @@ export default function IntegrationPanel() {
           <div className="text-xs font-semibold tracking-[0.18em] text-gray-200">ENTEGRASYON MERKEZİ</div>
           <div className="text-[10px] text-gray-500 mt-1">Ajanlar, modeller, borsalar ve beynin canlı çalışma ritmi</div>
         </div>
-        <div className="text-[10px] text-cyan-300">{data ? formatTimeOnly(data.generated_at) : "yükleniyor"}</div>
+        <div className="flex items-center gap-2">
+          {error && <WifiOff size={12} className="text-amber-400" />}
+          <div className="text-[10px] text-cyan-300">{data ? formatTimeOnly(data.generated_at) : isLoading ? "yükleniyor..." : "bağlantı bekleniyor"}</div>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-3">
+        {/* Connection warning banner */}
+        {(hasNoData || hasPartialData || error) && (
+          <ConnectionWarning isLoading={isLoading} onRetry={handleRetry} />
+        )}
+
         <section className="rounded-2xl border border-white/8 bg-black/20 p-3">
           <div className="flex items-center gap-2 text-[11px] text-gray-300 font-semibold mb-3"><Settings2 size={13} className="text-sky-300" /> Beyin Yonetimi</div>
           <div className="grid grid-cols-2 gap-2 text-[11px] mb-3">
