@@ -76,6 +76,12 @@ module.exports = {
         QUENBOT_GGUF_MAX_TOKENS: "512",
         QUENBOT_GGUF_BATCH_SIZE: "512",
         QUENBOT_GGUF_UBATCH_SIZE: "512",
+        // llama-cpp-python 0.3.20 + Gemma 3 12B Q4_K_M ile CPU repack
+        // optimizasyonu native assertion fail atiyor (repack.cpp:4238 ve
+        // ops.cpp:4938). Bu env var'lar llama.cpp'in ilgili hizli yollarini
+        // devre disi birakir; inference biraz yavaslar ama stabil olur.
+        GGML_CPU_NO_REPACK: "1",
+        LLAMA_NO_REPACK: "1",
         QUENBOT_ENABLE_REDIS: process.env.QUENBOT_ENABLE_REDIS || "1",
         QUENBOT_REDIS_URL: process.env.QUENBOT_REDIS_URL || "redis://127.0.0.1:6379/0",
         QUENBOT_VECTOR_DB_PATH: process.env.QUENBOT_VECTOR_DB_PATH || "./.chroma",
