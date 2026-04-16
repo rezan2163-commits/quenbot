@@ -159,25 +159,6 @@ async function readJsonFileOrNull(filePath: string) {
   }
 }
 
-// Timeout wrapper for integration queries
-async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T, label?: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const result = await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Integration query timeout: ${label || 'unknown'}`)), ms);
-      }),
-    ]);
-    clearTimeout(timer);
-    return result;
-  } catch (e: any) {
-    clearTimeout(timer);
-    if (label) console.warn(`[integration] ${label} timed out or failed:`, e?.message);
-    return fallback;
-  }
-}
-
 type SummaryCache = {
   total_trades: number;
   total_movements: number;
@@ -231,7 +212,7 @@ async function buildLocalChatFallback() {
       SELECT symbol
       FROM signals
       WHERE status IN ('pending', 'active', 'open')
-        AND COALESCE((metadata->>'target_pct')::double precision, 0) >= 0.02
+        AND COALESCE(target_pct, 0) >= 0.02
         AND LOWER(COALESCE(source, '')) IN ('strategist', 'pattern_matcher')
       ORDER BY timestamp DESC, confidence DESC
       LIMIT 3
@@ -2124,9 +2105,8 @@ app.get("/api/agents/flow", async (_req, res) => {
 
 app.get("/api/integration/overview", async (_req, res) => {
   try {
-    const INTEGRATION_QUERY_TIMEOUT = 8000; // 8 seconds per query
     const [heartbeats, recentSignals, sourcePerformance, learningStats, stateHistory, resourceHb, systemSummary, directives, efomOverview] = await Promise.all([
-      withTimeout(sql`
+      sql`
         SELECT
           agent_name,
           status,
@@ -2135,8 +2115,8 @@ app.get("/api/integration/overview", async (_req, res) => {
           EXTRACT(EPOCH FROM (NOW() - last_heartbeat))::double precision AS age_seconds
         FROM agent_heartbeat
         ORDER BY agent_name
-      `, INTEGRATION_QUERY_TIMEOUT, [], 'heartbeats'),
-      withTimeout(sql`
+      `,
+      sql`
         SELECT
           id,
           symbol,
@@ -2152,8 +2132,8 @@ app.get("/api/integration/overview", async (_req, res) => {
         WHERE timestamp >= NOW() - INTERVAL '24 hours'
         ORDER BY timestamp DESC
         LIMIT 24
-      `, INTEGRATION_QUERY_TIMEOUT, [], 'recentSignals'),
-      withTimeout(sql`
+      `,
+      sql`
         SELECT
           COALESCE(s.metadata->>'source', s.metadata->>'signal_provider', 'unknown') AS source,
           COALESCE(s.metadata->>'source_model', 'unknown') AS source_model,
@@ -2170,8 +2150,8 @@ app.get("/api/integration/overview", async (_req, res) => {
         GROUP BY 1, 2
         ORDER BY total_signals DESC, avg_pnl_pct DESC
         LIMIT 12
-      `, INTEGRATION_QUERY_TIMEOUT, [], 'sourcePerformance'),
-      withTimeout(sql`
+      `,
+      sql`
         SELECT
           exchange,
           market_type,
@@ -2183,15 +2163,15 @@ app.get("/api/integration/overview", async (_req, res) => {
         WHERE timestamp >= NOW() - INTERVAL '24 hours'
         GROUP BY exchange, market_type
         ORDER BY exchange, market_type
-      `, INTEGRATION_QUERY_TIMEOUT, [], 'learningStats'),
-      withTimeout(sql`
+      `,
+      sql`
         SELECT
           COUNT(*)::int AS total,
           COUNT(CASE WHEN was_correct THEN 1 END)::int AS correct,
           COALESCE(AVG(pnl_pct), 0)::double precision AS avg_pnl
         FROM brain_learning_log
-      `, INTEGRATION_QUERY_TIMEOUT, [{ total: 0, correct: 0, avg_pnl: 0 }], 'brainLearning'),
-      withTimeout(sql`
+      `,
+      sql`
         SELECT
           timestamp,
           mode,
@@ -2203,25 +2183,25 @@ app.get("/api/integration/overview", async (_req, res) => {
         WHERE timestamp >= NOW() - INTERVAL '24 hours'
         ORDER BY timestamp ASC
         LIMIT 96
-      `, INTEGRATION_QUERY_TIMEOUT, [], 'stateHistory'),
-      withTimeout(sql`SELECT metadata FROM agent_heartbeat WHERE agent_name = 'system_resources' LIMIT 1`, INTEGRATION_QUERY_TIMEOUT, [], 'resourceHb'),
-      withTimeout(fetchJsonOrNull(`${DIRECTIVE_API}/api/system/summary`), INTEGRATION_QUERY_TIMEOUT, null, 'systemSummary'),
-      withTimeout(fetchJsonOrNull(`${DIRECTIVE_API}/api/directives`), INTEGRATION_QUERY_TIMEOUT, null, 'directives'),
-      withTimeout(readJsonFileOrNull(path.join(EFOM_REPORTS_DIR, "post_mortem_report.json")).then(async (postMortem) => {
+      `,
+      sql`SELECT metadata FROM agent_heartbeat WHERE agent_name = 'system_resources' LIMIT 1`,
+      fetchJsonOrNull(`${DIRECTIVE_API}/api/system/summary`),
+      fetchJsonOrNull(`${DIRECTIVE_API}/api/directives`),
+      readJsonFileOrNull(path.join(EFOM_REPORTS_DIR, "post_mortem_report.json")).then(async (postMortem) => {
         const trials = await readJsonFileOrNull(path.join(EFOM_REPORTS_DIR, "optuna_trials.json"));
         return {
           post_mortem: postMortem,
           optuna_trials: Array.isArray(trials) ? trials : [],
         };
-      }), INTEGRATION_QUERY_TIMEOUT, { post_mortem: null, optuna_trials: [] }, 'efomOverview'),
+      }),
     ]);
 
     // Separate query for fallback data (decision_core, brain, efom, system heartbeats)
-    const fallbackRows = await withTimeout(sql`
+    const fallbackRows = await sql`
       SELECT agent_name, metadata 
       FROM agent_heartbeat 
       WHERE agent_name IN ('decision_core', 'brain', 'efom', 'system')
-    `, INTEGRATION_QUERY_TIMEOUT, [], 'fallbackRows');
+    `;
     const fallbackData: Record<string, any> = {};
     for (const row of fallbackRows) {
       const meta = typeof row.metadata === "string" ? JSON.parse(row.metadata) : (row.metadata || {});

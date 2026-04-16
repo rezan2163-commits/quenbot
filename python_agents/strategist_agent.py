@@ -298,7 +298,9 @@ class StrategistAgent:
         if quality < self._min_quality_score:
             return False
 
-        key = f"{symbol}:{market_type}"
+        # Kilit symbol seviyesinde — aynı coin için spot/futures veya farklı borsalar
+        # ayrı ayrı sinyal yaratmasın, tek bir havuzda yarışsın.
+        key = symbol.upper()
         now = time.time()
         last = self._last_signal_emit.get(key, 0.0)
         if now - last < self._signal_cooldown_seconds:
@@ -308,6 +310,22 @@ class StrategistAgent:
         if self._last_signal_window.get(key) == window_id:
             return False
 
+        # Günlük sinyal limiti (symbol bazında, market_type'tan bağımsız)
+        one_day_ago = now - 86400
+        timestamps = [
+            ts for ts in self._daily_signal_timestamps.get(key, [])
+            if ts > one_day_ago
+        ]
+        if len(timestamps) >= self._max_daily_signals_per_symbol:
+            logger.info(
+                f"🚫 Daily signal limit (strategist): {key} "
+                f"{len(timestamps)}/{self._max_daily_signals_per_symbol} bugün"
+            )
+            self._daily_signal_timestamps[key] = timestamps
+            return False
+
+        timestamps.append(now)
+        self._daily_signal_timestamps[key] = timestamps
         self._last_signal_emit[key] = now
         self._last_signal_window[key] = window_id
         return True

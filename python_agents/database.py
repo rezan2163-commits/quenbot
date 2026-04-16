@@ -2,6 +2,7 @@ import asyncpg
 import json
 import logging
 import numpy as np
+import os
 from datetime import datetime, timedelta, date, timezone
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
@@ -13,6 +14,12 @@ TARGET_CARD_MIN_CONFIDENCE = float(Config.get_env('QUENBOT_TARGET_CARD_MIN_CONF'
 TARGET_CARD_MIN_QUALITY = float(Config.get_env('QUENBOT_TARGET_CARD_MIN_QUALITY', 0.68)) if hasattr(Config, 'get_env') else float(__import__('os').getenv('QUENBOT_TARGET_CARD_MIN_QUALITY', '0.68'))
 MAMIS_TARGET_CARD_MIN_CONFIDENCE = float(Config.get_env('QUENBOT_MAMIS_TARGET_CARD_MIN_CONF', 0.72)) if hasattr(Config, 'get_env') else float(__import__('os').getenv('QUENBOT_MAMIS_TARGET_CARD_MIN_CONF', '0.72'))
 MAMIS_TARGET_CARD_MIN_VOLATILITY = float(Config.get_env('QUENBOT_MAMIS_TARGET_CARD_MIN_VOLATILITY', 0.0035)) if hasattr(Config, 'get_env') else float(__import__('os').getenv('QUENBOT_MAMIS_TARGET_CARD_MIN_VOLATILITY', '0.0035'))
+
+# Authoritative per-symbol signal gating at DB layer: prevents multiple signal
+# sources (strategist / pattern_matcher / mamis) and different market_types
+# (spot/futures / binance/bybit) from bypassing the per-coin budget.
+SIGNAL_MAX_DAILY_PER_SYMBOL = int(os.getenv('QUENBOT_MAX_DAILY_SIGNALS_PER_SYMBOL', '4'))
+SIGNAL_BURST_LOCKOUT_SECONDS = int(os.getenv('QUENBOT_SIGNAL_BURST_LOCKOUT_SECONDS', '600'))  # 10 min
 
 
 def _json_serial(obj):
@@ -769,6 +776,44 @@ class Database:
         metadata['expires_at'] = str(metadata.get('expires_at') or _utc_isoformat(expires_at))
 
         async with self.pool.acquire() as conn:
+            # ─── Authoritative per-symbol gating (cross-source, cross-market) ───
+            # Aynı coin için son 10 dk içinde bir sinyal varsa yeni sinyali reddet.
+            # Son 24 saatte QUENBOT_MAX_DAILY_SIGNALS_PER_SYMBOL (4) sinyal varsa reddet.
+            # Bu kontrol strategist/pattern_matcher/mamis + spot/futures + binance/bybit
+            # kombinasyonlarının ayrı ayrı limit kullanmasını engeller.
+            try:
+                gate_row = await conn.fetchrow(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE timestamp >= NOW() - INTERVAL '24 hours'
+                        )::int AS daily_count,
+                        MAX(timestamp) FILTER (
+                            WHERE timestamp >= NOW() - ($2 || ' seconds')::interval
+                        ) AS last_recent
+                    FROM signals
+                    WHERE UPPER(symbol) = UPPER($1)
+                    """,
+                    symbol, str(SIGNAL_BURST_LOCKOUT_SECONDS),
+                )
+                daily_count = int(gate_row['daily_count'] or 0) if gate_row else 0
+                last_recent = gate_row['last_recent'] if gate_row else None
+                if last_recent is not None:
+                    logger.info(
+                        f"🚫 Signal burst lockout: {symbol} son {SIGNAL_BURST_LOCKOUT_SECONDS}s "
+                        f"içinde sinyal var (son={last_recent}); yeni sinyal reddedildi."
+                    )
+                    return None
+                if daily_count >= SIGNAL_MAX_DAILY_PER_SYMBOL:
+                    logger.info(
+                        f"🚫 Daily signal cap: {symbol} "
+                        f"{daily_count}/{SIGNAL_MAX_DAILY_PER_SYMBOL} — 24 saatlik limit doldu."
+                    )
+                    return None
+            except Exception as _gate_err:
+                # Gate hatası sinyal akışını bloklamasın; sadece logla.
+                logger.debug(f"Signal gate check skipped: {_gate_err}")
+
             learning_profile = await self._get_symbol_learning_profile_conn(conn, symbol)
             if int(learning_profile.get('total', 0) or 0) > 0:
                 metadata['learning_profile'] = learning_profile
