@@ -53,33 +53,35 @@ module.exports = {
         DB_NAME: "trade_intel",
         OLLAMA_NUM_PARALLEL: "1",
         OLLAMA_MAX_LOADED_MODELS: "1",
-        QUENBOT_LLM_MODEL: "gemma-3-12b-it",
+        // Aktif beyin modeli: Qwen2.5-7B-Instruct Q4_K_M GGUF.
+        // Gemma-3 12B Q4 llama-cpp-python 0.3.20 ile native segfault/assert
+        // atiyordu (thread race + CPU repack). Qwen2.5-7B hem daha stabil hem
+        // ~2x hizli (CPU'da 8-15s turn). Gemma GGUF diskte saklaniyor;
+        // QUENBOT_GGUF_MODEL_FILE env ile geri donebilirsin.
+        QUENBOT_LLM_MODEL: "qwen2.5-7b-instruct",
         QUENBOT_LLM_NUM_CTX: "8192",
         QUENBOT_LLM_MAX_TOKENS: "512",
-        QUENBOT_LLM_NUM_THREAD: "6",
-        QUENBOT_CHAT_MODEL: "gemma-3-12b-it",
-        QUENBOT_DECISION_MODEL: "gemma-3-12b-it",
-        // Chat speed tuning — 12B Q4 CPU inference realistik 15-35s.
-        // Budget genis tutulur ama prompt/context kisaltilir; kullanici
-        // ikinci mesajdan itibaren KV cache ile daha hizli yanit alir.
-        QUENBOT_CHAT_LLM_TIMEOUT: "45",
-        QUENBOT_CHAT_FULL_TIMEOUT: "45",
-        QUENBOT_CHAT_QUICK_TIMEOUT: "25",
-        QUENBOT_CHAT_MAX_TOTAL_LATENCY: "45",
-        QUENBOT_CHAT_CONTEXT_CHARS: "900",
-        QUENBOT_CHAT_FULL_MAX_TOKENS: "180",
-        QUENBOT_CHAT_QUICK_MAX_TOKENS: "100",
+        QUENBOT_LLM_NUM_THREAD: "8",
+        QUENBOT_CHAT_MODEL: "qwen2.5-7b-instruct",
+        QUENBOT_DECISION_MODEL: "qwen2.5-7b-instruct",
+        // Chat speed tuning — 7B Q4 CPU'da daha hizli, budget daraltilabilir.
+        QUENBOT_CHAT_LLM_TIMEOUT: "35",
+        QUENBOT_CHAT_FULL_TIMEOUT: "35",
+        QUENBOT_CHAT_QUICK_TIMEOUT: "20",
+        QUENBOT_CHAT_MAX_TOTAL_LATENCY: "35",
+        QUENBOT_CHAT_CONTEXT_CHARS: "1200",
+        QUENBOT_CHAT_FULL_MAX_TOKENS: "220",
+        QUENBOT_CHAT_QUICK_MAX_TOKENS: "120",
         QUENBOT_GGUF_MODEL_DIR: process.env.QUENBOT_GGUF_MODEL_DIR || "/root/models",
-        QUENBOT_GGUF_MODEL_FILE: process.env.QUENBOT_GGUF_MODEL_FILE || "gemma-3-12b-it-Q4_K_M.gguf",
-        QUENBOT_GGUF_NUM_THREADS: "6",
+        QUENBOT_GGUF_MODEL_FILE: process.env.QUENBOT_GGUF_MODEL_FILE || "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+        QUENBOT_GGUF_NUM_THREADS: "8",
         QUENBOT_GGUF_NUM_CTX: "8192",
         QUENBOT_GGUF_MAX_TOKENS: "512",
         QUENBOT_GGUF_BATCH_SIZE: "512",
         QUENBOT_GGUF_UBATCH_SIZE: "512",
-        // llama-cpp-python 0.3.20 + Gemma 3 12B Q4_K_M ile CPU repack
-        // optimizasyonu native assertion fail atiyor (repack.cpp:4238 ve
-        // ops.cpp:4938). Bu env var'lar llama.cpp'in ilgili hizli yollarini
-        // devre disi birakir; inference biraz yavaslar ama stabil olur.
+        // Qwen2.5 standart transformer — repack disable gerekmiyor, ama
+        // guvenlik adina birakiyoruz (hicbir negatif etkisi yok, sadece
+        // opsiyonel CPU optimizasyonunu atlar).
         GGML_CPU_NO_REPACK: "1",
         LLAMA_NO_REPACK: "1",
         QUENBOT_ENABLE_REDIS: process.env.QUENBOT_ENABLE_REDIS || "1",
