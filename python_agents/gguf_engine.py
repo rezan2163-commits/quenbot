@@ -44,6 +44,13 @@ GGUF_CONCURRENCY = int(os.getenv("QUENBOT_GGUF_CONCURRENCY", "1"))
 GGUF_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_GGUF_MAX_PROMPT_CHARS", "4500"))
 GGUF_TIMEOUT = int(os.getenv("QUENBOT_GGUF_TIMEOUT", "25"))  # 12B Q4 tek model: hızlı
 
+# HTTP server mode (llama-server standalone). Set QUENBOT_LLM_SERVER_URL
+# (ornegin "http://127.0.0.1:8099") to route inference through llama-server
+# instead of loading the model in-process. llama-cpp-python Python'unda
+# Zen4 CPU'larinda segfault oluyordu; standalone binary stabil.
+GGUF_SERVER_URL = os.getenv("QUENBOT_LLM_SERVER_URL", "").rstrip("/")
+GGUF_SERVER_MODEL_ALIAS = os.getenv("QUENBOT_LLM_SERVER_MODEL", "default")
+
 # Fallback GGUF model names (in order of preference)
 GGUF_MODEL_CANDIDATES = [
     "gemma-3-12b-it-Q4_K_M.gguf",  # Gemma 3 12B - Hızlı + Akıllı (ÖNCELİKLİ)
@@ -147,8 +154,30 @@ class GGUFEngine:
         Model'i belleğe yükle. İlk çağrıda bir kez çalışır.
         32GB RAM'de Q4_K_M ~16GB kullanır.
         """
-        if self._initialized and self._model is not None:
+        if self._initialized and (self._model is not None or GGUF_SERVER_URL):
             return True
+
+        # HTTP server mode: modeli yuklemiyoruz, sadece sagliga bakiyoruz.
+        if GGUF_SERVER_URL:
+            async with self._lock:
+                if self._initialized:
+                    return True
+                try:
+                    import aiohttp
+                    timeout = aiohttp.ClientTimeout(total=5)
+                    async with aiohttp.ClientSession(timeout=timeout) as sess:
+                        async with sess.get(f"{GGUF_SERVER_URL}/health") as resp:
+                            if resp.status != 200:
+                                logger.error("llama-server health != 200: %d", resp.status)
+                                return False
+                    self._model_name = GGUF_SERVER_MODEL_ALIAS
+                    self._model_path = GGUF_SERVER_URL
+                    self._initialized = True
+                    logger.info("✅ LLM HTTP mode aktif: %s", GGUF_SERVER_URL)
+                    return True
+                except Exception as e:
+                    logger.error("llama-server erisilemiyor (%s): %s", GGUF_SERVER_URL, e)
+                    return False
 
         async with self._lock:
             if self._initialized and self._model is not None:
@@ -335,6 +364,12 @@ class GGUFEngine:
         effective_max_tokens = max_tokens or GGUF_MAX_TOKENS
         effective_timeout = timeout_override or GGUF_TIMEOUT
 
+        if GGUF_SERVER_URL:
+            return await self._http_generate(
+                prompt, system, temperature, json_mode,
+                effective_max_tokens, effective_timeout,
+            )
+
         t0 = time.monotonic()
         try:
             loop = asyncio.get_event_loop()
@@ -383,6 +418,91 @@ class GGUFEngine:
                 text="", model=self._model_name,
                 total_duration_ms=elapsed_ms,
                 success=False, error=str(e)
+            )
+
+    async def _http_generate(
+        self,
+        prompt: str,
+        system: Optional[str],
+        temperature: float,
+        json_mode: bool,
+        max_tokens: int,
+        timeout_s: int,
+    ) -> GGUFResponse:
+        """llama-server HTTP mode: OpenAI-compatible /v1/chat/completions."""
+        import aiohttp
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": GGUF_SERVER_MODEL_ALIAS,
+            "messages": messages,
+            "temperature": float(temperature),
+            "max_tokens": int(max_tokens),
+            "top_p": 0.85,
+            "stream": False,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
+        t0 = time.monotonic()
+        try:
+            timeout = aiohttp.ClientTimeout(total=timeout_s)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(
+                    f"{GGUF_SERVER_URL}/v1/chat/completions",
+                    json=payload,
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        elapsed_ms = (time.monotonic() - t0) * 1000
+                        self._total_errors += 1
+                        return GGUFResponse(
+                            text="", model=self._model_name,
+                            total_duration_ms=elapsed_ms,
+                            success=False,
+                            error=f"HTTP {resp.status}: {body[:200]}",
+                        )
+                    data = await resp.json()
+
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            self._total_calls += 1
+            self._total_latency_ms += elapsed_ms
+
+            choices = data.get("choices") or []
+            text = ""
+            if choices:
+                msg = choices[0].get("message") or {}
+                text = msg.get("content") or ""
+            usage = data.get("usage") or {}
+            return GGUFResponse(
+                text=text,
+                model=self._model_name,
+                total_duration_ms=elapsed_ms,
+                prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+                completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+                success=True,
+            )
+        except asyncio.TimeoutError:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            self._total_errors += 1
+            logger.warning("llama-server timeout: %.0fms (limit: %ds)", elapsed_ms, timeout_s)
+            return GGUFResponse(
+                text="", model=self._model_name,
+                total_duration_ms=elapsed_ms,
+                success=False, error=f"Timeout after {timeout_s}s",
+            )
+        except Exception as e:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            self._total_errors += 1
+            logger.error("llama-server error: %s (%.0fms)", e, elapsed_ms)
+            return GGUFResponse(
+                text="", model=self._model_name,
+                total_duration_ms=elapsed_ms,
+                success=False, error=str(e),
             )
 
     def _sync_generate(

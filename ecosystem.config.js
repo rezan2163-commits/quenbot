@@ -6,6 +6,39 @@ const quenbotTimeZone = process.env.QUENBOT_TIMEZONE || "Europe/Vienna";
 module.exports = {
   apps: [
     {
+      name: "quenbot-llama-server",
+      cwd: "/root",
+      script: "/root/llama.cpp/build/bin/llama-server",
+      args: [
+        "--host", "127.0.0.1",
+        "--port", "8099",
+        "--model", "/root/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+        "--alias", "qwen2.5-7b",
+        "--ctx-size", "4096",
+        "--threads", "6",
+        "--parallel", "1",
+        "--jinja",
+        "-ngl", "0",
+        "--no-webui",
+      ].join(" "),
+      interpreter: "none",
+      env: {
+        TZ: quenbotTimeZone,
+      },
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      min_uptime: "60s",
+      restart_delay: 5000,
+      exp_backoff_restart_delay: 500,
+      kill_timeout: 10000,
+      max_memory_restart: "12G",
+      error_file: "./logs/llama-server-error.log",
+      out_file: "./logs/llama-server-out.log",
+      merge_logs: true,
+      log_date_format: "YYYY-MM-DD HH:mm:ss",
+    },
+    {
       name: "quenbot-api",
       cwd: "./artifacts/api-server",
       script: "npx",
@@ -74,6 +107,10 @@ module.exports = {
         QUENBOT_CHAT_QUICK_MAX_TOKENS: "120",
         QUENBOT_GGUF_MODEL_DIR: process.env.QUENBOT_GGUF_MODEL_DIR || "/root/models",
         QUENBOT_GGUF_MODEL_FILE: process.env.QUENBOT_GGUF_MODEL_FILE || "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+        // HTTP mode: llama-server standalone binary'yi kullan, Python
+        // wrapper'daki Zen4 segfault'u bypass et.
+        QUENBOT_LLM_SERVER_URL: process.env.QUENBOT_LLM_SERVER_URL || "http://127.0.0.1:8099",
+        QUENBOT_LLM_SERVER_MODEL: process.env.QUENBOT_LLM_SERVER_MODEL || "qwen2.5-7b",
         // Zen4 CPU'da libggml-cpu.so thread race segfault atiyor (hem 0.3.20
         // hem 0.3.2'de). Tek cozum: single-thread inference + OMP kapali.
         // 7B Q4 modelde inference yine 15-25s — kabul edilebilir.
