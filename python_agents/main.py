@@ -706,6 +706,9 @@ class AgentOrchestrator:
 
         # Cold-start meta-labeler fit in background (no-op if insufficient samples)
         asyncio.create_task(self._refit_meta_labeler())
+        # Periodic retrain every 10 minutes so the labeler leaves "pending"
+        # as soon as enough history accumulates.
+        asyncio.create_task(self._meta_labeler_trainer_loop())
 
     async def _warmup_llm(self):
         """Prime the active model to reduce first-response latency for chat."""
@@ -1728,7 +1731,9 @@ class AgentOrchestrator:
                     'hist_accuracy': 0.5,
                     'hist_avg_pnl': 0.0,
                 }
-                label = 1 if str(r.get('barrier_hit', '')) == 'tp' else 0
+                label = 1 if str(r.get('barrier_hit', '')) == 'tp' else (
+                    1 if r.get('barrier_hit') is None and bool(r.get('was_correct')) else 0
+                )
                 samples.append((fv, label))
             res = self.meta_labeler.fit(samples)
             await self.event_bus.publish(Event(
@@ -1737,6 +1742,17 @@ class AgentOrchestrator:
             logger.info(f"🧪 Meta-labeler refit: {res}")
         except Exception as e:
             logger.debug(f"meta refit skipped: {e}")
+
+    async def _meta_labeler_trainer_loop(self) -> None:
+        """Her 10 dakikada bir meta-labeler'ı yeniden dene."""
+        while self.running:
+            try:
+                await asyncio.sleep(600)
+                await self._refit_meta_labeler()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"meta trainer loop: {e}")
 
 
     async def _chat_processor(self):

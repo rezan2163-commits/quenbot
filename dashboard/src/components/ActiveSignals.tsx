@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { clearSignals, dismissSignal, useSignals } from "@/lib/api";
+import { clearSignals, dismissSignal, useSignals, useSignalOutcomes } from "@/lib/api";
 import { ArrowUpCircle, ArrowDownCircle, Clock3, Target, BadgeInfo, BrainCircuit, Building2, Trash2, X, CheckCircle2, XCircle, Timer, Activity, TrendingUp, Layers } from "lucide-react";
 import { formatInQuenbotTimeZone, parseQuenbotDate, toTimestampMs } from "@/lib/time";
 
@@ -81,6 +81,7 @@ function resolvePrimaryTarget(signal: any) {
 
 export default function ActiveSignals() {
   const { data: signals, mutate } = useSignals();
+  const { data: outcomes } = useSignalOutcomes();
   const [busy, setBusy] = useState<number[]>([]);
   const [bulkBusy, setBulkBusy] = useState(false);
   // Server-side filter (isActionableTargetCard) already enforces:
@@ -144,6 +145,49 @@ export default function ActiveSignals() {
           <span className="text-[10px] text-emerald-300/90 border border-emerald-400/20 bg-emerald-400/10 rounded-full px-2 py-1">{active.length} canlı kart</span>
         </div>
       </div>
+
+      {/* ── 📊 SONUÇ PANELİ — son 48 saatte kapanan sinyaller ── */}
+      {(() => {
+        const list = outcomes || [];
+        if (!list.length) return null;
+        let wins = 0, losses = 0, totalPnl = 0;
+        for (const o of list) {
+          const hzns = Array.isArray(o?.metadata?.target_horizons) ? o.metadata.target_horizons : [];
+          const hit = hzns.some((h: any) => h?.status === 'hit');
+          const missed = hzns.length > 0 && hzns.every((h: any) => ['missed', 'expired'].includes(String(h?.status)));
+          if (hit) wins++; else if (missed) losses++;
+          const primary = hzns[0];
+          const change = toNumber(primary?.actual_change_pct, 0);
+          totalPnl += change;
+        }
+        const total = wins + losses;
+        const winRate = total > 0 ? (wins / total) * 100 : 0;
+        const avgPnl = list.length ? (totalPnl / list.length) * 100 : 0;
+        return (
+          <div className="border-b border-surface-border/50 px-3 py-2 bg-black/20">
+            <div className="grid grid-cols-4 gap-2 text-[10px]">
+              <div className="rounded-md bg-emerald-400/10 border border-emerald-400/20 px-2 py-1">
+                <div className="text-[9px] text-emerald-300/80">Kazanan</div>
+                <div className="text-emerald-200 font-bold text-[12px]">{wins}</div>
+              </div>
+              <div className="rounded-md bg-rose-400/10 border border-rose-400/20 px-2 py-1">
+                <div className="text-[9px] text-rose-300/80">Kaybeden</div>
+                <div className="text-rose-200 font-bold text-[12px]">{losses}</div>
+              </div>
+              <div className="rounded-md bg-amber-400/10 border border-amber-400/20 px-2 py-1">
+                <div className="text-[9px] text-amber-300/80">Başarı %</div>
+                <div className="text-amber-200 font-bold text-[12px]">%{winRate.toFixed(0)}</div>
+              </div>
+              <div className={`rounded-md border px-2 py-1 ${avgPnl >= 0 ? 'bg-emerald-400/10 border-emerald-400/20' : 'bg-rose-400/10 border-rose-400/20'}`}>
+                <div className="text-[9px] text-gray-400">Ort. PnL</div>
+                <div className={`font-bold text-[12px] ${avgPnl >= 0 ? 'text-emerald-200' : 'text-rose-200'}`}>
+                  {avgPnl >= 0 ? '+' : ''}{avgPnl.toFixed(2)}%
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="border-b border-surface-border/50 px-3 py-2">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-500">Hareket Beklenen Coinler</div>
@@ -370,6 +414,67 @@ export default function ActiveSignals() {
                       </div>
                     </div>
                   )}
+
+                  {/* ── 🧬 ENHANCED INTELLIGENCE (meta-labeler + bandit + conformal + microstructure) ── */}
+                  {(() => {
+                    const metaL = meta.meta_labeler || null;
+                    const banditEv = toNumber(meta.bandit_ev, NaN);
+                    const cband = meta.confidence_band || null;
+                    const feats = meta.entry_features || {};
+                    const ms = feats.microstructure || {};
+                    const reg = feats.regime || {};
+                    const fp = feats.fingerprint || {};
+                    const obi = toNumber(ms.obi, NaN);
+                    const vpin = toNumber(ms.vpin, NaN);
+                    const regLabel = reg.label || reg.state_label || null;
+                    const fpScore = toNumber(fp.fingerprint_score, NaN);
+                    const hasAny = metaL || Number.isFinite(banditEv) || cband || Number.isFinite(obi) || Number.isFinite(vpin) || regLabel || Number.isFinite(fpScore);
+                    if (!hasAny) return null;
+                    return (
+                      <div className="mb-2 rounded-lg bg-gradient-to-br from-indigo-500/8 to-violet-500/8 border border-indigo-400/20 px-2 py-1.5">
+                        <div className="text-[9px] font-semibold text-indigo-300 uppercase tracking-wider mb-1 flex items-center gap-1">
+                          <BrainCircuit size={10} /> Gelişmiş Zeka
+                        </div>
+                        <div className="flex flex-wrap gap-1 text-[9px]">
+                          {metaL && Number.isFinite(toNumber(metaL.proba, NaN)) && (
+                            <span className={`px-1.5 py-0.5 rounded-full border ${metaL.accept ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200' : 'border-amber-400/30 bg-amber-400/10 text-amber-200'}`}>
+                              Meta: %{(toNumber(metaL.proba) * 100).toFixed(0)}{metaL.version ? ` v${metaL.version}` : ''}
+                            </span>
+                          )}
+                          {Number.isFinite(banditEv) && (
+                            <span className="px-1.5 py-0.5 rounded-full border border-cyan-400/30 bg-cyan-400/10 text-cyan-200">
+                              Bandit EV: {banditEv.toFixed(3)}
+                            </span>
+                          )}
+                          {cband && (
+                            <span className="px-1.5 py-0.5 rounded-full border border-violet-400/30 bg-violet-400/10 text-violet-200">
+                              Güven bandı: {toNumber(cband.lo).toFixed(2)}–{toNumber(cband.hi).toFixed(2)}
+                            </span>
+                          )}
+                          {Number.isFinite(obi) && (
+                            <span className={`px-1.5 py-0.5 rounded-full border ${obi >= 0 ? 'border-emerald-400/25 bg-emerald-400/8 text-emerald-200' : 'border-rose-400/25 bg-rose-400/8 text-rose-200'}`}>
+                              OBI {obi >= 0 ? '+' : ''}{obi.toFixed(2)}
+                            </span>
+                          )}
+                          {Number.isFinite(vpin) && (
+                            <span className={`px-1.5 py-0.5 rounded-full border ${vpin >= 0.7 ? 'border-rose-400/30 bg-rose-400/10 text-rose-200' : 'border-white/10 bg-white/5 text-gray-300'}`}>
+                              VPIN {vpin.toFixed(2)}
+                            </span>
+                          )}
+                          {regLabel && (
+                            <span className="px-1.5 py-0.5 rounded-full border border-sky-400/25 bg-sky-400/10 text-sky-200">
+                              Rejim: {String(regLabel)}
+                            </span>
+                          )}
+                          {Number.isFinite(fpScore) && fpScore > 0.3 && (
+                            <span className="px-1.5 py-0.5 rounded-full border border-fuchsia-400/30 bg-fuchsia-400/10 text-fuchsia-200">
+                              İzbırakma: {(fpScore * 100).toFixed(0)}%
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* ── 📊 ANALİZ BİLGİLERİ ── */}
                   <div className="grid grid-cols-2 gap-1 mb-2 text-[9px]">

@@ -371,10 +371,14 @@ class StrategistAgent:
                 confidence=confidence,
                 data_density=density,
             )
-        selected_horizon = max(target_horizons, key=lambda item: int(item.get('eta_minutes', 15) or 15)) if target_horizons else None
+        selected_horizon = min(target_horizons, key=lambda item: int(item.get('eta_minutes', 15) or 15)) if target_horizons else None
         effective_eta = int((selected_horizon or {}).get('eta_minutes', eta_minutes) or eta_minutes)
         target_price = float((selected_horizon or {}).get('target_price') or (safe_entry * (1.0 + safe_target_pct) if direction == 'long' else safe_entry * (1.0 - safe_target_pct)))
         safe_target_pct = float((selected_horizon or {}).get('target_pct') or safe_target_pct)
+        # ETA: volatilite yoğun ise daha hızlı, sakin ise daha uzun sürer.
+        # density ∈ [0,1] — yüksekse hedef ~15 dk, düşükse 60 dk'ya doğru kayar.
+        dynamic_eta = int(max(15, min(60, round(15 + (1.0 - float(density or 0.4)) * 45))))
+        estimated_eta = max(effective_eta, dynamic_eta) if effective_eta <= 60 else effective_eta
         ts = datetime.utcnow()
         # Ensure each horizon has initial 'active' status
         for h in target_horizons:
@@ -391,7 +395,7 @@ class StrategistAgent:
             'entry_price': safe_entry,
             'current_price_at_signal': safe_entry,
             'target_price': float(target_price),
-            'estimated_duration_to_target_minutes': int(max(15, effective_eta)),
+            'estimated_duration_to_target_minutes': int(max(15, estimated_eta)),
             'target_horizons': target_horizons,
             'selected_horizon': (selected_horizon or {}).get('label', '15m'),
             'data_density': density,

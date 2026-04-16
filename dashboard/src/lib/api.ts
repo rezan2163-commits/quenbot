@@ -375,6 +375,18 @@ export function useSignals() {
   });
 }
 
+export function useSignalOutcomes() {
+  return useSWR<any[]>(`${API}/api/signals/outcomes`, fetcher, {
+    refreshInterval: 20000,
+  });
+}
+
+export function useTopPatterns() {
+  return useSWR<any[]>(`${API}/api/signals/top-patterns`, fetcher, {
+    refreshInterval: 60000,
+  });
+}
+
 export async function dismissSignal(signalId: number) {
   const res = await fetch(`${API}/api/signals/${signalId}/dismiss`, {
     method: "POST",

@@ -104,6 +104,12 @@ function isActionableTargetCard(signal: any) {
 
   if (!['strategist', 'pattern_matcher'].includes(source)) return false;
 
+  // Meta-labeler advisory: only reject if explicitly untrusted
+  const meta = signal.metadata?.meta_labeler;
+  if (meta && typeof meta === 'object' && meta.accept === false && typeof meta.proba === 'number' && meta.proba < 0.45) {
+    return false;
+  }
+
   return explicitCandidate || (
     confidence >= TARGET_CARD_MIN_CONFIDENCE
     && quality >= TARGET_CARD_MIN_QUALITY
@@ -1298,6 +1304,61 @@ app.get("/api/brain/barrier-stats", async (_req, res) => {
         AND created_at > NOW() - INTERVAL '14 days'
       GROUP BY signal_type, barrier_hit
       ORDER BY signal_type, barrier_hit
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Son çözümlenen sinyal sonuçları — dashboard "Sonuç Paneli" için
+app.get("/api/signals/outcomes", async (_req, res) => {
+  try {
+    const rows = await sql`
+      SELECT id, symbol, signal_type,
+             COALESCE(metadata->>'direction', 'long') AS direction,
+             confidence::double precision AS confidence,
+             price::double precision AS entry_price,
+             COALESCE((metadata->>'target_price')::double precision, 0) AS target_price,
+             COALESCE((metadata->>'target_pct')::double precision, 0) AS target_pct,
+             status,
+             timestamp AS signal_time,
+             metadata
+      FROM signals
+      WHERE timestamp > NOW() - INTERVAL '48 hours'
+        AND COALESCE(metadata->>'source', metadata->>'signal_provider', 'unknown') IN ('strategist','pattern_matcher')
+        AND (status IN ('closed', 'expired', 'failed')
+             OR (metadata->'target_horizons' IS NOT NULL
+                 AND NOT EXISTS (
+                   SELECT 1 FROM jsonb_array_elements(metadata->'target_horizons') h
+                   WHERE COALESCE(h->>'status', 'active') = 'active'
+                 )))
+      ORDER BY timestamp DESC
+      LIMIT 100
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Kazanan/kaybeden imzalar — pattern hatırlama görünürlüğü
+app.get("/api/signals/top-patterns", async (_req, res) => {
+  try {
+    const rows = await sql`
+      SELECT signal_type,
+             COUNT(*)::int AS samples,
+             SUM(CASE WHEN was_correct THEN 1 ELSE 0 END)::int AS wins,
+             AVG(CASE WHEN was_correct THEN 1.0 ELSE 0.0 END)::double precision AS win_rate,
+             AVG(pnl_pct)::double precision AS avg_pnl,
+             AVG(confidence)::double precision AS avg_confidence
+      FROM brain_learning_log
+      WHERE created_at > NOW() - INTERVAL '21 days'
+        AND was_correct IS NOT NULL
+      GROUP BY signal_type
+      HAVING COUNT(*) >= 3
+      ORDER BY win_rate DESC, samples DESC
+      LIMIT 30
     `;
     res.json(rows);
   } catch (error) {

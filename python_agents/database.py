@@ -1397,7 +1397,9 @@ class Database:
             )
 
     async def fetch_meta_training_set(self, lookback_days: int = 21, limit: int = 2000) -> List[Dict[str, Any]]:
-        """Meta-labeler eğitimi için (features, label) çekimi."""
+        """Meta-labeler eğitimi için (features, label) çekimi.
+        Etiket önceliği: barrier_hit (tp/sl/timeout) → was_correct fallback.
+        """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -1405,7 +1407,7 @@ class Database:
                        was_correct, pnl_pct
                 FROM brain_learning_log
                 WHERE created_at > NOW() - ($1 || ' days')::interval
-                  AND barrier_hit IS NOT NULL
+                  AND (barrier_hit IS NOT NULL OR was_correct IS NOT NULL)
                 ORDER BY created_at DESC
                 LIMIT $2
                 """,
