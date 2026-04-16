@@ -2160,7 +2160,8 @@ class AgentOrchestrator:
                 limit = int(request.rel_url.query.get("limit", "200"))
             except Exception:
                 limit = 200
-            stats = self.event_bus.get_stats(recent_limit=limit)
+            include_spam = request.rel_url.query.get("include_spam", "0") in ("1", "true", "yes")
+            stats = self.event_bus.get_stats(recent_limit=limit, include_spam=include_spam)
             return web.json_response(stats)
 
         async def get_mamis_status(request):

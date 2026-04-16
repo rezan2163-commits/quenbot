@@ -106,8 +106,15 @@ class EventBus:
         self._subscribers: dict[str, list[Callable]] = {}
         self._mirrors: list[Callable[..., Coroutine]] = []
         self._history: list[dict] = []
+        self._significant_history: list[dict] = []
         self._max_history = max_history
         self._event_count = 0
+        # High-frequency event types that drown out terminal visibility.
+        # They still land in _history but are excluded from the default feed.
+        self._spam_types = {
+            "scout.order_book_update",
+            "scout.price_update",
+        }
 
     def _safe_preview(self, data: dict) -> dict:
         preview: dict[str, Any] = {}
@@ -147,16 +154,21 @@ class EventBus:
         self._event_count += 1
 
         # Store in history (ring buffer)
-        self._history.append({
+        entry = {
             "type": key,
             "source": event.source,
             "data_keys": list(event.data.keys()),
             "data_preview": self._safe_preview(event.data),
             "timestamp": event.timestamp,
             "priority": event.priority,
-        })
+        }
+        self._history.append(entry)
         if len(self._history) > self._max_history:
             self._history = self._history[-self._max_history:]
+        if key not in self._spam_types:
+            self._significant_history.append(entry)
+            if len(self._significant_history) > self._max_history:
+                self._significant_history = self._significant_history[-self._max_history:]
 
         handlers = self._subscribers.get(key, [])
         for handler in handlers:
@@ -171,16 +183,17 @@ class EventBus:
             except Exception as e:
                 logger.error(f"Event mirror error for {key}: {e}")
 
-    def get_stats(self, recent_limit: int = 200) -> dict:
+    def get_stats(self, recent_limit: int = 200, include_spam: bool = False) -> dict:
         try:
             limit = max(1, min(int(recent_limit), self._max_history))
         except Exception:
             limit = 200
+        source = self._history if include_spam else self._significant_history
         return {
             "total_events": self._event_count,
             "subscriber_count": sum(len(v) for v in self._subscribers.values()),
             "topics": {k: len(v) for k, v in self._subscribers.items() if v},
-            "recent_events": self._history[-limit:],
+            "recent_events": source[-limit:],
         }
 
 
