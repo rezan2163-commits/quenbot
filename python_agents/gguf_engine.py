@@ -221,8 +221,9 @@ class GGUFEngine:
             if "n_ubatch" in params:
                 kwargs["n_ubatch"] = GGUF_UBATCH_SIZE
             if "flash_attn" in params:
-                # Flash-attn genellikle Gemma 3'te daha kararlı ve hızlı.
-                kwargs["flash_attn"] = True
+                # Flash-attn CPU-only inference'ta kararsiz (Zen4 segfault).
+                # Qwen icin kapali tutuyoruz.
+                kwargs["flash_attn"] = False
         except Exception:
             pass
 
