@@ -61,7 +61,7 @@ module.exports = {
         QUENBOT_LLM_MODEL: "qwen2.5-7b-instruct",
         QUENBOT_LLM_NUM_CTX: "8192",
         QUENBOT_LLM_MAX_TOKENS: "512",
-        QUENBOT_LLM_NUM_THREAD: "1",
+        QUENBOT_LLM_NUM_THREAD: "6",
         QUENBOT_CHAT_MODEL: "qwen2.5-7b-instruct",
         QUENBOT_DECISION_MODEL: "qwen2.5-7b-instruct",
         // Chat speed tuning — 7B Q4 CPU'da daha hizli, budget daraltilabilir.
@@ -74,23 +74,16 @@ module.exports = {
         QUENBOT_CHAT_QUICK_MAX_TOKENS: "120",
         QUENBOT_GGUF_MODEL_DIR: process.env.QUENBOT_GGUF_MODEL_DIR || "/root/models",
         QUENBOT_GGUF_MODEL_FILE: process.env.QUENBOT_GGUF_MODEL_FILE || "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-        QUENBOT_GGUF_NUM_THREADS: "1",
+        QUENBOT_GGUF_NUM_THREADS: "6",
         QUENBOT_GGUF_NUM_CTX: "8192",
         QUENBOT_GGUF_MAX_TOKENS: "512",
         QUENBOT_GGUF_BATCH_SIZE: "512",
         QUENBOT_GGUF_UBATCH_SIZE: "512",
-        // Qwen2.5 standart transformer — repack disable gerekmiyor, ama
-        // guvenlik adina birakiyoruz (hicbir negatif etkisi yok, sadece
-        // opsiyonel CPU optimizasyonunu atlar).
-        GGML_CPU_NO_REPACK: "1",
-        LLAMA_NO_REPACK: "1",
-        // llama-cpp-python 0.3.20 libggml-cpu.so AMD EPYC Zen4'te multi-thread
-        // yolunda segfault atiyor (her modelde tekrar ediyor). OMP_NUM_THREADS=1
-        // ile pure-sequential yaparak thread race'i elemine ediyoruz. 7B Q4
-        // single-thread Zen4'te ~20-40s turn uretir; kararlilik birinci oncelik.
-        OMP_NUM_THREADS: "1",
-        OPENBLAS_NUM_THREADS: "1",
-        MKL_NUM_THREADS: "1",
+        // llama-cpp-python 0.3.2 (downgrade edildi): Zen4'te 0.3.20 libggml-cpu.so
+        // multi-thread yolunda segfault atiyordu. 0.3.2 stabil; thread'leri geri
+        // actik. Repack/OMP sinirlamalari kaldirildi cunku 0.3.2'de ilgili kodlar
+        // yok (repack.cpp:4238 assert path'i sonradan eklendi).
+        // Eger 0.3.2'de de segfault gorursek tek tek restore edebiliriz.
         QUENBOT_ENABLE_REDIS: process.env.QUENBOT_ENABLE_REDIS || "1",
         QUENBOT_REDIS_URL: process.env.QUENBOT_REDIS_URL || "redis://127.0.0.1:6379/0",
         QUENBOT_VECTOR_DB_PATH: process.env.QUENBOT_VECTOR_DB_PATH || "./.chroma",
