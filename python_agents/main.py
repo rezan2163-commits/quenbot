@@ -1524,6 +1524,21 @@ class AgentOrchestrator:
                     "uptime_seconds": int(time.time() - self._start_time),
                 })
 
+                # Keep learning_orchestrator heartbeat fresh so it doesn't appear stale
+                # between promote events (which are sparse by nature).
+                try:
+                    lw_state = await self.db.get_bot_state('learning_watchlist') or {}
+                    candidates = list(lw_state.get('candidates') or [])
+                    promoted = sum(1 for c in candidates if str(c.get('status', '')) == 'promote')
+                    await self.db.update_heartbeat('learning_orchestrator', 'running', {
+                        'role': 'watchlist_curation',
+                        'candidate_count': len(candidates),
+                        'promoted_count': promoted,
+                        'last_state_update': lw_state.get('updated_at'),
+                    })
+                except Exception as _lo_hb_err:
+                    logger.debug(f"learning_orchestrator heartbeat skipped: {_lo_hb_err}")
+
                 # ─── Resource monitoring ───
                 snap = self.resource_monitor.snapshot()
                 self._last_resource_snapshot = snap
