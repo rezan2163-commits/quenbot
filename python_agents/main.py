@@ -6,7 +6,7 @@ import json
 import time
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from dotenv import load_dotenv
 
@@ -46,6 +46,7 @@ from event_bus import get_event_bus, EventBus, Event, EventType
 from resource_monitor import ResourceMonitor
 from cleanup_module import CleanupModule
 from code_operator import get_code_operator
+from storage_manager import init_storage_manager, get_storage_manager
 from qwen_models import CommunicationLogEntry, DirectivePayload, decision_command_json_schema
 from redis_event_bus import get_redis_bridge
 from market_activity_tracker import get_market_tracker
@@ -102,6 +103,7 @@ class AgentOrchestrator:
         self.vector_store = get_vector_store()
         self.cleanup_module = CleanupModule()
         self.resource_monitor = ResourceMonitor()
+        self.storage_manager = None  # Akıllı depolama yöneticisi
         self.running = False
         self._agent_restart_counts: dict = {}
         self._last_signal_cleanup_ts = 0.0
@@ -361,6 +363,17 @@ class AgentOrchestrator:
             source="cleanup_module",
             data=cleanup_report,
         ))
+
+        # 5.7 StorageManager — Akıllı Veri Yönetimi ve 70GB Pruning
+        try:
+            self.storage_manager = await init_storage_manager(self.db.pool)
+            await self.storage_manager.start()
+            storage_status = self.storage_manager.get_status()
+            logger.info(f"📦 StorageManager initialized (threshold={storage_status['threshold_gb']}GB)")
+            startup_report["components"]["storage_manager"] = {"status": "ok", **storage_status}
+        except Exception as e:
+            logger.warning(f"⚠ StorageManager initialization failed: {e}")
+            startup_report["components"]["storage_manager"] = {"status": "degraded", "reason": str(e)}
 
         # 6. LLM — degraded mode if unavailable
         try:
@@ -1107,6 +1120,8 @@ class AgentOrchestrator:
                 await self.task_queue.stop()
             if self.code_operator:
                 await self.code_operator.stop()
+            if self.storage_manager:
+                await self.storage_manager.stop()
             if self.redis_bridge:
                 await self.redis_bridge.close()
             if self.llm_client:
@@ -2020,6 +2035,7 @@ class AgentOrchestrator:
                 "vector_memory": self.vector_store.get_stats(),
                 "redis": self.redis_bridge.get_stats() if self.redis_bridge else {},
                 "cleanup": self.cleanup_module.scan(),
+                "storage_manager": self.storage_manager.get_status() if self.storage_manager else {"enabled": False},
                 "pattern_matcher": {
                     "ok": pm.get("healthy", False),
                     "scans": pm.get("scan_count", 0),
@@ -2511,6 +2527,62 @@ class AgentOrchestrator:
                 return web.json_response({"live_cards": [], "recent_archive": [], "stats": {}, "error": str(e)})
 
         app.router.add_get("/api/target-cards", get_target_cards)
+
+        # ─── Storage Manager API endpoints ───
+        async def get_storage_status(request):
+            """StorageManager durumunu döndür."""
+            try:
+                if self.storage_manager:
+                    return web.json_response(self.storage_manager.get_status())
+                return web.json_response({"error": "StorageManager not initialized"}, status=503)
+            except Exception as e:
+                logger.error(f"Storage status endpoint error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        async def force_storage_prune(request):
+            """Manuel pruning tetikle."""
+            try:
+                if self.storage_manager:
+                    summary = await self.storage_manager.force_prune()
+                    return web.json_response(summary.to_dict())
+                return web.json_response({"error": "StorageManager not initialized"}, status=503)
+            except Exception as e:
+                logger.error(f"Force prune endpoint error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        async def get_history_summaries(request):
+            """Özetlenmiş geçmiş verileri döndür."""
+            try:
+                if self.storage_manager:
+                    table_name = request.query.get("table")
+                    symbol = request.query.get("symbol")
+                    limit = int(request.query.get("limit", "100"))
+                    summaries = await self.storage_manager.get_history_summaries(
+                        table_name=table_name,
+                        symbol=symbol,
+                        limit=limit,
+                    )
+                    return web.json_response({"summaries": summaries, "count": len(summaries)})
+                return web.json_response({"error": "StorageManager not initialized"}, status=503)
+            except Exception as e:
+                logger.error(f"History summaries endpoint error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        async def scan_storage(request):
+            """Disk kullanımını tara."""
+            try:
+                if self.storage_manager:
+                    metrics = await self.storage_manager.scan_storage()
+                    return web.json_response(metrics.to_dict())
+                return web.json_response({"error": "StorageManager not initialized"}, status=503)
+            except Exception as e:
+                logger.error(f"Storage scan endpoint error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        app.router.add_get("/api/storage/status", get_storage_status)
+        app.router.add_post("/api/storage/prune", force_storage_prune)
+        app.router.add_get("/api/storage/summaries", get_history_summaries)
+        app.router.add_get("/api/storage/scan", scan_storage)
 
         runner = web.AppRunner(app)
         await runner.setup()
