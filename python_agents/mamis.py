@@ -14,6 +14,7 @@ import numpy as np
 
 from agent_base import AgentBase
 from event_bus import Event, EventType, get_event_bus
+from systematic_trade_detector import get_systematic_detector
 
 logger = logging.getLogger("quenbot.mamis")
 
@@ -699,6 +700,18 @@ class MAMISOrchestrator:
 
         if tick.price <= 0 or tick.quantity <= 0 or not tick.symbol:
             return
+        
+        # Systematic Trade Detector'a da gönder
+        systematic_detector = get_systematic_detector()
+        systematic_detector.ingest_trade({
+            "symbol": tick.symbol,
+            "price": tick.price,
+            "quantity": tick.quantity,
+            "side": tick.side,
+            "timestamp": tick.timestamp,
+            "trade_id": tick.trade_id,
+        })
+        
         await self.sentinel.ingest_trade_tick(tick)
 
     async def _handle_book_event(self, event: Event):

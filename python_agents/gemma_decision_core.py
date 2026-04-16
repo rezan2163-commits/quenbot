@@ -33,6 +33,7 @@ from qwen_models import (
 )
 from vector_memory import get_vector_store
 from market_activity_tracker import get_market_tracker
+from systematic_trade_detector import get_systematic_detector, SystematicActivityReport
 
 logger = logging.getLogger(__name__)
 
@@ -138,9 +139,21 @@ SYNTHESIS_PROMPT_TEMPLATE = """## KARAR İSTEĞİ — {symbol} ({timeframe})
 - Piyasa Modu: {market_mode}
 - Aktif Sembol Sayısı: {active_symbol_count}
 
+### 🤖 SİSTEMATİK TİCARET ANALİZİ (Bot Detection)
+- Sistematik Trade Oranı: {systematic_trade_ratio:.1%}
+- Dominant Bot Tipi: {dominant_bot_type}
+- Bot Yön Tahmini: {bot_predicted_direction}
+- Bot Yön Güveni: {bot_direction_confidence:.1%}
+- Akümülasyon Skoru: {accumulation_score:+.2f} (pozitif=birikim, negatif=dağıtım)
+- Smart Money Flow: {smart_money_flow:+.2f}
+- Kurumsal vs Retail: {retail_vs_institutional:.1%} (yüksek=kurumsal)
+- Tahmini Fiyat Etkisi: {estimated_price_impact_bps:.1f} bps
+{bot_signatures_summary}
+
 ---
-Tüm verileri (özellikle imza eşleşmesi kanıtlarını) sentezle ve nihai kararını JSON formatında ver.
-Kararında "neden girdik" sorusuna imza eşleşmesi verilerinden yanıt ver."""
+Tüm verileri (özellikle imza eşleşmesi ve sistematik ticaret analizini) sentezle ve nihai kararını JSON formatında ver.
+Bot tespit verilerini kullanarak "büyük oyuncular ne yapıyor" sorusuna yanıt ver.
+Kararında "neden girdik" sorusuna imza eşleşmesi ve bot aktivite verilerinden yanıt ver."""
 
 
 class AdaptiveEngine:
@@ -574,6 +587,44 @@ class GemmaDecisionCore:
 
         return decision
 
+    def _get_systematic_context(self, symbol: str) -> Dict[str, Any]:
+        """Systematic Trade Detector'dan bot analiz verileri al."""
+        detector = get_systematic_detector()
+        report = detector.get_last_report(symbol)
+        
+        if report is None:
+            return {
+                'systematic_trade_ratio': 0.0,
+                'dominant_bot_type': 'tespit yok',
+                'bot_predicted_direction': 'neutral',
+                'bot_direction_confidence': 0.0,
+                'accumulation_score': 0.0,
+                'smart_money_flow': 0.0,
+                'retail_vs_institutional': 0.0,
+                'estimated_price_impact_bps': 0.0,
+                'bot_signatures_summary': '- Bot aktivitesi tespit edilemedi',
+            }
+        
+        # Bot imzalarından özet oluştur
+        signatures_summary = []
+        for sig in report.bot_signatures[:3]:  # En önemli 3 imza
+            signatures_summary.append(
+                f"- {sig.signature_type.upper()}: güven={sig.confidence:.0%}, "
+                f"yön={sig.direction_bias}, etki={sig.price_impact_bps:.1f}bps"
+            )
+        
+        return {
+            'systematic_trade_ratio': report.systematic_trade_ratio,
+            'dominant_bot_type': report.dominant_bot_type or 'belirsiz',
+            'bot_predicted_direction': report.predicted_price_direction,
+            'bot_direction_confidence': report.direction_confidence,
+            'accumulation_score': report.accumulation_score,
+            'smart_money_flow': report.smart_money_flow,
+            'retail_vs_institutional': report.retail_vs_institutional,
+            'estimated_price_impact_bps': report.estimated_price_impact_bps,
+            'bot_signatures_summary': '\n'.join(signatures_summary) if signatures_summary else '- Önemli bot imzası yok',
+        }
+
     def _build_context(self,
                        pattern_data: Dict,
                        scout_data: Optional[Dict],
@@ -671,6 +722,8 @@ class GemmaDecisionCore:
             'signature_top_similarity': pattern_data.get('signature_top_similarity', 0),
             'signature_direction': pattern_data.get('signature_direction', 'neutral'),
             'signature_provenance': pattern_data.get('signature_provenance', 'İmza eşleşmesi bulunamadı.'),
+            # Systematic Trade Detection (Bot Analysis)
+            **self._get_systematic_context(pattern_data.get('symbol', '')),
         }
 
     async def _gemma_evaluate(self, symbol: str, timeframe: str,
@@ -725,6 +778,13 @@ class GemmaDecisionCore:
         mamis_confidence = context.get('mamis_confidence', 0)
         direction_accuracy = context.get('direction_accuracy', 0)
         bot_mode = context.get('bot_mode', 'LEARNING')
+        
+        # Systematic Trade Detector verileri
+        systematic_ratio = context.get('systematic_trade_ratio', 0)
+        bot_direction = context.get('bot_predicted_direction', 'neutral')
+        bot_confidence = context.get('bot_direction_confidence', 0)
+        smart_money_flow = context.get('smart_money_flow', 0)
+        accumulation_score = context.get('accumulation_score', 0)
 
         # Kural tabanlı karar
         approved = True
@@ -759,6 +819,32 @@ class GemmaDecisionCore:
             approved = False
             reasons.append(f"MAMIS çelişkisi: {mamis_bias} vs {predicted_direction} (güven={mamis_confidence:.0%})")
 
+        # ─── Systematic Trade (Bot) Cross-validation ───
+        if systematic_ratio > 0.4 and bot_direction != 'neutral':
+            if bot_direction != predicted_direction and bot_confidence > 0.6:
+                approved = False
+                reasons.append(
+                    f"🤖 Bot aktivitesi zıt yönde: {bot_direction} vs {predicted_direction} "
+                    f"(güven={bot_confidence:.0%}, oran={systematic_ratio:.0%})"
+                )
+            elif bot_direction == predicted_direction and bot_confidence > 0.5:
+                # Bot yönü ile uyumlu — güveni artır (sonradan)
+                reasons.append(
+                    f"🤖 Bot aktivitesi destekliyor: {bot_direction} "
+                    f"(güven={bot_confidence:.0%}, smart_money={smart_money_flow:+.2f})"
+                )
+        
+        # ─── Smart Money Flow Gate ───
+        if abs(smart_money_flow) > 0.5:
+            if (smart_money_flow > 0 and predicted_direction == 'short') or \
+               (smart_money_flow < 0 and predicted_direction == 'long'):
+                if systematic_ratio > 0.3:
+                    approved = False
+                    reasons.append(
+                        f"💰 Smart money akışı zıt: flow={smart_money_flow:+.2f}, "
+                        f"önerilen={predicted_direction}"
+                    )
+
         # ─── Market Activity Mode ───
         tracker = get_market_tracker()
         if not tracker.is_active:
@@ -784,6 +870,20 @@ class GemmaDecisionCore:
         confidence = self.adaptive.compute_confidence(
             similarity, brain_accuracy, mamis_alignment, direction_accuracy,
         )
+        
+        # ─── Bot/Systematic Trade Confidence Boost ───
+        if systematic_ratio > 0.3 and bot_direction == predicted_direction and bot_confidence > 0.5:
+            bot_boost = bot_confidence * systematic_ratio * 0.15  # Max ~%7.5 boost
+            confidence = min(1.0, confidence + bot_boost)
+            reasons.append(f"🤖 Bot desteği ile güven +{bot_boost:.1%}")
+        
+        # ─── Smart Money Flow Confidence Adjustment ───
+        if abs(smart_money_flow) > 0.3:
+            if (smart_money_flow > 0 and predicted_direction == 'long') or \
+               (smart_money_flow < 0 and predicted_direction == 'short'):
+                smf_boost = abs(smart_money_flow) * 0.1  # Max %10 boost
+                confidence = min(1.0, confidence + smf_boost)
+                reasons.append(f"💰 Smart money flow uyumlu: +{smf_boost:.1%}")
 
         # ─── Experience-Augmented (RAG) güven ayarı ───
         past_exp = context.get('_past_experiences', [])

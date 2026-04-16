@@ -135,10 +135,19 @@ class BrainModule:
     Katman 3 Entegrasyonu: GemmaDecisionCore üzerinden nihai karar
 
     FELSEFE: Brain verileri toplar ve sentezler, GEMMA karar verir.
+    
+    SELF-EVOLUTION MEKANİZMASI:
+    1. Adaptive Weights — Performansa göre öğrenme ağırlıklarını ayarla
+    2. Auto-Calibration — Zayıf/güçlü sinyalleri tespit et
+    3. Pattern Mutation — Başarısız pattern'ları evolve et
+    4. Cross-Learning — Ajanlar arası öğrenme paylaşımı
+    5. Meta-Learning — Öğrenme stratejisinin kendisini öğren
     """
 
     MAX_PATTERN_MEMORY = 500
     AUTO_CALIBRATE_INTERVAL = 50  # Her 50 öğrenme sonrasında otomatik kalibrasyon
+    META_LEARNING_INTERVAL = 100  # Her 100 öğrenmede meta-learning çalış
+    EVOLUTION_THRESHOLD = 0.3  # Win rate < %30 → mutasyon uygula
 
     def __init__(self, db):
         self.db = db
@@ -164,6 +173,22 @@ class BrainModule:
             'total_approved': 0,
             'total_vetoed': 0,
             'last_match': None,
+        }
+        # Self-Evolution Mekanizması
+        self._evolution_state = {
+            'meta_learning_counter': 0,
+            'weight_history': [],  # Ağırlık değişim geçmişi
+            'performance_snapshots': [],  # Periyodik performans kayıtları
+            'mutation_log': [],  # Pattern mutasyonları
+            'strategy_effectiveness': {},  # Hangi strateji ne kadar etkili
+            'cross_agent_insights': {},  # Diğer ajanlardan öğrenilenler
+        }
+        # Sürekli öğrenme ayarları
+        self._evolution_config = {
+            'mutation_rate': 0.1,  # Pattern mutasyon oranı
+            'exploration_rate': 0.2,  # Yeni strateji deneme oranı
+            'memory_decay': 0.99,  # Eski pattern'ların zaman içinde solması
+            'min_confidence_for_evolution': 0.4,  # Evrim için min güven
         }
 
     async def initialize(self):
@@ -320,7 +345,7 @@ class BrainModule:
         self.prediction_accuracy['total'] += 1
 
     def update_learning(self, signal_type: str, was_correct: bool, pnl_pct: float):
-        """Sinyal sonuçlarından öğren"""
+        """Sinyal sonuçlarından öğren + Self-Evolution mekanizması"""
         if signal_type not in self.signal_type_scores:
             self.signal_type_scores[signal_type] = {
                 'correct': 0, 'total': 0, 'total_pnl': 0
@@ -343,8 +368,224 @@ class BrainModule:
             self._auto_calibrate()
             self._calibration_counter = 0
 
+        # ─── SELF-EVOLUTION MEKANİZMASI ───
+        self._evolution_state['meta_learning_counter'] += 1
+        
+        # Meta-learning: Öğrenme stratejisinin kendisini değerlendir
+        if self._evolution_state['meta_learning_counter'] >= self.META_LEARNING_INTERVAL:
+            self._run_meta_learning()
+            self._evolution_state['meta_learning_counter'] = 0
+        
+        # Pattern mutation: Başarısız pattern'ları evolve et
+        if not was_correct and pnl_pct < -0.02:
+            self._apply_pattern_mutation(signal_type, pnl_pct)
+        
+        # Strategy effectiveness tracking
+        self._track_strategy_effectiveness(signal_type, was_correct, pnl_pct)
+        
+        # Performance snapshot (her 25 öğrenmede)
+        if self.prediction_accuracy['total'] % 25 == 0:
+            self._take_performance_snapshot()
+
         logger.info(f"🧠 Brain learning: {signal_type} {'✓' if was_correct else '✗'} | "
-                     f"Accuracy: {self.get_accuracy():.1%}")
+                     f"Accuracy: {self.get_accuracy():.1%} | "
+                     f"Evolution: {self._evolution_state['meta_learning_counter']}/{self.META_LEARNING_INTERVAL}")
+
+    def _run_meta_learning(self):
+        """
+        Meta-Learning: Öğrenme stratejisinin kendisini değerlendir ve iyileştir.
+        Hangi ağırlık kombinasyonu en iyi sonuçları veriyor?
+        """
+        snapshots = self._evolution_state['performance_snapshots']
+        if len(snapshots) < 3:
+            return
+        
+        # Son 3 snapshot'ın performans trendini analiz et
+        recent = snapshots[-3:]
+        accuracy_trend = [s['accuracy'] for s in recent]
+        
+        # Performans iyileşiyor mu?
+        improving = all(accuracy_trend[i] <= accuracy_trend[i+1] for i in range(len(accuracy_trend)-1))
+        declining = all(accuracy_trend[i] >= accuracy_trend[i+1] for i in range(len(accuracy_trend)-1))
+        
+        meta_action = None
+        
+        if declining and accuracy_trend[-1] < 0.4:
+            # Performans düşüyor — ağırlıkları sıfırla veya explore et
+            if self._evolution_config['exploration_rate'] < 0.3:
+                self._evolution_config['exploration_rate'] += 0.05
+            meta_action = "increase_exploration"
+            logger.info(f"🧬 Meta-Learning: Performans düşüyor, exploration artırıldı → {self._evolution_config['exploration_rate']:.0%}")
+        
+        elif improving and accuracy_trend[-1] > 0.55:
+            # Performans artıyor — mevcut stratejiyi güçlendir
+            if self._evolution_config['exploration_rate'] > 0.1:
+                self._evolution_config['exploration_rate'] -= 0.02
+            meta_action = "exploit_current_strategy"
+            logger.info(f"🧬 Meta-Learning: Performans iyi, exploitation artırıldı → {1 - self._evolution_config['exploration_rate']:.0%}")
+        
+        # Ağırlık geçmişinden en iyi kombinasyonu bul
+        weight_history = self._evolution_state['weight_history']
+        if len(weight_history) >= 5:
+            best_snapshot = max(weight_history[-10:], key=lambda x: x.get('accuracy', 0))
+            if best_snapshot.get('accuracy', 0) > self.get_accuracy() + 0.05:
+                # Daha başarılı bir ağırlık kombinasyonuna geri dön
+                self.learning_weights = dict(best_snapshot.get('weights', self.learning_weights))
+                meta_action = "revert_to_best_weights"
+                logger.info(f"🧬 Meta-Learning: Daha iyi ağırlıklara geri dönüldü (acc={best_snapshot['accuracy']:.1%})")
+        
+        # Meta-learning logu
+        self._calibration_log.append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "type": "meta_learning",
+            "actions": [{"type": meta_action, "accuracy_trend": accuracy_trend}] if meta_action else [],
+        })
+
+    def _apply_pattern_mutation(self, signal_type: str, pnl_pct: float):
+        """
+        Pattern Mutation: Başarısız pattern'ları evolve et.
+        Benzer ama farklı outcome'lu pattern'lara mutasyon uygula.
+        """
+        if len(self.pattern_memory) < 10:
+            return
+        
+        # Bu sinyal tipindeki başarısız pattern'ları bul
+        mutation_count = 0
+        for pattern in self.pattern_memory[-50:]:  # Son 50 pattern
+            if pattern.outcomes.get('15m') is not None:
+                # Outcome zaten var, mutasyon gerekli mi kontrol et
+                if pattern.outcomes['15m'] * pnl_pct < 0:  # Zıt sonuç
+                    # Ağırlığını azalt (soft deletion)
+                    if hasattr(pattern, '_mutation_penalty'):
+                        pattern._mutation_penalty = min(pattern._mutation_penalty + 0.1, 0.9)
+                    else:
+                        pattern._mutation_penalty = 0.1
+                    mutation_count += 1
+        
+        if mutation_count > 0:
+            self._evolution_state['mutation_log'].append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "signal_type": signal_type,
+                "pnl_pct": pnl_pct,
+                "patterns_mutated": mutation_count,
+            })
+            # Sadece çok fazla mutasyon varsa log
+            if mutation_count > 5:
+                logger.debug(f"🧬 Pattern mutation: {mutation_count} pattern penalize edildi ({signal_type})")
+
+    def _track_strategy_effectiveness(self, signal_type: str, was_correct: bool, pnl_pct: float):
+        """Strateji etkinliğini takip et — hangi strateji ne zaman en iyi çalışıyor."""
+        # Zaman dilimi bazlı tracking (saat)
+        hour = datetime.utcnow().hour
+        time_bucket = f"hour_{hour // 4 * 4}"  # 4 saatlik bucket'lar
+        
+        key = f"{signal_type}_{time_bucket}"
+        if key not in self._evolution_state['strategy_effectiveness']:
+            self._evolution_state['strategy_effectiveness'][key] = {
+                'correct': 0, 'total': 0, 'pnl': 0
+            }
+        
+        stats = self._evolution_state['strategy_effectiveness'][key]
+        stats['total'] += 1
+        stats['pnl'] += pnl_pct
+        if was_correct:
+            stats['correct'] += 1
+        
+        # Memory decay — eski veriler yavaşça solsun
+        decay = self._evolution_config['memory_decay']
+        for k, v in self._evolution_state['strategy_effectiveness'].items():
+            if k != key and v['total'] > 0:
+                v['total'] *= decay
+                v['correct'] *= decay
+                v['pnl'] *= decay
+
+    def _take_performance_snapshot(self):
+        """Periyodik performans snapshot'ı al."""
+        snapshot = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "accuracy": self.get_accuracy(),
+            "total_predictions": self.prediction_accuracy['total'],
+            "weights": dict(self.learning_weights),
+            "pattern_count": len(self.pattern_memory),
+            "signal_scores_summary": {
+                k: v['correct'] / max(v['total'], 1)
+                for k, v in self.signal_type_scores.items()
+                if v['total'] >= 5
+            },
+        }
+        self._evolution_state['performance_snapshots'].append(snapshot)
+        self._evolution_state['weight_history'].append({
+            "weights": dict(self.learning_weights),
+            "accuracy": self.get_accuracy(),
+        })
+        
+        # Son 50 snapshot'ı tut
+        if len(self._evolution_state['performance_snapshots']) > 50:
+            self._evolution_state['performance_snapshots'] = self._evolution_state['performance_snapshots'][-50:]
+        if len(self._evolution_state['weight_history']) > 50:
+            self._evolution_state['weight_history'] = self._evolution_state['weight_history'][-50:]
+
+    def receive_cross_agent_insight(self, agent_name: str, insight: Dict[str, Any]):
+        """
+        Cross-Agent Learning: Diğer ajanlardan gelen insight'ları al.
+        Bu sayede Gemma kararları, Scout verileri, MAMIS tespitleri paylaşılır.
+        """
+        if agent_name not in self._evolution_state['cross_agent_insights']:
+            self._evolution_state['cross_agent_insights'][agent_name] = []
+        
+        insight['received_at'] = datetime.utcnow().isoformat()
+        self._evolution_state['cross_agent_insights'][agent_name].append(insight)
+        
+        # Son 20 insight'ı tut
+        if len(self._evolution_state['cross_agent_insights'][agent_name]) > 20:
+            self._evolution_state['cross_agent_insights'][agent_name] = \
+                self._evolution_state['cross_agent_insights'][agent_name][-20:]
+        
+        # Insight'tan öğren
+        if insight.get('type') == 'decision_feedback':
+            # Gemma kararlarından öğren
+            if insight.get('was_correct'):
+                self.learning_weights['confidence_history'] = min(
+                    self.learning_weights['confidence_history'] + 0.01, 0.35
+                )
+        elif insight.get('type') == 'systematic_trade_detected':
+            # Bot tespitlerinden öğren
+            self._evolution_state['strategy_effectiveness']['bot_detection'] = {
+                'last_detection': insight.get('bot_type'),
+                'direction': insight.get('direction'),
+                'confidence': insight.get('confidence', 0),
+            }
+
+    def get_evolution_status(self) -> Dict[str, Any]:
+        """Self-evolution durumunu döndür."""
+        return {
+            "meta_learning_counter": self._evolution_state['meta_learning_counter'],
+            "total_mutations": len(self._evolution_state['mutation_log']),
+            "performance_snapshots_count": len(self._evolution_state['performance_snapshots']),
+            "exploration_rate": self._evolution_config['exploration_rate'],
+            "mutation_rate": self._evolution_config['mutation_rate'],
+            "cross_agent_insights_count": sum(
+                len(v) for v in self._evolution_state['cross_agent_insights'].values()
+            ),
+            "best_strategy_by_time": self._get_best_strategies_by_time(),
+        }
+
+    def _get_best_strategies_by_time(self) -> Dict[str, str]:
+        """Zaman dilimine göre en iyi stratejileri bul."""
+        best_by_time = {}
+        for key, stats in self._evolution_state['strategy_effectiveness'].items():
+            if not isinstance(stats, dict) or 'total' not in stats:
+                continue
+            if stats['total'] < 5:
+                continue
+            parts = key.rsplit('_', 2)
+            if len(parts) >= 2:
+                time_bucket = f"{parts[-2]}_{parts[-1]}"
+                signal_type = '_'.join(parts[:-2])
+                accuracy = stats['correct'] / max(stats['total'], 1)
+                if time_bucket not in best_by_time or accuracy > best_by_time[time_bucket][1]:
+                    best_by_time[time_bucket] = (signal_type, accuracy)
+        return {k: f"{v[0]} ({v[1]:.0%})" for k, v in best_by_time.items()}
 
     def _update_adaptive_weights(self):
         """Signal performance'a göre learning_weights ayarla."""
@@ -575,6 +816,8 @@ class BrainModule:
             status['last_calibration'] = self._calibration_log[-1].get('timestamp')
         # Pattern match stats
         status['pattern_match'] = self.get_pattern_match_stats()
+        # Self-Evolution durumu
+        status['evolution'] = self.get_evolution_status()
         return status
 
     def enhanced_analyze(self, snapshot, indicators: Optional[Dict] = None) -> Optional[Dict[str, Any]]:

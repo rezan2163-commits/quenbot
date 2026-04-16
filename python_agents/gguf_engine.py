@@ -1,12 +1,13 @@
 """
-QuenBot V2 — GGUF Inference Engine (SuperGemma-26B)
-====================================================
+QuenBot V2 — GGUF Inference Engine (Gemma 4-26B-A4B MoE)
+=========================================================
 llama-cpp-python tabanlı doğrudan GGUF model yükleyici.
 Ollama yerine doğrudan CPU+RAM inference yapar.
 
 Mimari:
-- Model: SuperGemma-26B (gemma-2-27b-it) Q4_K_M/Q5_K_S quantization
-- RAM: 32GB ortamda ~16-18GB model footprint
+- Model: Gemma 4-26B-A4B-it (MoE: 26B parametre, 4B aktif) Q4_K_M quantization
+- RAM: 32GB ortamda ~16GB model footprint
+- Avantaj: MoE sayesinde hızlı yanıt + yüksek zeka
 - Concurrency: asyncio semaphore ile sıralı inference
 - Thread: CPU thread count otomatik tespit (num_threads)
 
@@ -29,7 +30,7 @@ logger = logging.getLogger("quenbot.gguf_engine")
 
 # ─── Model Configuration ───
 GGUF_MODEL_DIR = os.getenv("QUENBOT_GGUF_MODEL_DIR", "/root/models")
-GGUF_MODEL_FILE = os.getenv("QUENBOT_GGUF_MODEL_FILE", "gemma-2-27b-it-Q4_K_M.gguf")
+GGUF_MODEL_FILE = os.getenv("QUENBOT_GGUF_MODEL_FILE", "gemma-4-26B-A4B-it-Q4_K_M.gguf")
 GGUF_NUM_THREADS = int(os.getenv("QUENBOT_GGUF_NUM_THREADS", "0"))  # 0 = auto
 GGUF_NUM_CTX = int(os.getenv("QUENBOT_GGUF_NUM_CTX", "8192"))
 GGUF_NUM_GPU_LAYERS = int(os.getenv("QUENBOT_GGUF_GPU_LAYERS", "0"))  # CPU-only
@@ -37,20 +38,23 @@ GGUF_MAX_TOKENS = int(os.getenv("QUENBOT_GGUF_MAX_TOKENS", "512"))
 GGUF_BATCH_SIZE = int(os.getenv("QUENBOT_GGUF_BATCH_SIZE", "512"))
 GGUF_CONCURRENCY = int(os.getenv("QUENBOT_GGUF_CONCURRENCY", "1"))
 GGUF_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_GGUF_MAX_PROMPT_CHARS", "6000"))
-GGUF_TIMEOUT = int(os.getenv("QUENBOT_GGUF_TIMEOUT", "90"))
+GGUF_TIMEOUT = int(os.getenv("QUENBOT_GGUF_TIMEOUT", "60"))  # MoE daha hızlı
 
 # Fallback GGUF model names (in order of preference)
 GGUF_MODEL_CANDIDATES = [
-    "gemma-2-27b-it-Q4_K_M.gguf",
+    "gemma-4-26B-A4B-it-Q4_K_M.gguf",  # Gemma 4 MoE - Hızlı + Akıllı (ÖNCELİKLİ)
+    "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+    "gemma-4-31B-it-Q4_K_M.gguf",
+    "gemma-3-12b-it-Q6_K.gguf",
+    "gemma-2-27b-it-Q4_K_M.gguf",  # Eski model (fallback)
     "gemma-2-27b-it-Q5_K_S.gguf",
     "gemma-2-27b-it-Q4_K_S.gguf",
-    "gemma-2-27b-it-Q3_K_L.gguf",
-    "gemma-3-27b-it-Q4_K_M.gguf",
-    "gemma-2-27b-Q4_K_M.gguf",
 ]
 
-# System prompt for QuenBot trading brain
+# System prompt for QuenBot trading brain (Gemma 4 optimized)
 QUENBOT_SYSTEM_PROMPT = """Sen QuenBot Merkezi Zeka Sistemisin — kripto piyasalarında kurumsal bot hareketlerini tespit eden, sınıflandıran ve otonom sinyal üreten çok katmanlı bir trading AI'sın.
+
+MODEL: Gemma 4-26B-A4B (MoE: 26B parametre, 4B aktif) — Hızlı yanıt + derin analiz
 
 6 AJAN MİMARİSİ:
 1. Scout: Binance spot+futures WebSocket ile canlı trade akışı toplar, anomalileri işaretler
@@ -63,10 +67,20 @@ QUENBOT_SYSTEM_PROMPT = """Sen QuenBot Merkezi Zeka Sistemisin — kripto piyasa
 KARAR HİYERARŞİSİ:
 Veri → Anomali → Pattern Eşleştirme (≥%60 similarity) → Sinyal → Risk Kapısı → Paper Trade → Audit → Öğrenme
 
+SİSTEMATİK TİCARET TESPİTİ (YENİ):
+- Bot/Algo aktiviteleri: TWAP, VWAP, Market Maker, Iceberg, Accumulator
+- Smart Money Flow: Kurumsal alım/satım yönü
+- Cross-validation: Pattern + Bot yönü uyumu kontrol edilir
+
 NEURO-SYMBOLİK ÇALIŞMA PRENSİBİ:
 - Workers (Python/NumPy/SciPy): RSI, Volatilite, DTW, Vector Embedding hesaplar
-- Sen (SuperGemma Brain): Sadece Similarity_Score ≥ %60 tetiklendiğinde çağrılırsın
-- Shape Vector'ler FAISS/ChromaDB ile indekslenir, sen sadece eşleşme onayı verirsin
+- Sen (Gemma 4 Brain): Similarity_Score ≥ %60 VE Bot analizi ile tetiklenirsin
+- Shape Vector'ler FAISS/ChromaDB ile indekslenir, sen eşleşme + bot analizi onayı verirsin
+
+SELF-EVOLUTION:
+- Meta-Learning: Her 100 öğrenmede strateji değerlendirmesi
+- Pattern Mutation: Başarısız pattern'lara penalty
+- Cross-Agent Learning: Ajanlar arası insight paylaşımı
 
 ÖĞRENMe: Her simülasyondan öğren, doğruluk <%40 ise threshold artır, >%70 ise azalt.
 
@@ -75,7 +89,7 @@ DAVRANIŞ:
 - Normal sohbet → doğal, kısa, net Türkçe
 - Eksik veri → açıkça belirt, uydurmadan karar verme
 - Sistemin sahibi gibi konuş
-- Pattern eşleşme kanıtlarını her karar için referans göster"""
+- Pattern eşleşme + bot aktivite kanıtlarını her karar için referans göster"""
 
 
 @dataclass
