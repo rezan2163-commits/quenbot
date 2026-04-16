@@ -9,6 +9,7 @@ from database import Database
 from event_bus import Event, EventType, get_event_bus
 from qwen_models import CommandAction, ExecutionFeedback
 from market_activity_tracker import get_market_tracker
+from simulation_engine import get_simulation_engine
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,7 @@ class GhostSimulatorAgent:
         self.rca_engine = rca_engine
         self.decision_core = decision_core
         self.event_bus = get_event_bus()
+        self.simulation_engine = get_simulation_engine(decision_core=decision_core)
         self.running = False
         self.last_activity = None
         self.active_simulations: Dict[int, Dict[str, Any]] = {}
@@ -295,6 +297,28 @@ class GhostSimulatorAgent:
             self.active_simulations[sim_id] = {**simulation_data, 'id': sim_id}
             await self.db.update_signal_status(signal['id'], 'processed')
 
+            # ─── Hedef Kartı oluştur ───
+            target_pct = tp_pct  # TP yüzdesi = base target
+            data_density = float(metadata.get('data_density', 0.5))
+            card = self.simulation_engine.create_target_card(
+                symbol=signal['symbol'],
+                direction=direction,
+                entry_price=entry_price,
+                confidence=float(signal.get('confidence', 0.5)),
+                target_pct=target_pct,
+                signal_id=signal['id'],
+                simulation_id=sim_id,
+                data_density=data_density,
+                metadata={
+                    'signal_type': signal['signal_type'],
+                    'brain_analysis': metadata.get('brain_analysis', False),
+                    'timeframe': metadata.get('timeframe', 'unknown'),
+                },
+            )
+            if card:
+                logger.info(f"🎯 TargetCard {card.id}: {card.primary_horizon} ana hedef, "
+                             f"{len(card.horizons)} horizon")
+
             # StateTracker'a aktif sembol ekle
             if self.state_tracker:
                 self.state_tracker.add_active_symbol(signal['symbol'])
@@ -308,6 +332,33 @@ class GhostSimulatorAgent:
     async def _monitor_active_simulations(self):
         try:
             current_prices = await self._get_current_prices()
+
+            # ─── SimulationEngine tick: hedef kartı horizon takibi, near-miss tespiti ───
+            if current_prices:
+                tracker_prices = get_market_tracker().get_all_prices()
+                events = self.simulation_engine.tick_all(tracker_prices)
+                for ev in events:
+                    ev_type = ev.get('type', '')
+                    if ev_type == 'horizon_hit':
+                        await self.event_bus.publish(Event(
+                            type=EventType.SIM_UPDATE,
+                            source='simulation_engine',
+                            data=ev,
+                        ))
+                    elif ev_type == 'card_completed':
+                        await self.event_bus.publish(Event(
+                            type=EventType.SIM_UPDATE,
+                            source='simulation_engine',
+                            data=ev,
+                        ))
+                # Periyodik temizlik (her 100 döngüde bir)
+                if hasattr(self, '_tick_counter'):
+                    self._tick_counter += 1
+                else:
+                    self._tick_counter = 0
+                if self._tick_counter % 100 == 0:
+                    self.simulation_engine.cleanup_stale()
+
             to_close = []
 
             for sim_id, sim_data in list(self.active_simulations.items()):
@@ -769,4 +820,5 @@ class GhostSimulatorAgent:
             "win_rate": win_rate,
             "total_pnl": self.total_pnl,
             "brain_connected": self.brain is not None,
+            "target_cards": self.simulation_engine.get_stats(),
         }

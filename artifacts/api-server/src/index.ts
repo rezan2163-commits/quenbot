@@ -774,6 +774,21 @@ app.get("/api/simulations", async (req, res) => {
   }
 });
 
+// ─── Target Cards (proxy to Python SimulationEngine on port 3002) ───
+app.get("/api/target-cards", async (req, res) => {
+  try {
+    const agentApi = process.env.QUENBOT_DIRECTIVE_API || "http://127.0.0.1:3002";
+    const response = await fetch(`${agentApi}/api/target-cards`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    // Fallback: return empty data if Python agent is unreachable
+    res.json({ live_cards: [], recent_archive: [], stats: {}, error: "Agent unavailable" });
+  }
+});
+
 app.get("/api/patterns/blacklist", async (req, res) => {
   try {
     const patterns = await sql`SELECT * FROM blacklist_patterns ORDER BY created_at DESC LIMIT 100`;

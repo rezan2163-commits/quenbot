@@ -2492,6 +2492,26 @@ class AgentOrchestrator:
         app.router.add_post("/api/code/tasks/{task_id}/apply", apply_code_task)
         app.router.add_post("/api/control/execute", execute_control)
 
+        # ─── Target Cards endpoint ───
+        async def get_target_cards(request):
+            """SimulationEngine'den aktif hedef kartlarını döndür."""
+            try:
+                from simulation_engine import get_simulation_engine
+                engine = get_simulation_engine()
+                cards = engine.get_live_cards()
+                archive = engine.get_archive(limit=20)
+                stats = engine.get_stats()
+                return web.json_response({
+                    "live_cards": cards,
+                    "recent_archive": archive,
+                    "stats": stats,
+                })
+            except Exception as e:
+                logger.error(f"Target cards endpoint error: {e}")
+                return web.json_response({"live_cards": [], "recent_archive": [], "stats": {}, "error": str(e)})
+
+        app.router.add_get("/api/target-cards", get_target_cards)
+
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", 3002)

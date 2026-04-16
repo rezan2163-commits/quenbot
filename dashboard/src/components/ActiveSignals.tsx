@@ -260,11 +260,14 @@ export default function ActiveSignals() {
                     </div>
                   </div>
 
-                  {/* ── 🎯 HEDEF ZAMANLARI (15m / 1h / 4h) ── */}
+                  {/* ── 🎯 HEDEF ZAMANLARI (15m / 1h / 4h / 24h) ── */}
                   {horizons.length > 0 && (
                     <div className="mb-2 rounded-lg bg-black/30 border border-white/8 p-2">
                       <div className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 flex items-center gap-1">
                         <Target size={10} className="text-cyan-300" /> Hedef Zamanları
+                        {meta.selected_horizon && (
+                          <span className="text-[8px] text-amber-300 ml-auto">Ana: {meta.selected_horizon}</span>
+                        )}
                       </div>
                       <div className="space-y-1">
                         {horizons.map((h: any) => {
@@ -274,6 +277,9 @@ export default function ActiveSignals() {
                           const remaining = horizonCountdown(signalAt, toNumber(h.eta_minutes, 15));
                           const actualChange = toNumber(h.actual_change_pct, 0) * 100;
                           const actualPrice = toNumber(h.actual_price, 0);
+                          const isPrimary = h.label === (meta.selected_horizon || horizons[0]?.label);
+                          const isNearMiss = hStatus === "near_miss" || h.near_miss;
+                          const closestApproach = toNumber(h.closest_approach_pct, 0);
 
                           return (
                             <div
@@ -283,6 +289,12 @@ export default function ActiveSignals() {
                                   ? "bg-emerald-400/12 border border-emerald-400/20"
                                   : hStatus === "missed"
                                   ? "bg-rose-400/10 border border-rose-400/20"
+                                  : isNearMiss
+                                  ? "bg-amber-400/12 border border-amber-400/25"
+                                  : hStatus === "expired"
+                                  ? "bg-gray-500/10 border border-gray-500/20"
+                                  : isPrimary
+                                  ? "bg-cyan-400/10 border border-cyan-400/20"
                                   : "bg-white/4 border border-white/8"
                               }`}
                             >
@@ -291,10 +303,15 @@ export default function ActiveSignals() {
                                   <CheckCircle2 size={12} className="text-emerald-400" />
                                 ) : hStatus === "missed" ? (
                                   <XCircle size={12} className="text-rose-400" />
+                                ) : isNearMiss ? (
+                                  <Activity size={12} className="text-amber-400" />
+                                ) : hStatus === "expired" ? (
+                                  <Clock3 size={12} className="text-gray-400" />
                                 ) : (
-                                  <Timer size={12} className="text-cyan-300 animate-pulse" />
+                                  <Timer size={12} className={isPrimary ? "text-cyan-300 animate-pulse" : "text-cyan-300 animate-pulse"} />
                                 )}
-                                <span className="font-bold text-white w-8">{h.label}</span>
+                                <span className={`font-bold w-8 ${isPrimary ? "text-cyan-200" : "text-white"}`}>{h.label}</span>
+                                {isPrimary && <span className="text-[7px] text-cyan-400 bg-cyan-400/10 rounded-full px-1">ANA</span>}
                                 <span className="text-gray-400">%{hTargetPct.toFixed(1)}</span>
                                 <span className="text-gray-500">→ ${formatPrice(hTargetPrice)}</span>
                               </div>
@@ -305,6 +322,10 @@ export default function ActiveSignals() {
                                   <span className="text-amber-300">Değerlendiriliyor...</span>
                                 ) : hStatus === "hit" ? (
                                   <span className="text-emerald-300 font-medium">İSABET +{actualChange.toFixed(2)}%</span>
+                                ) : isNearMiss ? (
+                                  <span className="text-amber-300 font-medium">⚡ YAKIN KAÇIŞ {closestApproach > 0 ? `%${(closestApproach * 100).toFixed(1)} yaklaştı` : ""}</span>
+                                ) : hStatus === "expired" ? (
+                                  <span className="text-gray-400">Süre doldu</span>
                                 ) : (
                                   <span className="text-rose-300">ISKALANDI {actualChange >= 0 ? "+" : ""}{actualChange.toFixed(2)}%</span>
                                 )}

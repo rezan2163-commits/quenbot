@@ -58,6 +58,7 @@ TARGET_HORIZONS = [
     ('15m', 15, 1.0),
     ('1h', 60, 1.3),
     ('4h', 240, 1.8),
+    ('24h', 1440, 2.5),
 ]
 
 
@@ -244,11 +245,12 @@ class StrategistAgent:
                 required_strength = {
                     60: 0.30,
                     240: 0.40,
+                    1440: 0.50,
                 }.get(eta_minutes, 0.30)
                 if strength < required_strength:
                     continue
 
-            horizon_target = min(max(base_target * multiplier, 0.02), 0.18)
+            horizon_target = min(max(base_target * multiplier, 0.02), 0.25)
             target_price = entry_price * (1.0 + horizon_target) if direction == 'long' else entry_price * (1.0 - horizon_target)
             horizons.append({
                 'label': label,
