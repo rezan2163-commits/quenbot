@@ -157,7 +157,14 @@ class GGUFEngine:
                 return False
 
             self._model_path = model_path
-            self._model_name = Path(model_path).stem
+            # Normalise model label to the logical name used across the system
+            # (decision_core, chat_engine, dashboard) so that both heartbeats
+            # report the same identifier and the dashboard "Model Dağılımı"
+            # section does not duplicate a single underlying model.
+            file_stem = Path(model_path).stem
+            logical_name = os.getenv("QUENBOT_LLM_MODEL", "gemma-3-12b-it")
+            self._model_name = logical_name or file_stem
+            self._model_file_stem = file_stem
 
             logger.info("🧠 SuperGemma GGUF model yükleniyor: %s", model_path)
             logger.info("   Context: %d tokens, Threads: %s, Batch: %d",
