@@ -2842,12 +2842,30 @@ class AgentOrchestrator:
                 })
 
             if not draft_actions and self.chat_engine:
-                try:
-                    llm_interpretation = await self.chat_engine.interpret_direct_command(text)
-                    for candidate in llm_interpretation.get("actions", []):
-                        draft_actions.append(candidate)
-                except Exception as e:
-                    logger.debug(f"LLM command interpretation skipped: {e}")
+                # LLM yorumlayıcısını sadece imperatif/komut gibi görünen mesajlarda çalıştır.
+                # Saf soru/sohbet mesajlarında ikinci LLM çağrısı atlanır → chat 2× hızlanır.
+                command_hint = any(
+                    k in lower for k in (
+                        "yap", "ayarla", "değiştir", "degistir", "ekle", "sil", "kapat",
+                        "aç ", "başlat", "baslat", "durdur", "güncelle", "guncelle",
+                        "set ", "update", "change", "run ", "apply", "uygula", "çalıştır",
+                        "calistir", "aktifleştir", "aktiflestir", "devre dışı", "devre disi",
+                    )
+                )
+                is_question = text.endswith("?") or any(
+                    q in lower for q in (
+                        "nedir", "nasıl", "nasil", "neden", "kim ", "ne ", "hangi",
+                        "nerede", "ne zaman", " mi ", " mı ", " mu ", " mü ",
+                        "anlat", "söyle", "soyle", "açıkla", "acikla",
+                    )
+                )
+                if command_hint and not is_question:
+                    try:
+                        llm_interpretation = await self.chat_engine.interpret_direct_command(text)
+                        for candidate in llm_interpretation.get("actions", []):
+                            draft_actions.append(candidate)
+                    except Exception as e:
+                        logger.debug(f"LLM command interpretation skipped: {e}")
 
             actions = []
             for action in draft_actions:
@@ -2889,11 +2907,9 @@ class AgentOrchestrator:
 
                 routed_actions = await route_nl_command(message)
                 assistant = self.chat_engine.get_assistant_identity()
-                response = (
-                    self.chat_engine.build_command_response(routed_actions)
-                    if routed_actions else
-                    await self.chat_engine.respond(message, routed_actions=routed_actions)
-                )
+                # Doğal konuşma: aksiyon uygulansa bile Gemma kendi sözleriyle onaylar.
+                # Robotik "Komut uygulandı:" metinleri artık kullanılmaz.
+                response = await self.chat_engine.respond(message, routed_actions=routed_actions)
 
                 payload = {
                     "success": True,

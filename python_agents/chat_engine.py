@@ -20,10 +20,10 @@ HEALTH_CACHE_TTL = int(os.getenv("QUENBOT_HEALTH_CACHE_TTL", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("QUENBOT_CHAT_CONTEXT_CHARS", "1800"))
 CHAT_TIMEOUT = int(os.getenv("QUENBOT_CHAT_FULL_TIMEOUT", "30"))
 QUICK_CHAT_TIMEOUT = int(os.getenv("QUENBOT_CHAT_QUICK_TIMEOUT", "15"))
-CHAT_QUICK_MAX_TOKENS = int(os.getenv("QUENBOT_CHAT_QUICK_MAX_TOKENS", "140"))
-CHAT_FULL_MAX_TOKENS = int(os.getenv("QUENBOT_CHAT_FULL_MAX_TOKENS", "280"))
+CHAT_QUICK_MAX_TOKENS = int(os.getenv("QUENBOT_CHAT_QUICK_MAX_TOKENS", "110"))
+CHAT_FULL_MAX_TOKENS = int(os.getenv("QUENBOT_CHAT_FULL_MAX_TOKENS", "200"))
 # Gemma 3 12B model needs ~5-15s for quality responses
-CHAT_MAX_TOTAL_LATENCY = float(os.getenv("QUENBOT_CHAT_MAX_TOTAL_LATENCY", "25"))
+CHAT_MAX_TOTAL_LATENCY = float(os.getenv("QUENBOT_CHAT_MAX_TOTAL_LATENCY", "22"))
 
 # Dedicated chat LLM lane — completely separate from the decision/pattern LLM pool.
 # Prevents chat from ever competing with 18-second decision calls.
@@ -60,6 +60,10 @@ KONUSMA TARZI:
 - JSON verme.
 - Gereksiz rapor dili kullanma.
 - Veri yoksa uydurma yapma; eksik veriyi acikca soyle.
+- Eger "UYGULANAN KOMUTLAR" bolumu varsa: kisa tek cumleyle uygulandigini onayla, sonra
+    kullanicinin asil mesajina dogal olarak devam et. "Komut uygulandi:" gibi robotik
+    baslik kullanma; arkadas gibi konus.
+- Cevaplarin ideal 1-3 cumle olsun; kullanici daha fazla detay isterse o zaman ac.
 """
 
 DIRECT_COMMAND_SYSTEM_PROMPT = """Sen QuenBot'un dogrudan komut yorumlayicisisin.
