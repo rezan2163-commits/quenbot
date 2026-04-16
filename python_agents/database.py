@@ -1166,8 +1166,17 @@ class Database:
     async def get_dashboard_summary(self) -> Dict[str, Any]:
         """Get dashboard summary statistics"""
         async with self.pool.acquire() as conn:
-            # Raw exchange trade ticks (NOT strategy executions)
-            market_ticks_total = await conn.fetchval("SELECT COUNT(*) FROM trades")
+            # Raw exchange trade ticks (NOT strategy executions).
+            # NOTE: `trades` tablosu milyonlarca satır içerir; COUNT(*) her çağrıda
+            # saniyeler sürer ve chat/overview endpoint'lerini kilitler.
+            # Bu yüzden PostgreSQL'in planner istatistiklerinden (pg_class.reltuples)
+            # O(1) tahmin alıyoruz. Tam sayı değil — ancak dashboard için yeterli.
+            try:
+                market_ticks_total = await conn.fetchval(
+                    "SELECT reltuples::bigint FROM pg_class WHERE relname = 'trades'"
+                )
+            except Exception:
+                market_ticks_total = 0
 
             # Recent movements (last 24h)
             cutoff = datetime.utcnow() - timedelta(hours=24)

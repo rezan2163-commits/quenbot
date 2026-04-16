@@ -390,24 +390,49 @@ class ChatEngine:
         if self._snapshot_cache and now - self._snapshot_cache_at <= CHAT_CACHE_TTL:
             snapshot = dict(self._snapshot_cache)
         else:
-            summary, open_sims, pending = await asyncio.gather(
+            # Dayanıklı snapshot: DB parçalarından biri patlarsa chat yine de cevap versin.
+            results = await asyncio.gather(
                 self.db.get_dashboard_summary(),
                 self.db.get_open_simulations(),
                 self.db.get_pending_signals(),
+                return_exceptions=True,
             )
+            summary = results[0] if not isinstance(results[0], Exception) else {}
+            open_sims = results[1] if not isinstance(results[1], Exception) else []
+            pending = results[2] if not isinstance(results[2], Exception) else []
+            for idx, r in enumerate(results):
+                if isinstance(r, Exception):
+                    logger.warning("Chat snapshot part %d failed: %s", idx, r)
+
+            try:
+                signal_flow = await self.db.get_signal_pipeline_snapshot(hours=6)
+            except Exception as exc:
+                logger.warning("signal_pipeline_snapshot failed: %s", exc)
+                signal_flow = {}
+
+            try:
+                brain_status = self.brain.get_brain_status() if self.brain else {}
+            except Exception as exc:
+                logger.warning("brain status failed: %s", exc)
+                brain_status = {}
+
             snapshot = {
                 "summary": summary,
-                "open_simulations": open_sims[:5],
-                "pending_signals": pending[:5],
-                "signal_flow": await self.db.get_signal_pipeline_snapshot(hours=6),
-                "brain": self.brain.get_brain_status() if self.brain else {},
+                "open_simulations": (open_sims or [])[:5],
+                "pending_signals": (pending or [])[:5],
+                "signal_flow": signal_flow,
+                "brain": brain_status,
                 "risk": self.risk_manager.get_risk_summary() if self.risk_manager else {},
                 "state": self.state_tracker.get_state_summary() if self.state_tracker else {},
             }
             self._snapshot_cache = dict(snapshot)
             self._snapshot_cache_at = now
 
-        snapshot["prices"] = await self._get_prices(user_msg)
+        try:
+            snapshot["prices"] = await self._get_prices(user_msg)
+        except Exception as exc:
+            logger.warning("chat price snapshot failed: %s", exc)
+            snapshot["prices"] = {}
         snapshot["agent_health"] = {} if lightweight else await self._get_agent_health_snapshot()
         if lightweight:
             snapshot["open_simulations"] = []
