@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
-ACTIVE_LLM_MODEL = os.getenv("QUENBOT_LLM_MODEL", "supergemma-26b")
+ACTIVE_LLM_MODEL = os.getenv("QUENBOT_LLM_MODEL", "gemma-3-12b-it")
 CHAT_CACHE_TTL = int(os.getenv("QUENBOT_CHAT_CACHE_TTL", "8"))
 HEALTH_CACHE_TTL = int(os.getenv("QUENBOT_HEALTH_CACHE_TTL", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("QUENBOT_CHAT_CONTEXT_CHARS", "1800"))

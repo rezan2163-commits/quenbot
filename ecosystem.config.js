@@ -1,5 +1,5 @@
 // PM2 Ecosystem Configuration - QuenBot
-// Optimized for 16 vCPU / 32 GB RAM — SuperGemma-26B GGUF
+// Optimized for 16 vCPU / 32 GB RAM — Gemma-3 12B IT GGUF
 // Usage: pm2 start ecosystem.config.js
 const quenbotTimeZone = process.env.QUENBOT_TIMEZONE || "Europe/Vienna";
 
@@ -53,12 +53,12 @@ module.exports = {
         DB_NAME: "trade_intel",
         OLLAMA_NUM_PARALLEL: "1",
         OLLAMA_MAX_LOADED_MODELS: "1",
-        QUENBOT_LLM_MODEL: "supergemma-26b",
+        QUENBOT_LLM_MODEL: "gemma-3-12b-it",
         QUENBOT_LLM_NUM_CTX: "8192",
         QUENBOT_LLM_MAX_TOKENS: "512",
         QUENBOT_LLM_NUM_THREAD: "6",
-        QUENBOT_CHAT_MODEL: "supergemma-26b",
-        QUENBOT_DECISION_MODEL: "supergemma-26b",
+        QUENBOT_CHAT_MODEL: "gemma-3-12b-it",
+        QUENBOT_DECISION_MODEL: "gemma-3-12b-it",
         QUENBOT_GGUF_MODEL_DIR: process.env.QUENBOT_GGUF_MODEL_DIR || "/root/models",
         QUENBOT_GGUF_MODEL_FILE: process.env.QUENBOT_GGUF_MODEL_FILE || "gemma-3-12b-it-Q4_K_M.gguf",
         QUENBOT_GGUF_NUM_THREADS: "6",
@@ -85,7 +85,7 @@ module.exports = {
       restart_delay: 10000,
       exp_backoff_restart_delay: 500,
       kill_timeout: 30000,
-      max_memory_restart: "30G",
+      max_memory_restart: "26G",
       error_file: "./logs/agents-error.log",
       out_file: "./logs/agents-out.log",
       merge_logs: true,

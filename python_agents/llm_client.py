@@ -18,7 +18,7 @@ logger = logging.getLogger("quenbot.llm_client")
 # -------------------------------------------------------------------
 # Defaults tuned for 16 vCPU / 32 GB RAM — SuperGemma-26B GGUF
 # -------------------------------------------------------------------
-DEFAULT_MODEL = os.getenv("QUENBOT_LLM_MODEL", "supergemma-26b")
+DEFAULT_MODEL = os.getenv("QUENBOT_LLM_MODEL", "gemma-3-12b-it")
 DEFAULT_TIMEOUT = int(os.getenv("QUENBOT_LLM_TIMEOUT", "90"))
 DEFAULT_MAX_TOKENS = int(os.getenv("QUENBOT_LLM_MAX_TOKENS", "512"))
 DEFAULT_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_LLM_MAX_PROMPT_CHARS", "6000"))

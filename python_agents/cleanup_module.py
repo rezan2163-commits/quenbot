@@ -14,8 +14,8 @@ class CleanupModule:
         active = [m.strip() for m in configured.split(",") if m.strip()]
         if not active:
             active = [
-                os.getenv("QUENBOT_LLM_MODEL", "supergemma-26b"),
-                os.getenv("QUENBOT_DECISION_MODEL", os.getenv("QUENBOT_LLM_MODEL", "supergemma-26b")),
+                os.getenv("QUENBOT_LLM_MODEL", "gemma-3-12b-it"),
+                os.getenv("QUENBOT_DECISION_MODEL", os.getenv("QUENBOT_LLM_MODEL", "gemma-3-12b-it")),
             ]
         self.active_models = sorted(set(active))
         self.gguf_model_dir = Path(os.getenv("QUENBOT_GGUF_MODEL_DIR", "/root/models"))

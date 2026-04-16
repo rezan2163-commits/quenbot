@@ -2,12 +2,10 @@
 
 import {
   useDashboardSummary,
-  useAgents,
   useTopMovers,
   useSignals,
   useSignatureMatches,
   useLearningStats,
-  type AgentInfo,
 } from "@/lib/api";
 import { formatInQuenbotTimeZone } from "@/lib/time";
 import {
@@ -18,9 +16,6 @@ import {
   Shield,
   Brain,
   Crosshair,
-  Cpu,
-  Wifi,
-  WifiOff,
   Fingerprint,
   ArrowUpCircle,
   ArrowDownCircle,
@@ -62,28 +57,6 @@ function MetricCard({
       </div>
       <div className="text-lg font-bold text-white tabular-nums leading-none">{value}</div>
       {sub && <span className="text-[10px] text-gray-500">{sub}</span>}
-    </div>
-  );
-}
-
-/* ── Agent Status Pill ── */
-
-function AgentPill({ name, info }: { name: string; info: AgentInfo }) {
-  const alive = info.status === "online";
-  const displayName = name
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase())
-    .replace("Agent", "")
-    .trim();
-
-  return (
-    <div className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium ${
-      alive
-        ? "border-emerald-400/20 bg-emerald-400/8 text-emerald-300"
-        : "border-rose-400/20 bg-rose-400/8 text-rose-400"
-    }`}>
-      {alive ? <Wifi size={9} /> : <WifiOff size={9} />}
-      {displayName}
     </div>
   );
 }
@@ -186,7 +159,6 @@ function SectionCard({
 
 export default function SystemOverview() {
   const { data: summary } = useDashboardSummary();
-  const { data: agentsData } = useAgents();
   const { data: topMovers } = useTopMovers();
   const { data: signals } = useSignals();
   const { data: sigMatches } = useSignatureMatches();
@@ -203,9 +175,6 @@ export default function SystemOverview() {
     losing_simulations: 0,
   };
 
-  const agents = agentsData?.agents || {};
-  const agentEntries = Object.entries(agents);
-  const onlineCount = agentEntries.filter(([, a]) => a.status === "online").length;
   const movers = Array.isArray(topMovers) ? topMovers.slice(0, 8) : [];
   const recentSignals = (signals || []).slice(0, 6);
   const recentMatches = (sigMatches || []).slice(0, 5);
@@ -252,19 +221,6 @@ export default function SystemOverview() {
           icon={Brain}
           accent="text-violet-400"
         />
-      </div>
-
-      {/* Agent Status */}
-      <div className="flex items-center gap-2 flex-wrap px-1">
-        <div className="flex items-center gap-1.5 mr-2">
-          <Cpu size={11} className="text-gray-500" />
-          <span className="text-[10px] text-gray-500 font-medium">
-            {onlineCount}/{agentEntries.length} Ajan
-          </span>
-        </div>
-        {agentEntries.map(([name, info]) => (
-          <AgentPill key={name} name={name} info={info} />
-        ))}
       </div>
 
       {/* Data Sections */}

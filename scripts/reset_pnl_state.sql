@@ -18,7 +18,7 @@ BEGIN;
 SELECT
     (SELECT COUNT(*) FROM simulations)                       AS simulations,
     (SELECT COUNT(*) FROM state_history)                     AS state_history_rows,
-    (SELECT state_value::jsonb->>'cumulative_pnl'
+    (SELECT state_value->>'cumulative_pnl'
        FROM bot_state WHERE state_key='main')                AS current_cumulative_pnl;
 
 -- Simülasyonları temizle (ghost simulator in-memory cache restart'ta yenilenir)
@@ -30,7 +30,7 @@ TRUNCATE TABLE state_history RESTART IDENTITY;
 -- bot_state içindeki kümülatif alanları sıfırla (mode ve forced_mode korunur)
 UPDATE bot_state
 SET state_value = (
-        (state_value::jsonb)
+        state_value
         || jsonb_build_object(
             'cumulative_pnl',      0.0,
             'peak_pnl',            0.0,
@@ -45,7 +45,7 @@ SET state_value = (
             'active_symbols',      '[]'::jsonb,
             'last_trade_time',     NULL
         )
-    )::text,
+    ),
     updated_at = CURRENT_TIMESTAMP
 WHERE state_key = 'main';
 
@@ -54,9 +54,9 @@ WHERE state_key = 'main';
 SELECT
     (SELECT COUNT(*) FROM simulations)                       AS simulations,
     (SELECT COUNT(*) FROM state_history)                     AS state_history_rows,
-    (SELECT state_value::jsonb->>'cumulative_pnl'
+    (SELECT state_value->>'cumulative_pnl'
        FROM bot_state WHERE state_key='main')                AS new_cumulative_pnl,
-    (SELECT state_value::jsonb->>'total_trades'
+    (SELECT state_value->>'total_trades'
        FROM bot_state WHERE state_key='main')                AS total_trades;
 
 COMMIT;

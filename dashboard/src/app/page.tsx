@@ -7,9 +7,7 @@ import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
 import BottomTerminal from "@/components/BottomTerminal";
 import SystemOverview from "@/components/SystemOverview";
-import StrategyControl from "@/components/StrategyControl";
 import ChatPanel from "@/components/ChatPanel";
-import CodeOperatorPanel from "@/components/CodeOperatorPanel";
 import StrategyAlert from "@/components/StrategyAlert";
 import WatchlistManager from "@/components/WatchlistManager";
 import ActiveSignals from "@/components/ActiveSignals";
@@ -163,9 +161,7 @@ export default function Home() {
           </ErrorBoundary>
 
           {/* Floating controls */}
-          <StrategyControl />
           <ChatPanel />
-          <CodeOperatorPanel />
 
           {mobileSidebarOpen && (
             <div className="fixed inset-0 z-50 flex bg-black/60 lg:hidden">

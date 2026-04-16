@@ -66,8 +66,9 @@ export default function Sidebar() {
   const { data: sys } = useSystemSummary();
 
   const agents = agentsData?.agents || {};
+  // Tüm agent'leri göster — system / system_resources da dahil (15/15).
   const agentEntries = Object.entries(agents).filter(
-    ([k]) => !["system_resources", "event_bus", "system"].includes(k)
+    ([k]) => !['event_bus'].includes(k)
   );
   const runningCount = agentEntries.filter(([, v]) => v.status === "running").length;
 

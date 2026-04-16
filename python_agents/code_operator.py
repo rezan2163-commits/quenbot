@@ -109,7 +109,7 @@ class CodeOperator:
         self.repo_root = REPO_ROOT
         self._store = get_directive_store()
         self._client = LLMClient(
-            model=os.getenv("QUENBOT_CODE_MODEL", os.getenv("QUENBOT_CHAT_MODEL", os.getenv("QUENBOT_LLM_MODEL", "supergemma-26b"))),
+            model=os.getenv("QUENBOT_CODE_MODEL", os.getenv("QUENBOT_CHAT_MODEL", os.getenv("QUENBOT_LLM_MODEL", "gemma-3-12b-it"))),
             timeout=int(os.getenv("QUENBOT_CODE_TIMEOUT", "90")),
             max_tokens=int(os.getenv("QUENBOT_CODE_MAX_TOKENS", "900")),
             max_retries=0,

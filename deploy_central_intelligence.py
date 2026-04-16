@@ -28,7 +28,7 @@ logger = logging.getLogger("deploy")
 
 # ── Constants ──
 GGUF_MODEL_DIR = os.getenv("QUENBOT_GGUF_MODEL_DIR", "/root/models")
-REQUIRED_MODEL = os.getenv("QUENBOT_DECISION_MODEL") or os.getenv("QUENBOT_LLM_MODEL") or "supergemma-26b"
+REQUIRED_MODEL = os.getenv("QUENBOT_DECISION_MODEL") or os.getenv("QUENBOT_LLM_MODEL") or "gemma-3-12b-it"
 GGUF_MODEL_CANDIDATES = [
     "gemma-2-27b-it-Q4_K_M.gguf",
     "gemma-2-27b-it-Q5_K_S.gguf",
