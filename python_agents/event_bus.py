@@ -89,6 +89,20 @@ class EventType(str, Enum):
     AGENT_HEARTBEAT = "agent.heartbeat"
     HORIZON_RESOLVED = "signal.horizon_resolved"
 
+    # Microstructure & regime intelligence
+    MICROSTRUCTURE_FEATURES = "microstructure.features"
+    REGIME_CHANGE = "regime.change"
+    ICEBERG_DETECTED = "fingerprint.iceberg"
+    SPOOF_DETECTED = "fingerprint.spoof"
+
+    # Learning pipeline
+    BARRIER_LABELED = "learning.barrier_labeled"
+    META_LABEL_DECISION = "learning.meta_label"
+    LOSS_AUTOPSY = "learning.loss_autopsy"
+    BANDIT_UPDATED = "learning.bandit_update"
+    META_MODEL_REFIT = "learning.meta_refit"
+    DRIFT_ALERT = "learning.drift_alert"
+
 
 @dataclass
 class Event:
@@ -127,6 +141,14 @@ class EventBus:
             "system.resource_warning",
             "health.report",
             "brain.learning_update",
+            "regime.change",
+            "fingerprint.iceberg",
+            "fingerprint.spoof",
+            "learning.loss_autopsy",
+            "learning.meta_refit",
+            "learning.drift_alert",
+            "learning.barrier_labeled",
+            "learning.bandit_update",
         }
 
     def _safe_preview(self, data: dict) -> dict:

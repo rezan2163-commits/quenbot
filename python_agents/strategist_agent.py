@@ -412,6 +412,41 @@ class StrategistAgent:
         if metadata:
             base_meta.update(metadata)
 
+        # ─── Enhanced intelligence snapshot (microstructure + regime + fingerprint) ───
+        try:
+            from enhanced_features import build_feature_snapshot, feature_vector_for_meta_labeler
+            snapshot = build_feature_snapshot(symbol)
+            if snapshot and (snapshot.get('microstructure') or snapshot.get('regime') or snapshot.get('fingerprint')):
+                base_meta['entry_features'] = snapshot
+            # Meta-labeler advisory (log-only; sinyal gating'i bozulmaz)
+            try:
+                from meta_labeler import get_meta_labeler
+                fv = feature_vector_for_meta_labeler(confidence=float(confidence), snapshot=snapshot)
+                adv = get_meta_labeler().predict(fv)
+                base_meta['meta_labeler'] = {
+                    'proba': adv.get('proba'),
+                    'accept': adv.get('accept'),
+                    'version': adv.get('version'),
+                    'reason': adv.get('reason'),
+                }
+            except Exception:
+                pass
+            # Conformal confidence interval
+            try:
+                from conformal import get_conformal
+                lo, hi, q = get_conformal().predict_interval(float(confidence))
+                base_meta['confidence_band'] = {'lo': round(lo, 4), 'hi': round(hi, 4), 'q': round(q, 4)}
+            except Exception:
+                pass
+            # Thompson-bandit EV
+            try:
+                from thompson_bandit import get_thompson_bandit
+                base_meta['bandit_ev'] = round(get_thompson_bandit().expected_value(signal_type), 4)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         return {
             'market_type': market_type,
             'symbol': symbol,

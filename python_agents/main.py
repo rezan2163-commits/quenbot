@@ -489,6 +489,10 @@ class AgentOrchestrator:
         self._setup_event_subscriptions()
         await self._bootstrap_learning_watchlist()
 
+        # 10.b Enhanced intelligence stack (microstructure, HMM, fingerprint,
+        #      meta-labeler, bandit, conformal, drift, loss autopsy).
+        await self._bootstrap_enhanced_intelligence()
+
         if not self._historical_warmup_task or self._historical_warmup_task.done():
             self._historical_warmup_task = asyncio.create_task(self._warm_historical_context())
 
@@ -661,6 +665,47 @@ class AgentOrchestrator:
                 )
         except Exception as e:
             logger.warning(f"Learning watchlist bootstrap skipped: {e}")
+
+    async def _bootstrap_enhanced_intelligence(self) -> None:
+        """Microstructure + HMM rejim + iceberg/spoof + meta-labeler + bandit + conformal + drift + otopsi."""
+        try:
+            from microstructure import get_microstructure_engine
+            from hmm_regime import get_hmm_detector
+            from iceberg_detector import get_iceberg_detector
+            from meta_labeler import get_meta_labeler
+            from thompson_bandit import get_thompson_bandit
+            from conformal import get_conformal
+            from alpha_drift_monitor import get_drift_monitor
+            from loss_autopsy import get_loss_autopsy
+        except Exception as e:
+            logger.warning(f"Enhanced intelligence imports failed: {e}")
+            return
+
+        self.micro_engine = get_microstructure_engine(self.event_bus)
+        self.hmm_detector = get_hmm_detector(self.event_bus)
+        self.iceberg = get_iceberg_detector(self.event_bus)
+        self.meta_labeler = get_meta_labeler()
+        self.bandit = get_thompson_bandit()
+        self.conformal = get_conformal(alpha=0.1)
+        self.drift_monitor = get_drift_monitor(self.event_bus)
+        self.loss_autopsy = get_loss_autopsy(self.db)
+
+        await self.bandit.load(self.db)
+
+        # wire event subscriptions
+        bus = self.event_bus
+        bus.subscribe(EventType.ORDER_BOOK_UPDATE, self.micro_engine.on_order_book)
+        bus.subscribe(EventType.ORDER_BOOK_UPDATE, self.iceberg.on_order_book)
+        bus.subscribe(EventType.SCOUT_PRICE_UPDATE, self.micro_engine.on_trade)
+        bus.subscribe(EventType.SCOUT_PRICE_UPDATE, self.hmm_detector.on_trade)
+
+        logger.info(
+            "🧬 Enhanced intelligence online: microstructure, HMM, fingerprint, "
+            "meta-labeler, bandit, conformal, drift, loss-autopsy"
+        )
+
+        # Cold-start meta-labeler fit in background (no-op if insufficient samples)
+        asyncio.create_task(self._refit_meta_labeler())
 
     async def _warmup_llm(self):
         """Prime the active model to reduce first-response latency for chat."""
@@ -1456,23 +1501,135 @@ class AgentOrchestrator:
             was_correct = len(hits) > len(misses)
             best_actual = max((abs(h.get('actual_change_pct', 0)) for h in horizons), default=0) * 100
 
-            # DB'ye öğrenme kaydı
-            await self.db.insert_learning_log(
-                signal_type=signal.get('signal_type', 'unknown'),
-                was_correct=was_correct,
-                pnl_pct=best_actual if was_correct else -best_actual,
-                context={
-                    'symbol': symbol,
-                    'direction': direction,
-                    'entry_price': float(metadata.get('entry_price', 0)),
-                    'confidence': float(signal.get('confidence', 0)),
-                    'signal_type': signal.get('signal_type', 'unknown'),
-                    'horizons_hit': len(hits),
-                    'horizons_missed': len(misses),
-                    'horizon_details': horizons,
-                    'analysis_type': 'horizon_complete',
-                },
+            # ─── Triple-barrier label on the PATH recorded by horizon tracker ───
+            barrier_result = await self._compute_triple_barrier_for_signal(
+                signal=signal, horizons=horizons, metadata=metadata, direction=direction,
             )
+
+            # DB'ye öğrenme kaydı (triple-barrier enriched)
+            try:
+                await self.db.insert_triple_barrier_log(
+                    signal_type=signal.get('signal_type', 'unknown'),
+                    was_correct=was_correct,
+                    pnl_pct=(best_actual if was_correct else -best_actual),
+                    symbol=symbol,
+                    direction=direction,
+                    confidence=float(signal.get('confidence', 0) or 0),
+                    barrier_hit=str(barrier_result.get('barrier_hit', 'timeout')),
+                    barrier_time_s=float(barrier_result.get('barrier_time_s', 0.0)),
+                    mfe_pct=float(barrier_result.get('mfe_pct', 0.0)),
+                    mae_pct=float(barrier_result.get('mae_pct', 0.0)),
+                    risk_adjusted_return=float(barrier_result.get('risk_adjusted_return', 0.0)),
+                    context={
+                        'symbol': symbol,
+                        'direction': direction,
+                        'entry_price': float(metadata.get('entry_price', 0)),
+                        'signal_type': signal.get('signal_type', 'unknown'),
+                        'horizons_hit': len(hits),
+                        'horizons_missed': len(misses),
+                        'horizon_details': horizons,
+                        'barrier': barrier_result,
+                        'entry_features': metadata.get('entry_features') or {},
+                    },
+                )
+            except Exception as db_err:
+                logger.debug(f"triple-barrier DB insert fallback: {db_err}")
+                # fallback to legacy insert so nothing is lost
+                await self.db.insert_learning_log(
+                    signal_type=signal.get('signal_type', 'unknown'),
+                    was_correct=was_correct,
+                    pnl_pct=best_actual if was_correct else -best_actual,
+                    context={'barrier': barrier_result, 'horizons': horizons, 'symbol': symbol},
+                )
+
+            # Bandit: strateji kolunu güncelle
+            try:
+                if hasattr(self, 'bandit') and self.bandit is not None:
+                    self.bandit.record_outcome(
+                        signal.get('signal_type', 'unknown'),
+                        success=was_correct,
+                        weight=1.0 + min(3.0, abs(best_actual) / 2.0),
+                    )
+                    await self.bandit.persist(self.db)
+                    await self.event_bus.publish(Event(
+                        type=EventType.BANDIT_UPDATED,
+                        source='thompson_bandit',
+                        data={'arm': signal.get('signal_type', 'unknown'),
+                              'success': was_correct,
+                              'ev': self.bandit.expected_value(signal.get('signal_type', 'unknown'))},
+                    ))
+            except Exception as be:
+                logger.debug(f"bandit update skipped: {be}")
+
+            # Conformal: confidence kalibrasyon kaydı
+            try:
+                if hasattr(self, 'conformal') and self.conformal is not None:
+                    self.conformal.record(float(signal.get('confidence', 0) or 0),
+                                          1 if was_correct else 0)
+            except Exception as ce:
+                logger.debug(f"conformal record skipped: {ce}")
+
+            # Barrier event yayını (terminale düşsün)
+            try:
+                await self.event_bus.publish(Event(
+                    type=EventType.BARRIER_LABELED,
+                    source='triple_barrier',
+                    data={
+                        'signal_id': signal.get('id'),
+                        'symbol': symbol,
+                        'direction': direction,
+                        'barrier_hit': barrier_result.get('barrier_hit'),
+                        'mfe_pct': barrier_result.get('mfe_pct'),
+                        'mae_pct': barrier_result.get('mae_pct'),
+                        'final_return_pct': barrier_result.get('final_return_pct'),
+                        'was_correct': was_correct,
+                    },
+                ))
+            except Exception as _be2:
+                logger.debug(f"barrier event skipped: {_be2}")
+
+            # ─── Loss autopsy (yalnızca kayıp/timeout sinyaller) ───
+            try:
+                if hasattr(self, 'loss_autopsy') and self.loss_autopsy is not None and not was_correct:
+                    current_price = float(horizons[-1].get('actual_price', 0) or metadata.get('entry_price', 0))
+                    entry_features = metadata.get('entry_features') or {}
+                    current_features = {}
+                    try:
+                        from enhanced_features import build_feature_snapshot
+                        current_features = build_feature_snapshot(symbol)
+                    except Exception:
+                        current_features = {}
+                    rec = await self.loss_autopsy.autopsy(
+                        signal=signal,
+                        barrier_result=barrier_result,
+                        entry_context=entry_features or current_features,
+                        current_context={'price': current_price, 'microstructure': current_features.get('microstructure'),
+                                         'regime': current_features.get('regime'),
+                                         'fingerprint': current_features.get('fingerprint')},
+                    )
+                    if rec is not None:
+                        await self.event_bus.publish(Event(
+                            type=EventType.LOSS_AUTOPSY,
+                            source='loss_autopsy',
+                            data={
+                                'symbol': symbol, 'signal_id': signal.get('id'),
+                                'loss_pct': rec.loss_pct,
+                                'root_causes': rec.root_causes[:3],
+                                'rule': rec.lesson_rule.get('avoid_if'),
+                                'score': rec.score,
+                            },
+                        ))
+            except Exception as ae:
+                logger.debug(f"loss autopsy skipped: {ae}")
+
+            # ─── Periyodik meta-labeler refit (her 25 tamamlanan sinyal) ───
+            try:
+                if hasattr(self, 'meta_labeler') and self.meta_labeler is not None:
+                    total_seen = int(self.brain.prediction_accuracy.get('total', 0)) if self.brain else 0
+                    if total_seen and total_seen % 25 == 0:
+                        asyncio.create_task(self._refit_meta_labeler())
+            except Exception as me:
+                logger.debug(f"meta refit tick skipped: {me}")
 
             # LLM ile neden kar/zarar olduğunu analiz ettir
             bridge = get_llm_bridge()
@@ -1489,6 +1646,7 @@ class AgentOrchestrator:
                             'horizon_outcomes': horizons,
                             'confidence': float(signal.get('confidence', 0)),
                             'similarity': float(metadata.get('avg_similarity', 0) or metadata.get('similarity', 0)),
+                            'barrier': barrier_result,
                         },
                         "holding_time_min": int(horizons[-1].get('eta_minutes', 240)),
                     })
@@ -1501,6 +1659,85 @@ class AgentOrchestrator:
 
         except Exception as e:
             logger.debug(f"Horizon analysis error: {e}")
+
+    async def _compute_triple_barrier_for_signal(
+        self, *, signal: dict, horizons: list, metadata: dict, direction: str,
+    ) -> dict:
+        """Horizon verilerinden triple-barrier etiketi üret (hızlı, approx path)."""
+        try:
+            from triple_barrier import compute_triple_barrier
+            entry_price = float(metadata.get('entry_price', 0) or signal.get('price', 0))
+            sig_ts = signal.get('timestamp')
+            from datetime import datetime as _dt
+            if isinstance(sig_ts, str):
+                entry_ts = _dt.fromisoformat(sig_ts.replace('Z', '+00:00')).replace(tzinfo=None).timestamp()
+            elif isinstance(sig_ts, _dt):
+                entry_ts = sig_ts.timestamp()
+            else:
+                entry_ts = 0.0
+            # path: horizon checkpointleri (eta_minutes sırasına göre)
+            path = []
+            for h in sorted(horizons, key=lambda x: int(x.get('eta_minutes', 0))):
+                if h.get('actual_price') is None or h.get('evaluated_at') is None:
+                    continue
+                try:
+                    eta_s = float(h.get('eta_minutes', 0)) * 60.0
+                    path.append((entry_ts + eta_s, float(h['actual_price'])))
+                except Exception:
+                    continue
+            target_pct = float(metadata.get('target_pct', 0.01) or 0.01)
+            tp_pct = max(0.003, abs(target_pct))
+            sl_pct = max(0.003, abs(target_pct) * 0.7)
+            timeout_s = max(900.0, float(max((h.get('eta_minutes', 60) for h in horizons), default=60)) * 60.0)
+            res = compute_triple_barrier(
+                direction=direction, entry_price=entry_price, entry_ts=entry_ts,
+                path=path, tp_pct=tp_pct, sl_pct=sl_pct, timeout_s=timeout_s,
+            )
+            return res.to_dict()
+        except Exception as e:
+            logger.debug(f"triple_barrier compute skipped: {e}")
+            return {'barrier_hit': 'timeout', 'final_return_pct': 0.0, 'mfe_pct': 0.0,
+                    'mae_pct': 0.0, 'risk_adjusted_return': 0.0, 'barrier_time_s': 0.0,
+                    'confidence_factor': 0.0}
+
+    async def _refit_meta_labeler(self) -> None:
+        """Son 21 günün barrier-etiketli kayıtlarından meta-labeler'ı yeniden eğit."""
+        try:
+            rows = await self.db.fetch_meta_training_set(lookback_days=21, limit=2000)
+            if not rows:
+                return
+            samples = []
+            for r in rows:
+                ctx = r.get('context') or {}
+                if isinstance(ctx, str):
+                    try: ctx = json.loads(ctx)
+                    except Exception: ctx = {}
+                entry_feats = (ctx.get('entry_features') or {})
+                ms = entry_feats.get('microstructure') or {}
+                reg = entry_feats.get('regime') or {}
+                fv = {
+                    'confidence': float(r.get('confidence', 0) or 0),
+                    'obi': float(ms.get('obi', 0) or 0),
+                    'vpin': float(ms.get('vpin', 0) or 0),
+                    'kyle_lambda': float(ms.get('kyle_lambda', 0) or 0),
+                    'aggressor_buy_ratio': float(ms.get('aggressor_buy_ratio', 0.5) or 0.5),
+                    'spread_bps': float(ms.get('spread_bps', 0) or 0),
+                    'trade_intensity': float(ms.get('trade_intensity', 0) or 0),
+                    'regime_trend_prob': float(reg.get('trend_prob', 0) or 0),
+                    'regime_vol_prob': float(reg.get('vol_prob', 0) or 0),
+                    'hist_accuracy': 0.5,
+                    'hist_avg_pnl': 0.0,
+                }
+                label = 1 if str(r.get('barrier_hit', '')) == 'tp' else 0
+                samples.append((fv, label))
+            res = self.meta_labeler.fit(samples)
+            await self.event_bus.publish(Event(
+                type=EventType.META_MODEL_REFIT, source='meta_labeler', data=res,
+            ))
+            logger.info(f"🧪 Meta-labeler refit: {res}")
+        except Exception as e:
+            logger.debug(f"meta refit skipped: {e}")
+
 
     async def _chat_processor(self):
         """Chat mesajlarını kontrol et ve cevapla — DB polling azaltıldı"""
@@ -1566,6 +1803,46 @@ class AgentOrchestrator:
                         'role': 'simulation_feedback_receiver',
                     }),
                 )
+
+                # ─── Enhanced intelligence heartbeats (microstructure, HMM, fingerprint, bandit) ───
+                try:
+                    if hasattr(self, 'micro_engine') and self.micro_engine is not None:
+                        ms_h = await self.micro_engine.health_check()
+                        await self.db.update_heartbeat('microstructure',
+                            'running' if ms_h.get('healthy') else 'degraded', ms_h)
+                    if hasattr(self, 'hmm_detector') and self.hmm_detector is not None:
+                        hm_h = await self.hmm_detector.health_check()
+                        await self.db.update_heartbeat('regime_hmm',
+                            'running' if hm_h.get('healthy') else 'degraded', hm_h)
+                    if hasattr(self, 'iceberg') and self.iceberg is not None:
+                        ib_h = await self.iceberg.health_check()
+                        await self.db.update_heartbeat('fingerprint_detector',
+                            'running' if ib_h.get('healthy') else 'degraded', ib_h)
+                    if hasattr(self, 'loss_autopsy') and self.loss_autopsy is not None:
+                        la_h = await self.loss_autopsy.health_check()
+                        await self.db.update_heartbeat('loss_autopsy',
+                            'running' if la_h.get('healthy') else 'degraded', la_h)
+                    if hasattr(self, 'meta_labeler') and self.meta_labeler is not None:
+                        ml_s = self.meta_labeler.status()
+                        await self.db.update_heartbeat('meta_labeler',
+                            'running' if ml_s.get('trained') else 'pending', ml_s)
+                    if hasattr(self, 'bandit') and self.bandit is not None:
+                        await self.db.update_heartbeat('thompson_bandit', 'running', {
+                            'arms': len(self.bandit.arms),
+                            'top_arm': max(self.bandit.arms.items(),
+                                           key=lambda kv: kv[1]['alpha'] / (kv[1]['alpha']+kv[1]['beta']),
+                                           default=('n/a', {'alpha':1,'beta':1}))[0] if self.bandit.arms else 'n/a',
+                        })
+                    if hasattr(self, 'conformal') and self.conformal is not None:
+                        await self.db.update_heartbeat('conformal_calibrator', 'running',
+                                                       self.conformal.snapshot())
+                    if hasattr(self, 'drift_monitor') and self.drift_monitor is not None:
+                        dm_r = await self.drift_monitor.tick()
+                        dm_h = await self.drift_monitor.health_check()
+                        await self.db.update_heartbeat('alpha_drift',
+                            'running' if dm_h.get('healthy') else 'warning', {**dm_h, **dm_r})
+                except Exception as _enh_hb_err:
+                    logger.debug(f"enhanced intelligence heartbeat skipped: {_enh_hb_err}")
 
                 # ─── LLM health + degraded mode tracking ───
                 llm_was_available = self._llm_available

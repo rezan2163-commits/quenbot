@@ -1230,6 +1230,81 @@ app.get("/api/brain/learning-log", async (req, res) => {
   }
 });
 
+// ─── Enhanced Intelligence: Loss Autopsy ───
+
+app.get("/api/brain/loss-autopsies", async (req, res) => {
+  try {
+    const limit = Math.min(100, Number(req.query.limit || 20));
+    const rows = await sql`
+      SELECT id, signal_id, symbol, signal_type, direction,
+             entry_price::double precision AS entry_price,
+             exit_price::double precision AS exit_price,
+             loss_pct::double precision AS loss_pct,
+             barrier_hit, duration_s::double precision AS duration_s,
+             root_causes, microstructure, regime, fingerprint, temporal,
+             lesson_rule, score::double precision AS score, created_at
+      FROM loss_autopsies ORDER BY created_at DESC LIMIT ${limit}
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/brain/autopsy-rules", async (req, res) => {
+  try {
+    const rows = await sql`
+      SELECT lesson_rule, COUNT(*)::int AS frequency,
+             AVG(score)::double precision AS avg_score
+      FROM loss_autopsies
+      WHERE created_at > NOW() - INTERVAL '7 days'
+      GROUP BY lesson_rule
+      ORDER BY frequency DESC LIMIT 50
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/brain/bandit", async (_req, res) => {
+  try {
+    const rows = await sql`
+      SELECT arm, alpha::double precision AS alpha, beta::double precision AS beta,
+             n, last_ts::double precision AS last_ts
+      FROM bandit_state ORDER BY (alpha / NULLIF(alpha+beta,0)) DESC
+    `;
+    const arms = rows.map((r: any) => ({
+      arm: r.arm, alpha: r.alpha, beta: r.beta, n: r.n,
+      expected_value: r.alpha / Math.max(r.alpha + r.beta, 1e-9),
+      last_ts: r.last_ts,
+    }));
+    res.json({ arms });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/brain/barrier-stats", async (_req, res) => {
+  try {
+    const rows = await sql`
+      SELECT signal_type, barrier_hit, COUNT(*)::int AS n,
+             AVG(mfe_pct)::double precision AS avg_mfe,
+             AVG(mae_pct)::double precision AS avg_mae,
+             AVG(barrier_time_s)::double precision AS avg_time_s,
+             AVG(risk_adjusted_return)::double precision AS avg_risk_adj
+      FROM brain_learning_log
+      WHERE barrier_hit IS NOT NULL
+        AND created_at > NOW() - INTERVAL '14 days'
+      GROUP BY signal_type, barrier_hit
+      ORDER BY signal_type, barrier_hit
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 // ─── Admin Auth ───
 const ADMIN_PIN = process.env.ADMIN_PIN || "BABA";
 

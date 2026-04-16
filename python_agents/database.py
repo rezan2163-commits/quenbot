@@ -635,6 +635,89 @@ class Database:
                 ALTER TABLE signals ALTER COLUMN signal_type TYPE VARCHAR(50)
             """)
 
+            # ──────────── Enhanced intelligence tables (triple-barrier + autopsy + bandit) ────────────
+            for stmt in (
+                "ALTER TABLE brain_learning_log ADD COLUMN IF NOT EXISTS barrier_hit VARCHAR(16)",
+                "ALTER TABLE brain_learning_log ADD COLUMN IF NOT EXISTS barrier_time_s DOUBLE PRECISION",
+                "ALTER TABLE brain_learning_log ADD COLUMN IF NOT EXISTS mfe_pct DOUBLE PRECISION",
+                "ALTER TABLE brain_learning_log ADD COLUMN IF NOT EXISTS mae_pct DOUBLE PRECISION",
+                "ALTER TABLE brain_learning_log ADD COLUMN IF NOT EXISTS risk_adjusted_return DOUBLE PRECISION",
+                "ALTER TABLE brain_learning_log ADD COLUMN IF NOT EXISTS symbol VARCHAR(24)",
+                "ALTER TABLE brain_learning_log ADD COLUMN IF NOT EXISTS direction VARCHAR(8)",
+                "ALTER TABLE brain_learning_log ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION",
+            ):
+                try:
+                    await conn.execute(stmt)
+                except Exception as e:
+                    logger.debug(f"migration skipped: {e}")
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS loss_autopsies (
+                    id SERIAL PRIMARY KEY,
+                    signal_id INTEGER,
+                    symbol VARCHAR(24),
+                    signal_type VARCHAR(64),
+                    direction VARCHAR(8),
+                    entry_price DOUBLE PRECISION,
+                    exit_price DOUBLE PRECISION,
+                    loss_pct DOUBLE PRECISION,
+                    barrier_hit VARCHAR(16),
+                    duration_s DOUBLE PRECISION,
+                    root_causes JSONB,
+                    microstructure JSONB,
+                    regime JSONB,
+                    fingerprint JSONB,
+                    temporal JSONB,
+                    lesson_rule JSONB,
+                    score DOUBLE PRECISION,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_loss_autopsies_symbol ON loss_autopsies(symbol, created_at DESC)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_loss_autopsies_rule ON loss_autopsies USING GIN(lesson_rule)")
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS bandit_state (
+                    arm VARCHAR(64) PRIMARY KEY,
+                    alpha DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    beta DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    n INTEGER NOT NULL DEFAULT 0,
+                    last_ts DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS microstructure_snapshots (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(24) NOT NULL,
+                    mid_price DOUBLE PRECISION,
+                    micro_price DOUBLE PRECISION,
+                    obi DOUBLE PRECISION,
+                    vpin DOUBLE PRECISION,
+                    kyle_lambda DOUBLE PRECISION,
+                    spread_bps DOUBLE PRECISION,
+                    aggressor_buy_ratio DOUBLE PRECISION,
+                    trade_intensity DOUBLE PRECISION,
+                    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_ms_snap_sym_ts ON microstructure_snapshots(symbol, ts DESC)")
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS meta_label_decisions (
+                    id SERIAL PRIMARY KEY,
+                    signal_id INTEGER,
+                    symbol VARCHAR(24),
+                    proba DOUBLE PRECISION,
+                    accepted BOOLEAN,
+                    threshold DOUBLE PRECISION,
+                    model_version INTEGER,
+                    features JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
     # Trade operations
     async def insert_trade(self, trade_data: Dict[str, Any]) -> int:
         """Insert a new trade"""
@@ -1280,6 +1363,55 @@ class Database:
                 INSERT INTO brain_learning_log (signal_type, was_correct, pnl_pct, context)
                 VALUES ($1, $2, $3, $4) RETURNING id
             """, signal_type, was_correct, pnl_pct, _dumps(context or {}))
+
+    async def insert_triple_barrier_log(
+        self,
+        *,
+        signal_type: str,
+        was_correct: bool,
+        pnl_pct: float,
+        symbol: str,
+        direction: str,
+        confidence: float,
+        barrier_hit: str,
+        barrier_time_s: float,
+        mfe_pct: float,
+        mae_pct: float,
+        risk_adjusted_return: float,
+        context: Dict[str, Any] = None,
+    ) -> int:
+        """Triple-barrier etiketli brain_learning_log kaydı."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                INSERT INTO brain_learning_log
+                    (signal_type, was_correct, pnl_pct, context, symbol, direction,
+                     confidence, barrier_hit, barrier_time_s, mfe_pct, mae_pct,
+                     risk_adjusted_return)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                RETURNING id
+                """,
+                signal_type, was_correct, pnl_pct, _dumps(context or {}),
+                symbol, direction, confidence,
+                barrier_hit, barrier_time_s, mfe_pct, mae_pct, risk_adjusted_return,
+            )
+
+    async def fetch_meta_training_set(self, lookback_days: int = 21, limit: int = 2000) -> List[Dict[str, Any]]:
+        """Meta-labeler eğitimi için (features, label) çekimi."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT signal_type, barrier_hit, context, symbol, direction, confidence,
+                       was_correct, pnl_pct
+                FROM brain_learning_log
+                WHERE created_at > NOW() - ($1 || ' days')::interval
+                  AND barrier_hit IS NOT NULL
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                str(int(lookback_days)), int(limit),
+            )
+            return [dict(r) for r in rows]
 
     async def get_learning_stats(self) -> Dict[str, Any]:
         async with self.pool.acquire() as conn:
