@@ -2185,8 +2185,8 @@ app.get("/api/integration/overview", async (_req, res) => {
         LIMIT 96
       `,
       sql`SELECT metadata FROM agent_heartbeat WHERE agent_name = 'system_resources' LIMIT 1`,
-      fetchJsonOrNull(`${DIRECTIVE_API}/api/system/summary`),
-      fetchJsonOrNull(`${DIRECTIVE_API}/api/directives`),
+      fetchJsonOrNull(`${DIRECTIVE_API}/api/system/summary`, 2000, 0),
+      fetchJsonOrNull(`${DIRECTIVE_API}/api/directives`, 2000, 0),
       readJsonFileOrNull(path.join(EFOM_REPORTS_DIR, "post_mortem_report.json")).then(async (postMortem) => {
         const trials = await readJsonFileOrNull(path.join(EFOM_REPORTS_DIR, "optuna_trials.json"));
         return {
@@ -2209,28 +2209,36 @@ app.get("/api/integration/overview", async (_req, res) => {
     }
 
     // Brain evolution: daily accuracy & avg PnL over last 14 days
-    const brainEvolution = await sql`
-      SELECT
-        DATE_TRUNC('day', created_at) AS day,
-        COUNT(*)::int AS total,
-        COUNT(CASE WHEN was_correct THEN 1 END)::int AS correct,
-        COALESCE(AVG(pnl_pct), 0)::double precision AS avg_pnl
-      FROM brain_learning_log
-      WHERE created_at >= NOW() - INTERVAL '14 days'
-      GROUP BY 1
-      ORDER BY 1 ASC
-    `;
-    const brainEvolutionSeries = (brainEvolution as any[]).map((row) => {
-      const total = Number(row.total || 0);
-      const correct = Number(row.correct || 0);
-      return {
-        day: row.day,
-        total,
-        correct,
-        accuracy: total > 0 ? (correct / total) * 100 : 0,
-        avg_pnl: Number(row.avg_pnl || 0),
-      };
-    });
+    let brainEvolutionSeries: Array<{ day: any; total: number; correct: number; accuracy: number; avg_pnl: number }> = [];
+    try {
+      const brainEvolution = await Promise.race([
+        sql`
+          SELECT
+            DATE_TRUNC('day', created_at) AS day,
+            COUNT(*)::int AS total,
+            COUNT(CASE WHEN was_correct THEN 1 END)::int AS correct,
+            COALESCE(AVG(pnl_pct), 0)::double precision AS avg_pnl
+          FROM brain_learning_log
+          WHERE created_at >= NOW() - INTERVAL '14 days'
+          GROUP BY 1
+          ORDER BY 1 ASC
+        `,
+        new Promise<any[]>((_, reject) => setTimeout(() => reject(new Error("brain_evolution timeout")), 3000)),
+      ]);
+      brainEvolutionSeries = (brainEvolution as any[]).map((row) => {
+        const total = Number(row.total || 0);
+        const correct = Number(row.correct || 0);
+        return {
+          day: row.day,
+          total,
+          correct,
+          accuracy: total > 0 ? (correct / total) * 100 : 0,
+          avg_pnl: Number(row.avg_pnl || 0),
+        };
+      });
+    } catch (e) {
+      console.warn("[integration] brain_evolution failed:", String(e));
+    }
 
     // Per-agent intelligence score: combines activity freshness + contribution
     const agentIntelligence = (heartbeats as any[]).map((hb: any) => {
