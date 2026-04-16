@@ -366,6 +366,7 @@ export default function IntegrationPanel() {
               ))}
             </div>
           )}
+        </section>
 
         <section className="rounded-2xl border border-white/8 bg-black/20 p-3">
           <div className="flex items-center gap-2 text-[11px] text-gray-300 font-semibold mb-3"><Radar size={13} className="text-sky-300" /> Model Dağılımı</div>
