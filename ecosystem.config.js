@@ -74,16 +74,18 @@ module.exports = {
         QUENBOT_CHAT_QUICK_MAX_TOKENS: "120",
         QUENBOT_GGUF_MODEL_DIR: process.env.QUENBOT_GGUF_MODEL_DIR || "/root/models",
         QUENBOT_GGUF_MODEL_FILE: process.env.QUENBOT_GGUF_MODEL_FILE || "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-        QUENBOT_GGUF_NUM_THREADS: "6",
-        QUENBOT_GGUF_NUM_CTX: "8192",
+        // Zen4 CPU'da libggml-cpu.so thread race segfault atiyor (hem 0.3.20
+        // hem 0.3.2'de). Tek cozum: single-thread inference + OMP kapali.
+        // 7B Q4 modelde inference yine 15-25s — kabul edilebilir.
+        QUENBOT_GGUF_NUM_THREADS: "1",
+        OMP_NUM_THREADS: "1",
+        OPENBLAS_NUM_THREADS: "1",
+        MKL_NUM_THREADS: "1",
+        GGML_CPU_NO_REPACK: "1",
+        QUENBOT_GGUF_NUM_CTX: "4096",
         QUENBOT_GGUF_MAX_TOKENS: "512",
-        QUENBOT_GGUF_BATCH_SIZE: "512",
-        QUENBOT_GGUF_UBATCH_SIZE: "512",
-        // llama-cpp-python 0.3.2 (downgrade edildi): Zen4'te 0.3.20 libggml-cpu.so
-        // multi-thread yolunda segfault atiyordu. 0.3.2 stabil; thread'leri geri
-        // actik. Repack/OMP sinirlamalari kaldirildi cunku 0.3.2'de ilgili kodlar
-        // yok (repack.cpp:4238 assert path'i sonradan eklendi).
-        // Eger 0.3.2'de de segfault gorursek tek tek restore edebiliriz.
+        QUENBOT_GGUF_BATCH_SIZE: "256",
+        QUENBOT_GGUF_UBATCH_SIZE: "256",
         QUENBOT_ENABLE_REDIS: process.env.QUENBOT_ENABLE_REDIS || "1",
         QUENBOT_REDIS_URL: process.env.QUENBOT_REDIS_URL || "redis://127.0.0.1:6379/0",
         QUENBOT_VECTOR_DB_PATH: process.env.QUENBOT_VECTOR_DB_PATH || "./.chroma",
