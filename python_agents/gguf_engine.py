@@ -211,7 +211,7 @@ class GGUFEngine:
             n_batch=GGUF_BATCH_SIZE,
             n_gpu_layers=GGUF_NUM_GPU_LAYERS,
             verbose=False,
-            use_mmap=True,
+            use_mmap=False,
             use_mlock=False,
             seed=-1,
         )
