@@ -1910,8 +1910,8 @@ app.post("/api/chat", express.json(), async (req, res) => {
   try {
     // Forward to Python agents on port 3002 with a bounded timeout for snappy UX.
     const controller = new AbortController();
-    // Gemma 4 MoE model needs ~20-30s for quality responses - allow 60s timeout.
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    // Gemma 3 12B model needs ~5-15s for quality responses - allow 30s timeout.
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
 
     try {
       const agentResponse = await fetch("http://127.0.0.1:3002/api/chat", {

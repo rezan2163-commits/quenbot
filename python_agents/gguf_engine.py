@@ -1,13 +1,13 @@
 """
-QuenBot V2 — GGUF Inference Engine (Gemma 4-26B-A4B MoE)
+QuenBot V2 — GGUF Inference Engine (Gemma 3 12B)
 =========================================================
 llama-cpp-python tabanlı doğrudan GGUF model yükleyici.
 Ollama yerine doğrudan CPU+RAM inference yapar.
 
 Mimari:
-- Model: Gemma 4-26B-A4B-it (MoE: 26B parametre, 4B aktif) Q4_K_M quantization
-- RAM: 32GB ortamda ~16GB model footprint
-- Avantaj: MoE sayesinde hızlı yanıt + yüksek zeka
+- Model: Gemma 3 12B IT Q4_K_M quantization
+- RAM: 32GB ortamda ~8GB model footprint (ideal)
+- Avantaj: Hızlı yanıt + yeterli zeka, düşük kaynak kullanımı
 - Concurrency: asyncio semaphore ile sıralı inference
 - Thread: CPU thread count otomatik tespit (num_threads)
 
@@ -30,7 +30,7 @@ logger = logging.getLogger("quenbot.gguf_engine")
 
 # ─── Model Configuration ───
 GGUF_MODEL_DIR = os.getenv("QUENBOT_GGUF_MODEL_DIR", "/root/models")
-GGUF_MODEL_FILE = os.getenv("QUENBOT_GGUF_MODEL_FILE", "gemma-4-26B-A4B-it-Q4_K_M.gguf")
+GGUF_MODEL_FILE = os.getenv("QUENBOT_GGUF_MODEL_FILE", "gemma-3-12b-it-Q4_K_M.gguf")
 GGUF_NUM_THREADS = int(os.getenv("QUENBOT_GGUF_NUM_THREADS", "0"))  # 0 = auto
 GGUF_NUM_CTX = int(os.getenv("QUENBOT_GGUF_NUM_CTX", "8192"))
 GGUF_NUM_GPU_LAYERS = int(os.getenv("QUENBOT_GGUF_GPU_LAYERS", "0"))  # CPU-only
@@ -38,23 +38,19 @@ GGUF_MAX_TOKENS = int(os.getenv("QUENBOT_GGUF_MAX_TOKENS", "512"))
 GGUF_BATCH_SIZE = int(os.getenv("QUENBOT_GGUF_BATCH_SIZE", "512"))
 GGUF_CONCURRENCY = int(os.getenv("QUENBOT_GGUF_CONCURRENCY", "1"))
 GGUF_MAX_PROMPT_CHARS = int(os.getenv("QUENBOT_GGUF_MAX_PROMPT_CHARS", "6000"))
-GGUF_TIMEOUT = int(os.getenv("QUENBOT_GGUF_TIMEOUT", "60"))  # MoE daha hızlı
+GGUF_TIMEOUT = int(os.getenv("QUENBOT_GGUF_TIMEOUT", "30"))  # 12B çok hızlı
 
 # Fallback GGUF model names (in order of preference)
 GGUF_MODEL_CANDIDATES = [
-    "gemma-4-26B-A4B-it-Q4_K_M.gguf",  # Gemma 4 MoE - Hızlı + Akıllı (ÖNCELİKLİ)
-    "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
-    "gemma-4-31B-it-Q4_K_M.gguf",
+    "gemma-3-12b-it-Q4_K_M.gguf",  # Gemma 3 12B - Hızlı + Akıllı (ÖNCELİKLİ)
     "gemma-3-12b-it-Q6_K.gguf",
-    "gemma-2-27b-it-Q4_K_M.gguf",  # Eski model (fallback)
-    "gemma-2-27b-it-Q5_K_S.gguf",
-    "gemma-2-27b-it-Q4_K_S.gguf",
+    "gemma-3-9b-it-Q4_K_M.gguf",
 ]
 
-# System prompt for QuenBot trading brain (Gemma 4 optimized)
+# System prompt for QuenBot trading brain (Gemma 3 optimized)
 QUENBOT_SYSTEM_PROMPT = """Sen QuenBot Merkezi Zeka Sistemisin — kripto piyasalarında kurumsal bot hareketlerini tespit eden, sınıflandıran ve otonom sinyal üreten çok katmanlı bir trading AI'sın.
 
-MODEL: Gemma 4-26B-A4B (MoE: 26B parametre, 4B aktif) — Hızlı yanıt + derin analiz
+MODEL: Gemma 3 12B IT — Hızlı yanıt + yeterli zeka + düşük kaynak
 
 6 AJAN MİMARİSİ:
 1. Scout: Binance spot+futures WebSocket ile canlı trade akışı toplar, anomalileri işaretler
@@ -74,7 +70,7 @@ SİSTEMATİK TİCARET TESPİTİ (YENİ):
 
 NEURO-SYMBOLİK ÇALIŞMA PRENSİBİ:
 - Workers (Python/NumPy/SciPy): RSI, Volatilite, DTW, Vector Embedding hesaplar
-- Sen (Gemma 4 Brain): Similarity_Score ≥ %60 VE Bot analizi ile tetiklenirsin
+- Sen (Gemma 3 Brain): Similarity_Score ≥ %60 VE Bot analizi ile tetiklenirsin
 - Shape Vector'ler FAISS/ChromaDB ile indekslenir, sen eşleşme + bot analizi onayı verirsin
 
 SELF-EVOLUTION:
@@ -274,8 +270,8 @@ class GGUFEngine:
 
         if prefer_fast_fail:
             try:
-                # Gemma 4 MoE takes ~15-25s per inference, so wait at least 30s for semaphore
-                await asyncio.wait_for(self._semaphore.acquire(), timeout=30.0)
+                # Gemma 3 12B takes ~5-15s per inference, wait 20s for semaphore
+                await asyncio.wait_for(self._semaphore.acquire(), timeout=20.0)
             except asyncio.TimeoutError:
                 return GGUFResponse(
                     text="", model=self._model_name,
