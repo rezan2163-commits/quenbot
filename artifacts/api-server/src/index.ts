@@ -2104,9 +2104,13 @@ app.get("/api/agents/flow", async (_req, res) => {
   }
 });
 
-app.get("/api/integration/overview", async (_req, res) => {
-  try {
-    const [heartbeats, recentSignals, sourcePerformance, learningStats, stateHistory, resourceHb, systemSummary, directives, efomOverview] = await Promise.all([
+// Cache the integration overview response to smooth out slow underlying queries.
+let _integrationOverviewCache: { data: any; updatedAt: number } | null = null;
+let _integrationOverviewInFlight: Promise<any> | null = null;
+const INTEGRATION_OVERVIEW_TTL_MS = 8000;
+
+async function _computeIntegrationOverview(): Promise<any> {
+  const [heartbeats, recentSignals, sourcePerformance, learningStats, stateHistory, resourceHb, systemSummary, directives, efomOverview] = await Promise.all([
       sql`
         SELECT
           agent_name,
@@ -2360,7 +2364,7 @@ app.get("/api/integration/overview", async (_req, res) => {
       return best;
     }, null);
 
-    res.json({
+    return {
       generated_at: new Date().toISOString(),
       agents: agentRows,
       models: Array.from(modelsMap.values()).sort((a, b) => b.activity - a.activity).slice(0, 10),
@@ -2426,8 +2430,31 @@ app.get("/api/integration/overview", async (_req, res) => {
           optuna_best_trial: bestTrial,
         },
       },
-    });
+    };
+}
+
+app.get("/api/integration/overview", async (_req, res) => {
+  const now = Date.now();
+  if (_integrationOverviewCache && now - _integrationOverviewCache.updatedAt < INTEGRATION_OVERVIEW_TTL_MS) {
+    return res.json(_integrationOverviewCache.data);
+  }
+  if (!_integrationOverviewInFlight) {
+    _integrationOverviewInFlight = _computeIntegrationOverview()
+      .then((data) => {
+        _integrationOverviewCache = { data, updatedAt: Date.now() };
+        return data;
+      })
+      .finally(() => {
+        _integrationOverviewInFlight = null;
+      });
+  }
+  try {
+    const data = await _integrationOverviewInFlight;
+    res.json(data);
   } catch (error) {
+    if (_integrationOverviewCache) {
+      return res.json(_integrationOverviewCache.data);
+    }
     res.status(500).json({ error: String(error) });
   }
 });
