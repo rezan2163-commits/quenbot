@@ -2777,19 +2777,19 @@ class AgentOrchestrator:
             if "risk" in lower:
                 risk_changes = {}
 
-                m_trades = re.search(r"(max|en fazla)?\s*(\d+)\s*(işlem|trade)", lower)
+                m_trades = re.search(r"(max|en fazla)?\s*(\d+)\s*(i[sş]lem|trade)", lower)
                 if m_trades:
                     risk_changes["max_daily_trades"] = int(m_trades.group(2))
 
-                m_open = re.search(r"(max|en fazla)?\s*(\d+)\s*(açık pozisyon|open position|pozisyon)", lower)
+                m_open = re.search(r"(max|en fazla)?\s*(\d+)\s*(a[çc][ıi]k\s*pozisyon|open\s*position|pozisyon)", lower)
                 if m_open:
                     risk_changes["max_open_positions"] = int(m_open.group(2))
 
-                m_loss = re.search(r"(-?\d+(?:\.\d+)?)\s*%\s*(günlük zarar|daily loss)", lower)
+                m_loss = re.search(r"(-?\d+(?:\.\d+)?)\s*%\s*(g[üu]nl[üu]k\s*zarar|daily\s*loss)", lower)
                 if m_loss:
                     risk_changes["max_daily_loss_pct"] = float(m_loss.group(1))
 
-                m_dd = re.search(r"(-?\d+(?:\.\d+)?)\s*%\s*(drawdown|max drawdown)", lower)
+                m_dd = re.search(r"(-?\d+(?:\.\d+)?)\s*%\s*(drawdown|max\s*drawdown)", lower)
                 if m_dd:
                     risk_changes["max_drawdown_pct"] = float(m_dd.group(1))
 
