@@ -20,11 +20,12 @@ import SimilarityPanel from "@/components/SimilarityPanel";
 import IntegrationPanel from "@/components/IntegrationPanel";
 import MobileLiteDashboard from "@/components/MobileLiteDashboard";
 import { swrConfig } from "@/lib/api";
-import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain, TerminalSquare, Radar, Activity, PanelLeft, X, Fingerprint } from "lucide-react";
+import { BarChart3, GitBranch, Radio, Crosshair, Database, History, Brain, TerminalSquare, Radar, Activity, PanelLeft, X, Fingerprint, Sparkles } from "lucide-react";
 
 // Heavy components — lazy load
 const BacktestPanel = dynamic(() => import("@/components/BacktestPanel"), { ssr: false, loading: () => <div className="p-4 text-gray-600 text-xs">Yükleniyor...</div> });
 const AgentFlow = dynamic(() => import("@/components/AgentFlow"), { ssr: false, loading: () => <div className="p-4 text-gray-600 text-xs">Yükleniyor...</div> });
+const IntelPanel = dynamic(() => import("@/components/IntelPanel"), { ssr: false, loading: () => <div className="p-4 text-gray-600 text-xs">Yükleniyor...</div> });
 
 class ErrorBoundary extends Component<{ children: ReactNode; fallback?: string }, { hasError: boolean; error: string }> {
   constructor(props: { children: ReactNode; fallback?: string }) {
@@ -53,9 +54,10 @@ class ErrorBoundary extends Component<{ children: ReactNode; fallback?: string }
 }
 
 function RightPanel() {
-  const [tab, setTab] = useState<"market" | "signals" | "backtest" | "flow" | "integration" | "mamis" | "patterns" | "similarity" | "history" | "learning" | "intercom">("market");
+  const [tab, setTab] = useState<"intel" | "market" | "signals" | "backtest" | "flow" | "integration" | "mamis" | "patterns" | "similarity" | "history" | "learning" | "intercom">("intel");
 
   const tabs = [
+    { key: "intel" as const, icon: Sparkles, label: "Intel" },
     { key: "market" as const, icon: Radio, label: "Piyasa" },
     { key: "signals" as const, icon: Crosshair, label: "Sinyaller" },
     { key: "backtest" as const, icon: BarChart3, label: "Backtest" },
@@ -88,6 +90,7 @@ function RightPanel() {
       </div>
       {/* Panel content */}
       <div className="flex-1 min-h-0">
+        {tab === "intel" && <IntelPanel />}
         {tab === "market" && <WatchlistManager />}
         {tab === "signals" && <ActiveSignals />}
         {tab === "backtest" && <BacktestPanel />}

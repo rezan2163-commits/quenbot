@@ -2053,6 +2053,51 @@ app.get("/api/mamis/status", async (_req, res) => {
   }
 });
 
+/* ═══ Intel Upgrade (Phase 1-5) Proxy ═══ */
+app.get("/api/intel/summary", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/intel/summary`);
+    res.json(await r.json());
+  } catch { res.json({ error: "intel summary unavailable" }); }
+});
+app.get("/api/confluence/:symbol", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/confluence/${encodeURIComponent(req.params.symbol)}`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ error: "confluence unavailable" }); }
+});
+app.get("/api/cross-asset/graph", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/cross-asset/graph`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ error: "cross_asset unavailable" }); }
+});
+app.get("/api/cross-asset/:symbol", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/cross-asset/${encodeURIComponent(req.params.symbol)}`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ error: "cross_asset unavailable" }); }
+});
+app.get("/api/fast-brain/:symbol", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/fast-brain/${encodeURIComponent(req.params.symbol)}`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ error: "fast_brain unavailable" }); }
+});
+app.get("/api/decision-router/status", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/decision-router/status`);
+    res.json(await r.json());
+  } catch { res.json({ enabled: false, error: "decision_router unavailable" }); }
+});
+app.get("/api/online-learning/stats", async (req, res) => {
+  try {
+    const qs = req.query.symbol ? `?symbol=${encodeURIComponent(String(req.query.symbol))}` : "";
+    const r = await fetch(`${DIRECTIVE_API}/api/online-learning/stats${qs}`);
+    res.json(await r.json());
+  } catch { res.json({ enabled: false, error: "online_learning unavailable" }); }
+});
+
 /* ═══ DATA AUDIT / VALIDATION ═══ */
 app.get("/api/audit/validate", async (req, res) => {
   try {
