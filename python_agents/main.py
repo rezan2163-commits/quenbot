@@ -881,6 +881,53 @@ class AgentOrchestrator:
         except Exception as e:
             logger.debug("decision_core Phase 3 wiring skip: %s", e)
 
+        # ── Phase 4: Online Learning Evaluator ────────────────────
+        self.online_learning = None
+        self._online_learning_task = None
+        if getattr(Config, "ONLINE_LEARNING_ENABLED", False):
+            try:
+                from online_learning import get_online_learning_evaluator
+                self.online_learning = get_online_learning_evaluator(
+                    log_path=Config.DECISION_ROUTER_LOG_PATH,
+                    horizon_min=Config.ONLINE_LEARNING_HORIZON_MIN,
+                    interval_min=Config.ONLINE_LEARNING_INTERVAL_MIN,
+                    min_samples=Config.ONLINE_LEARNING_MIN_SAMPLES,
+                    state_path=Config.ONLINE_LEARNING_STATE_PATH,
+                )
+                self._online_learning_task = self.online_learning.start()
+                logger.info(
+                    "📈 OnlineLearning online (interval=%dm, horizon=%dm)",
+                    Config.ONLINE_LEARNING_INTERVAL_MIN,
+                    Config.ONLINE_LEARNING_HORIZON_MIN,
+                )
+            except Exception as e:
+                logger.warning("OnlineLearning bootstrap başarısız: %s", e)
+
+        # ── Phase 5: Metrics Exporter ─────────────────────────────
+        self.metrics_exporter = None
+        if getattr(Config, "METRICS_EXPORTER_ENABLED", False):
+            try:
+                from metrics_exporter import get_metrics_exporter
+                self.metrics_exporter = get_metrics_exporter(
+                    port=Config.METRICS_EXPORTER_PORT,
+                )
+                # register all intel modules that expose metrics()
+                for name, obj in [
+                    ("feature_store", getattr(self, "feature_store", None)),
+                    ("ofi", getattr(self, "ofi_engine", None)),
+                    ("multi_horizon", getattr(self, "multi_horizon_engine", None)),
+                    ("confluence", getattr(self, "confluence_engine", None)),
+                    ("cross_asset", getattr(self, "cross_asset_engine", None)),
+                    ("fast_brain", getattr(self, "fast_brain_engine", None)),
+                    ("decision_router", getattr(self, "decision_router", None)),
+                    ("online_learning", getattr(self, "online_learning", None)),
+                ]:
+                    if obj is not None and hasattr(obj, "metrics"):
+                        self.metrics_exporter.register(name, obj.metrics)
+                await self.metrics_exporter.start()
+            except Exception as e:
+                logger.warning("MetricsExporter bootstrap başarısız: %s", e)
+
     async def _confluence_publisher_loop(self) -> None:
         """Aktif watchlist için periyodik confluence score publish."""
         if not self.confluence_engine:
@@ -3193,6 +3240,8 @@ class AgentOrchestrator:
                 ("cross_asset", getattr(self, "cross_asset_engine", None)),
                 ("fast_brain", getattr(self, "fast_brain_engine", None)),
                 ("decision_router", getattr(self, "decision_router", None)),
+                ("online_learning", getattr(self, "online_learning", None)),
+                ("metrics_exporter", getattr(self, "metrics_exporter", None)),
             ]:
                 if obj is None:
                     out[name] = {"enabled": False}
@@ -3305,6 +3354,23 @@ class AgentOrchestrator:
 
         app.router.add_get("/api/fast-brain/{symbol}", get_fast_brain_prediction)
         app.router.add_get("/api/decision-router/status", get_decision_router_status)
+
+        # ─── Intel Upgrade (Phase 4) endpoints ───
+        async def get_online_learning_stats(request):
+            ev = getattr(self, "online_learning", None)
+            if ev is None:
+                return web.json_response({"enabled": False})
+            try:
+                symbol = request.query.get("symbol")
+                return web.json_response({
+                    "enabled": True,
+                    "health": await ev.health_check(),
+                    "rolling": ev.rolling_metrics(symbol.upper() if symbol else None),
+                })
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
+        app.router.add_get("/api/online-learning/stats", get_online_learning_stats)
 
         # ─── Target Cards endpoint ───
         async def get_target_cards(request):

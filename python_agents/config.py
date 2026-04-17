@@ -199,6 +199,13 @@ class Config:
     DECISION_ROUTER_LOG_PATH = os.getenv("QUENBOT_DECISION_ROUTER_LOG_PATH", "python_agents/.decision_router_shadow.jsonl")
     DECISION_ROUTER_MAX_LOG_ROWS = int(os.getenv("QUENBOT_DECISION_ROUTER_MAX_LOG_ROWS", "50000"))
 
+    # Phase 4 — Online learning loop (shadow JSONL + realized moves → rolling accuracy/calibration)
+    ONLINE_LEARNING_ENABLED = os.getenv("QUENBOT_ONLINE_LEARNING_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    ONLINE_LEARNING_INTERVAL_MIN = int(os.getenv("QUENBOT_ONLINE_LEARNING_INTERVAL_MIN", "15"))
+    ONLINE_LEARNING_HORIZON_MIN = int(os.getenv("QUENBOT_ONLINE_LEARNING_HORIZON_MIN", "60"))
+    ONLINE_LEARNING_MIN_SAMPLES = int(os.getenv("QUENBOT_ONLINE_LEARNING_MIN_SAMPLES", "50"))
+    ONLINE_LEARNING_STATE_PATH = os.getenv("QUENBOT_ONLINE_LEARNING_STATE_PATH", "python_agents/.online_learning_state.json")
+
     # Phase 5
     METRICS_EXPORTER_ENABLED = os.getenv("QUENBOT_METRICS_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
     METRICS_EXPORTER_PORT = int(os.getenv("QUENBOT_METRICS_PORT", "9108"))
