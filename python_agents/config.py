@@ -190,10 +190,14 @@ class Config:
     # Phase 3
     FAST_BRAIN_ENABLED = os.getenv("QUENBOT_FAST_BRAIN_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
     FAST_BRAIN_MODEL_PATH = os.getenv("QUENBOT_FAST_BRAIN_MODEL_PATH", "python_agents/.models/fast_brain_latest.lgb")
+    FAST_BRAIN_CALIBRATION_PATH = os.getenv("QUENBOT_FAST_BRAIN_CALIB_PATH", "python_agents/.models/fast_brain_latest.calib.json")
     FAST_BRAIN_T_HIGH = float(os.getenv("QUENBOT_FAST_BRAIN_T_HIGH", "0.65"))
     FAST_BRAIN_T_LOW = float(os.getenv("QUENBOT_FAST_BRAIN_T_LOW", "0.45"))
+    FAST_BRAIN_MIN_FEATURES = int(os.getenv("QUENBOT_FAST_BRAIN_MIN_FEATURES", "4"))
     DECISION_ROUTER_ENABLED = os.getenv("QUENBOT_DECISION_ROUTER_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
     DECISION_ROUTER_SHADOW = os.getenv("QUENBOT_DECISION_ROUTER_SHADOW", "1").lower() in {"1", "true", "yes", "on"}
+    DECISION_ROUTER_LOG_PATH = os.getenv("QUENBOT_DECISION_ROUTER_LOG_PATH", "python_agents/.decision_router_shadow.jsonl")
+    DECISION_ROUTER_MAX_LOG_ROWS = int(os.getenv("QUENBOT_DECISION_ROUTER_MAX_LOG_ROWS", "50000"))
 
     # Phase 5
     METRICS_EXPORTER_ENABLED = os.getenv("QUENBOT_METRICS_ENABLED", "0").lower() in {"1", "true", "yes", "on"}

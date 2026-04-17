@@ -585,7 +585,49 @@ class GemmaDecisionCore:
                 )
             )
 
+        # ── Phase 3: FastBrain + DecisionRouter shadow logging ──
+        # Her zaman shadow; "active" mod çıktıyı override etmez, sadece konsey
+        # izlemesi için log tutar. Hot-path'i bozmamak için hatalar yutulur.
+        try:
+            await self._route_through_fast_brain(symbol, decision)
+        except Exception as e:
+            logger.debug("fast_brain/decision_router hook atlandı: %s", e)
+
         return decision
+
+    async def _route_through_fast_brain(self, symbol: str, decision: "GemmaDecision") -> None:
+        """Phase 3: FastBrain tahmini al, DecisionRouter'a log için ver."""
+        fast_engine = getattr(self, "fast_brain_engine", None)
+        router = getattr(self, "decision_router", None)
+        if fast_engine is None and router is None:
+            return
+
+        fast_dict = None
+        if fast_engine is not None and getattr(fast_engine, "enabled", False):
+            pred = fast_engine.predict(symbol)
+            if pred is not None:
+                fast_dict = pred.to_dict()
+                try:
+                    await fast_engine.publish_prediction(pred)
+                except Exception:
+                    pass
+
+        if router is not None:
+            gemma_dict = {
+                "action": getattr(decision.recommended_action, "value",
+                                  str(decision.recommended_action)),
+                "confidence": float(getattr(decision, "confidence", 0.5) or 0.5),
+            }
+            r_decision = router.route(symbol, gemma_dict, fast_dict)
+            try:
+                if hasattr(EventType, "DECISION_SHADOW"):
+                    await self.event_bus.publish(Event(
+                        type=EventType.DECISION_SHADOW,
+                        source="decision_router",
+                        data={"symbol": symbol, **r_decision.to_dict()},
+                    ))
+            except Exception:
+                pass
 
     def _get_systematic_context(self, symbol: str) -> Dict[str, Any]:
         """Systematic Trade Detector'dan bot analiz verileri al."""

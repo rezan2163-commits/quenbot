@@ -830,6 +830,57 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.warning("CrossAssetGraph bootstrap başarısız: %s", e)
 
+        # ── Phase 3: Fast Brain + Decision Router ─────────────────
+        self.fast_brain_engine = None
+        self.decision_router = None
+        if getattr(Config, "FAST_BRAIN_ENABLED", False):
+            try:
+                from fast_brain import get_fast_brain_engine
+                self.fast_brain_engine = get_fast_brain_engine(
+                    model_path=Config.FAST_BRAIN_MODEL_PATH,
+                    calibration_path=Config.FAST_BRAIN_CALIBRATION_PATH,
+                    t_high=Config.FAST_BRAIN_T_HIGH,
+                    t_low=Config.FAST_BRAIN_T_LOW,
+                    min_features=Config.FAST_BRAIN_MIN_FEATURES,
+                    event_bus=bus,
+                )
+                if self.fast_brain_engine.enabled:
+                    logger.info(
+                        "🧠 FastBrain online (t_high=%.2f, t_low=%.2f, model=%s)",
+                        Config.FAST_BRAIN_T_HIGH, Config.FAST_BRAIN_T_LOW,
+                        Config.FAST_BRAIN_MODEL_PATH,
+                    )
+                else:
+                    logger.info("🧠 FastBrain flag=ON ama model dosyası yok — dormant")
+            except Exception as e:
+                logger.warning("FastBrain bootstrap başarısız: %s", e)
+
+        if getattr(Config, "DECISION_ROUTER_ENABLED", False):
+            try:
+                from decision_router import get_decision_router
+                self.decision_router = get_decision_router(
+                    shadow=bool(getattr(Config, "DECISION_ROUTER_SHADOW", True)),
+                    log_path=Config.DECISION_ROUTER_LOG_PATH,
+                    max_log_rows=Config.DECISION_ROUTER_MAX_LOG_ROWS,
+                    t_high=Config.FAST_BRAIN_T_HIGH,
+                    t_low=Config.FAST_BRAIN_T_LOW,
+                    event_bus=bus,
+                )
+                logger.info(
+                    "🧭 DecisionRouter online (shadow=%s, log=%s)",
+                    self.decision_router.shadow, Config.DECISION_ROUTER_LOG_PATH,
+                )
+            except Exception as e:
+                logger.warning("DecisionRouter bootstrap başarısız: %s", e)
+
+        # GemmaDecisionCore'a Phase 3 referanslarını ilet (shadow hook için)
+        try:
+            if getattr(self, "decision_core", None) is not None:
+                self.decision_core.fast_brain_engine = self.fast_brain_engine
+                self.decision_core.decision_router = self.decision_router
+        except Exception as e:
+            logger.debug("decision_core Phase 3 wiring skip: %s", e)
+
     async def _confluence_publisher_loop(self) -> None:
         """Aktif watchlist için periyodik confluence score publish."""
         if not self.confluence_engine:
@@ -3140,6 +3191,8 @@ class AgentOrchestrator:
                 ("multi_horizon", getattr(self, "multi_horizon_engine", None)),
                 ("confluence", getattr(self, "confluence_engine", None)),
                 ("cross_asset", getattr(self, "cross_asset_engine", None)),
+                ("fast_brain", getattr(self, "fast_brain_engine", None)),
+                ("decision_router", getattr(self, "decision_router", None)),
             ]:
                 if obj is None:
                     out[name] = {"enabled": False}
@@ -3196,6 +3249,62 @@ class AgentOrchestrator:
 
         app.router.add_get("/api/cross-asset/graph", get_cross_asset_graph)
         app.router.add_get("/api/cross-asset/{symbol}", get_cross_asset_neighbors)
+
+        # ─── Intel Upgrade (Phase 3) endpoints ───
+        async def get_fast_brain_prediction(request):
+            """Bir sembol için canlı FastBrain tahmini."""
+            symbol = (request.match_info.get("symbol") or "").upper()
+            eng = getattr(self, "fast_brain_engine", None)
+            if eng is None:
+                return web.json_response({"error": "fast_brain disabled"}, status=503)
+            if not symbol:
+                return web.json_response({"error": "symbol required"}, status=400)
+            if not eng.enabled:
+                snap = eng.snapshot(symbol)
+                return web.json_response({
+                    "symbol": symbol,
+                    "enabled": False,
+                    "last": snap,
+                    "reason": "model dosyası yok (dormant)",
+                })
+            try:
+                pred = eng.predict(symbol)
+                if pred is None:
+                    return web.json_response({
+                        "symbol": symbol,
+                        "enabled": True,
+                        "prediction": None,
+                        "reason": "yeterli feature yok",
+                    })
+                return web.json_response({
+                    "symbol": symbol,
+                    "enabled": True,
+                    "prediction": pred.to_dict(),
+                })
+            except Exception as e:
+                logger.error(f"fast_brain endpoint error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        async def get_decision_router_status(request):
+            """DecisionRouter health + son kararlar."""
+            router = getattr(self, "decision_router", None)
+            if router is None:
+                return web.json_response({"enabled": False})
+            try:
+                h = await router.health_check()
+                m = router.metrics()
+                last = {sym: d.to_dict() for sym, d in router._last_by_symbol.items()}
+                return web.json_response({
+                    "enabled": True,
+                    "health": h,
+                    "metrics": m,
+                    "last_decisions": last,
+                })
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
+        app.router.add_get("/api/fast-brain/{symbol}", get_fast_brain_prediction)
+        app.router.add_get("/api/decision-router/status", get_decision_router_status)
 
         # ─── Target Cards endpoint ───
         async def get_target_cards(request):
