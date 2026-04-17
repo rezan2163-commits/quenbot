@@ -46,64 +46,57 @@ export default function IntelPanel() {
 
   const symbols = Array.from(new Set(["BTCUSDT", "ETHUSDT", ...(watchlist || []).map(w => w.symbol)]));
 
+  const activePhase = PHASES.find(p => p.key === active);
+
   return (
-    <div className="flex h-full min-h-0 overflow-hidden bg-surface text-gray-200">
-      {/* Sidebar menu */}
-      <aside className="w-48 shrink-0 border-r border-surface-border bg-surface-card/40">
-        <div className="border-b border-surface-border p-3">
-          <div className="flex items-center gap-2">
-            <Brain size={14} className="text-accent" />
-            <span className="text-xs font-semibold">Intel Upgrade</span>
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-surface text-gray-200">
+      {/* Top header — compact, mobile-safe */}
+      <header className="flex items-center justify-between gap-2 border-b border-surface-border bg-surface-card/40 px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <Brain size={14} className="shrink-0 text-accent" />
+          <div className="min-w-0">
+            <div className="truncate text-[11px] font-semibold">Intel Upgrade</div>
+            <div className="truncate text-[9px] text-gray-500">{activePhase?.desc}</div>
           </div>
-          <p className="mt-0.5 text-[10px] text-gray-500">Phase 1-5 Cockpit</p>
         </div>
-        <nav className="flex flex-col gap-0.5 p-2">
-          {PHASES.map((p) => {
-            const Icon = p.icon;
-            const act = active === p.key;
-            return (
-              <button
-                key={p.key}
-                onClick={() => setActive(p.key)}
-                className={cn(
-                  "flex items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors",
-                  act
-                    ? "bg-accent/20 text-white"
-                    : "text-gray-400 hover:bg-surface-hover hover:text-gray-200"
-                )}
-              >
-                <Icon size={14} className={act ? "text-accent" : "text-gray-500"} />
-                <div className="flex-1 min-w-0">
-                  <div className="text-[11px] font-medium">{p.label}</div>
-                  <div className="text-[9px] text-gray-500">{p.phase}</div>
-                </div>
-              </button>
-            );
-          })}
-        </nav>
-      </aside>
+        {active !== "overview" && active !== "decision_router" && (
+          <select
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value)}
+            className="max-w-[7.5rem] shrink-0 rounded-md border border-surface-border bg-surface-card px-1.5 py-1 text-[11px] text-gray-200 focus:outline-none focus:ring-1 focus:ring-accent"
+          >
+            {symbols.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        )}
+      </header>
 
-      {/* Main content */}
-      <main className="flex-1 min-w-0 overflow-y-auto">
-        <header className="sticky top-0 z-10 border-b border-surface-border bg-surface/80 px-4 py-3 backdrop-blur">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-semibold">{PHASES.find(p => p.key === active)?.label}</h2>
-              <p className="text-[11px] text-gray-500">{PHASES.find(p => p.key === active)?.desc}</p>
-            </div>
-            {active !== "overview" && active !== "decision_router" && (
-              <select
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
-                className="rounded-md border border-surface-border bg-surface-card px-2 py-1 text-xs text-gray-200 focus:outline-none focus:ring-1 focus:ring-accent"
-              >
-                {symbols.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-            )}
-          </div>
-        </header>
+      {/* Horizontal sub-nav — scrollable, same style as RightPanel tabs */}
+      <nav className="flex shrink-0 overflow-x-auto border-b border-surface-border bg-surface-card/30 custom-scrollbar">
+        {PHASES.map((p) => {
+          const Icon = p.icon;
+          const act = active === p.key;
+          return (
+            <button
+              key={p.key}
+              onClick={() => setActive(p.key)}
+              className={cn(
+                "flex shrink-0 items-center gap-1 whitespace-nowrap px-2.5 py-2 text-[10px] font-medium transition-colors",
+                act
+                  ? "border-b-2 border-accent text-accent"
+                  : "border-b-2 border-transparent text-gray-500 hover:text-gray-300"
+              )}
+              title={`${p.label} · ${p.phase}`}
+            >
+              <Icon size={11} />
+              {p.label}
+            </button>
+          );
+        })}
+      </nav>
 
-        <div className="p-4">
+      {/* Content */}
+      <main className="flex-1 min-h-0 min-w-0 overflow-y-auto">
+        <div className="p-3">
           {active === "overview" && <OverviewView onNavigate={setActive} />}
           {active === "fast_brain" && <FastBrainView symbol={symbol} />}
           {active === "decision_router" && <DecisionRouterView />}
@@ -143,9 +136,9 @@ function OverviewView({ onNavigate }: { onNavigate: (k: PhaseKey) => void }) {
   const healthy = modules.filter(m => m.data?.enabled && m.data?.health?.healthy !== false).length;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
       {/* Top KPIs */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2">
         <Stat label="Aktif Modül" value={`${enabled}/${modules.length}`}
               icon={<Activity size={14} />} tone={enabled >= 4 ? "bull" : "warn"} />
         <Stat label="Sağlıklı" value={`${healthy}/${enabled || 1}`}
@@ -159,7 +152,7 @@ function OverviewView({ onNavigate }: { onNavigate: (k: PhaseKey) => void }) {
       </div>
 
       {/* Module grid */}
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
         {modules.map((m) => {
           const Icon = m.icon;
           const enabled = !!m.data?.enabled;
@@ -170,21 +163,21 @@ function OverviewView({ onNavigate }: { onNavigate: (k: PhaseKey) => void }) {
               key={m.name}
               onClick={clickable ? () => onNavigate(m.key as PhaseKey) : undefined}
               className={cn(
-                "flex flex-col gap-2 p-3 transition-all",
+                "flex min-w-0 flex-col gap-2 p-2.5 transition-all",
                 clickable && "cursor-pointer hover:border-accent/60 hover:bg-surface-hover/50"
               )}
             >
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2">
+              <div className="flex min-w-0 items-start justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
                   <div className={cn(
-                    "rounded-md p-1.5",
+                    "shrink-0 rounded-md p-1.5",
                     enabled ? "bg-accent/15 text-accent" : "bg-gray-700/30 text-gray-500"
                   )}>
-                    <Icon size={14} />
+                    <Icon size={13} />
                   </div>
-                  <div>
-                    <div className="text-xs font-semibold">{m.name}</div>
-                    <div className="text-[10px] text-gray-500">Phase {m.phase}</div>
+                  <div className="min-w-0">
+                    <div className="truncate text-[11px] font-semibold">{m.name}</div>
+                    <div className="text-[9px] text-gray-500">Phase {m.phase}</div>
                   </div>
                 </div>
                 <StatusPill enabled={enabled} healthy={healthy} />
@@ -197,12 +190,12 @@ function OverviewView({ onNavigate }: { onNavigate: (k: PhaseKey) => void }) {
                     .map(([k, v]) => (
                       <Badge key={k} variant="outline">
                         <span className="text-gray-500">{k}:</span>
-                        <span className="text-gray-200 font-mono">{fmtNum(v as number)}</span>
+                        <span className="font-mono text-gray-200">{fmtNum(v as number)}</span>
                       </Badge>
                     ))}
                 </div>
               )}
-              {m.data?.error && <div className="text-[10px] text-bear">{m.data.error}</div>}
+              {m.data?.error && <div className="break-words text-[10px] text-bear">{m.data.error}</div>}
             </Card>
           );
         })}
@@ -256,17 +249,17 @@ function FastBrainView({ symbol }: { symbol: string }) {
   const tone: "bull" | "bear" | "warn" = p.direction === "up" ? "bull" : p.direction === "down" ? "bear" : "warn";
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-[auto_1fr] md:items-center">
-        <Card className="flex flex-col items-center justify-center gap-2 p-5">
-          <Donut value={p.probability} size={120}
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-[auto_1fr] items-center gap-3">
+        <Card className="flex flex-col items-center justify-center gap-2 p-3">
+          <Donut value={p.probability} size={92}
                  tone={tone} label={
             <div>
-              <div className={cn("text-xl font-bold",
+              <div className={cn("text-base font-bold",
                 tone === "bull" ? "text-bull" : tone === "bear" ? "text-bear" : "text-warn")}>
                 {(p.probability * 100).toFixed(1)}%
               </div>
-              <div className="text-[10px] text-gray-500 uppercase">{p.direction}</div>
+              <div className="text-[9px] text-gray-500 uppercase">{p.direction}</div>
             </div>
           } />
           <Badge variant={tone === "bull" ? "success" : tone === "bear" ? "danger" : "warn"}>
@@ -274,10 +267,10 @@ function FastBrainView({ symbol }: { symbol: string }) {
             {p.direction.toUpperCase()}
           </Badge>
         </Card>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid min-w-0 grid-cols-2 gap-2">
           <Stat label="Confidence" value={`${(p.confidence * 100).toFixed(1)}%`} tone={tone} />
-          <Stat label="Raw Score" value={p.raw_score.toFixed(3)} hint="pre-calibration" />
-          <Stat label="Latency" value={`${p.latency_ms.toFixed(2)} ms`} tone="bull" />
+          <Stat label="Raw" value={p.raw_score.toFixed(3)} hint="pre-calib" />
+          <Stat label="Latency" value={`${p.latency_ms.toFixed(2)}ms`} tone="bull" />
           <Stat label="Features" value={`${p.features_used}`} hint={`${p.missing_features.length} eksik`} />
         </div>
       </div>
@@ -322,11 +315,11 @@ function DecisionRouterView() {
   const lastList = Object.entries(data.last_decisions || {}).slice(0, 20);
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-2 gap-2">
         <Stat label="Mod" value={h.shadow ? "SHADOW" : "ACTIVE"}
               tone={h.shadow ? "warn" : "bull"}
-              hint={h.shadow ? "kararlar değiştirilmiyor" : "fast override aktif"} />
+              hint={h.shadow ? "değiştirilmiyor" : "fast override"} />
         <Stat label="Routed" value={h.routed_total} />
         <Stat label="Agree" value={h.agree_total}
               hint={h.routed_total > 0 ? `%${((h.agree_total / h.routed_total) * 100).toFixed(0)}` : "—"}
@@ -384,8 +377,8 @@ function CrossAssetView({ symbol }: { symbol: string }) {
                               ...(neighbors?.followers || []).map(f => Math.abs(f.rho)));
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-2 gap-2">
         <Stat label="Nodes" value={graph.nodes?.length ?? 0} icon={<Network size={14} />} />
         <Stat label="Edges" value={graph.edges?.length ?? 0} />
         <Stat label="Tracked" value={graph.tracked_symbols ?? 0} />
@@ -394,7 +387,7 @@ function CrossAssetView({ symbol }: { symbol: string }) {
               tone={(neighbors?.active_spillover ?? 0) > 0 ? "bull" : (neighbors?.active_spillover ?? 0) < 0 ? "bear" : "default"} />
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle>Leaders of {symbol}</CardTitle>
@@ -477,17 +470,17 @@ function ConfluenceView({ symbol }: { symbol: string }) {
   const score = Number(data.confluence_score ?? 0);
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-[auto_1fr]">
-        <Card className="flex flex-col items-center p-5">
-          <Donut value={(score + 1) / 2} size={120}
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-[auto_1fr] items-center gap-3">
+        <Card className="flex flex-col items-center p-3">
+          <Donut value={(score + 1) / 2} size={92}
                  tone={score > 0.1 ? "bull" : score < -0.1 ? "bear" : "warn"}
-                 label={<div className="text-lg font-bold font-mono">{score.toFixed(2)}</div>} />
+                 label={<div className="text-base font-bold font-mono">{score.toFixed(2)}</div>} />
           <Badge className="mt-2" variant={score > 0.1 ? "success" : score < -0.1 ? "danger" : "warn"}>
-            Confluence Score
+            Score
           </Badge>
         </Card>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+        <div className="grid min-w-0 grid-cols-1 gap-2">
           <Stat label="Log Odds" value={Number(data.log_odds ?? 0).toFixed(3)} />
           <Stat label="Contributors" value={sorted.length} />
           <Stat label="Symbol" value={data.symbol || symbol} />
@@ -551,19 +544,19 @@ function OnlineLearningView({ symbol }: { symbol: string }) {
   const ece = r.ece ?? null;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-2 gap-2">
         <Stat label="Samples" value={r.samples} />
         <Stat label="FastBrain Hit" value={fastHit == null ? "—" : `${(fastHit * 100).toFixed(1)}%`}
               tone={fastHit != null && fastHit > 0.55 ? "bull" : fastHit != null && fastHit < 0.45 ? "bear" : "warn"} />
         <Stat label="Gemma Hit" value={gemmaHit == null ? "—" : `${(gemmaHit * 100).toFixed(1)}%`}
               tone={gemmaHit != null && gemmaHit > 0.55 ? "bull" : "default"} />
         <Stat label="ECE" value={ece == null ? "—" : ece.toFixed(3)}
-              hint="kalibrasyon hatası (düşük iyi)"
+              hint="kalibrasyon (düşük iyi)"
               tone={ece != null && ece < 0.1 ? "bull" : "warn"} />
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle>Kalibrasyon Diyagramı</CardTitle>

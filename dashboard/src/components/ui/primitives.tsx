@@ -143,13 +143,13 @@ export function Stat({
   const color =
     tone === "bull" ? "text-bull" : tone === "bear" ? "text-bear" : tone === "warn" ? "text-warn" : "text-gray-100";
   return (
-    <Card className="p-3">
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] uppercase tracking-wide text-gray-500">{label}</span>
-        {icon && <span className="text-gray-500">{icon}</span>}
+    <Card className="min-w-0 p-2.5">
+      <div className="flex min-w-0 items-center justify-between gap-1">
+        <span className="truncate text-[10px] uppercase tracking-wide text-gray-500">{label}</span>
+        {icon && <span className="shrink-0 text-gray-500">{icon}</span>}
       </div>
-      <div className={cn("mt-1.5 text-xl font-semibold font-mono tabular-nums", color)}>{value}</div>
-      {hint && <div className="mt-0.5 text-[10px] text-gray-500">{hint}</div>}
+      <div className={cn("mt-1 truncate font-mono text-lg font-semibold tabular-nums", color)}>{value}</div>
+      {hint && <div className="mt-0.5 truncate text-[10px] text-gray-500">{hint}</div>}
     </Card>
   );
 }
