@@ -328,12 +328,32 @@ class ExperienceVectorStore:
         return "\n".join(summaries) if summaries else "Kayitli deneyim yok"
 
     def get_stats(self) -> Dict[str, Any]:
+        def _safe_count(coll) -> int:
+            try:
+                return int(coll.count())
+            except Exception:
+                return 0
+
+        healthy = True
+        error: Optional[str] = None
+        try:
+            pattern_count = int(self._patterns.count())
+            experience_count = int(self._experiences.count())
+            error_count = int(self._errors.count())
+        except Exception as exc:
+            healthy = False
+            error = str(exc)
+            pattern_count = _safe_count(self._patterns)
+            experience_count = _safe_count(self._experiences)
+            error_count = _safe_count(self._errors)
         return {
             "enabled": self.enabled,
             "storage_path": self.storage_path,
-            "pattern_count": self._patterns.count(),
-            "experience_count": self._experiences.count(),
-            "error_count": self._errors.count(),
+            "pattern_count": pattern_count,
+            "experience_count": experience_count,
+            "error_count": error_count,
+            "healthy": healthy,
+            "error": error,
         }
 
 

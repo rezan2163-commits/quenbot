@@ -64,6 +64,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _safe_call(fn, default=None):
+    """Invoke a zero-arg callable, swallow exceptions, return default on failure."""
+    try:
+        return fn()
+    except Exception as exc:
+        logger.warning(f"_safe_call: {getattr(fn, '__qualname__', fn)} failed: {exc}")
+        return default
+
+
 load_dotenv()
 
 class AgentOrchestrator:
@@ -2645,7 +2655,7 @@ class AgentOrchestrator:
                 "agent_restarts": dict(self._agent_restart_counts),
                 "event_bus": self.event_bus.get_stats(),
                 "redis": self.redis_bridge.get_stats() if self.redis_bridge else {},
-                "vector_memory": self.vector_store.get_stats(),
+                "vector_memory": _safe_call(self.vector_store.get_stats, default={"enabled": False, "healthy": False}),
                 "agent_breakdown": agent_breakdown,
                 "resource_history": self.resource_monitor.get_history(),
             })
@@ -2716,9 +2726,9 @@ class AgentOrchestrator:
                     "avg_latency_ms": round(float(decision_core.get("avg_latency_ms", 0)), 1),
                 },
                 "code_operator": await self.code_operator.get_status() if self.code_operator else {"enabled": False},
-                "vector_memory": self.vector_store.get_stats(),
+                "vector_memory": _safe_call(self.vector_store.get_stats, default={"enabled": False, "healthy": False}),
                 "redis": self.redis_bridge.get_stats() if self.redis_bridge else {},
-                "cleanup": self.cleanup_module.scan(),
+                "cleanup": _safe_call(self.cleanup_module.scan, default={}),
                 "storage_manager": self.storage_manager.get_status() if self.storage_manager else {"enabled": False},
                 "pattern_matcher": {
                     "ok": pm.get("healthy", False),

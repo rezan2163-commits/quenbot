@@ -135,6 +135,13 @@ module.exports = {
         QUENBOT_DISABLE_DRAWDOWN_GATE: process.env.QUENBOT_DISABLE_DRAWDOWN_GATE || "1",
         QUENBOT_ENABLE_CHAT_POLLER: "1",
         QUENBOT_CONTROL_TOKEN: process.env.QUENBOT_CONTROL_TOKEN || "",
+        // Phase 3+ intel modules — enable Fast Brain, Decision Router,
+        // Online Learning ve Prometheus metrics exporter (dashboard
+        // IntelPanel "8/8 modul aktif" gostergesi icin).
+        QUENBOT_FAST_BRAIN_ENABLED: process.env.QUENBOT_FAST_BRAIN_ENABLED || "1",
+        QUENBOT_DECISION_ROUTER_ENABLED: process.env.QUENBOT_DECISION_ROUTER_ENABLED || "1",
+        QUENBOT_ONLINE_LEARNING_ENABLED: process.env.QUENBOT_ONLINE_LEARNING_ENABLED || "1",
+        QUENBOT_METRICS_ENABLED: process.env.QUENBOT_METRICS_ENABLED || "1",
       },
       instances: 1,
       autorestart: true,

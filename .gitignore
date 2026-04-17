@@ -38,3 +38,11 @@ python_agents/.backfill_checkpoint.json
 *.parquet
 *.lgb
 *.duckdbpython_agents/python_agents/
+
+# Runtime data — never stash or track
+python_agents/.chroma/
+python_agents/.cross_asset/
+python_agents/.confluence_weights.json
+python_agents/efom_data/
+python_agents/code_operator_data/
+python_agents/logs/
