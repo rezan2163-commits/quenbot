@@ -37,4 +37,4 @@ python_agents/.fast_brain_checkpoint.json
 python_agents/.backfill_checkpoint.json
 *.parquet
 *.lgb
-*.duckdb
+*.duckdbpython_agents/python_agents/

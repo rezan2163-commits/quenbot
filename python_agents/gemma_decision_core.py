@@ -653,10 +653,30 @@ class GemmaDecisionCore:
             log_odds = float(snap.get('log_odds', 0.0) or 0.0)
             missing = snap.get('missing_signals') or []
             n_active = max(0, len(top))
+
+            # Cross-asset (Phase 2) — en güçlü 2 leader'ı satıra ekle
+            cross_line = ""
+            try:
+                if getattr(Config, 'CROSS_ASSET_ENABLED', False):
+                    from cross_asset_graph import get_cross_asset_engine
+                    ca = get_cross_asset_engine()
+                    leaders = ca.leaders_of(symbol)[:2]
+                    spill = ca.spillover_signal(symbol)
+                    if leaders:
+                        lead_txt = ", ".join(
+                            f"{s}(+{l}s,ρ={r:+.2f})" for s, l, r in leaders
+                        )
+                        cross_line = f"- Cross-Asset Leaders: {lead_txt} | Spillover: {spill:+.2f}σ\n"
+                    elif spill != 0.0:
+                        cross_line = f"- Cross-Asset Spillover: {spill:+.2f}σ\n"
+            except Exception:
+                cross_line = ""
+
             return (
                 "\n### 🎯 CONFLUENCE ENGINE (Pre-Move Fingerprint)\n"
                 f"- Skor: {score:.3f} | Yön: {direction} | log-odds: {log_odds:+.2f}\n"
                 f"- En Güçlü Katkılar: {top_line}\n"
+                f"{cross_line}"
                 f"- Eksik Sinyaller: {', '.join(missing) if missing else 'yok'} | Aktif top-K: {n_active}\n"
             )
         except Exception:

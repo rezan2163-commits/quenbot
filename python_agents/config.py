@@ -179,6 +179,13 @@ class Config:
     CROSS_ASSET_ENABLED = os.getenv("QUENBOT_CROSS_ASSET_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
     CROSS_ASSET_REBUILD_INTERVAL_MIN = int(os.getenv("QUENBOT_CROSS_ASSET_REBUILD_MIN", "15"))
     CROSS_ASSET_MIN_EDGE_STRENGTH = float(os.getenv("QUENBOT_CROSS_ASSET_MIN_EDGE", "0.08"))
+    CROSS_ASSET_MAX_LAG_SEC = int(os.getenv("QUENBOT_CROSS_ASSET_MAX_LAG_SEC", "300"))   # ±5 dk
+    CROSS_ASSET_LAG_STEP_SEC = int(os.getenv("QUENBOT_CROSS_ASSET_LAG_STEP_SEC", "15"))  # 15sn bin
+    CROSS_ASSET_HISTORY_SEC = int(os.getenv("QUENBOT_CROSS_ASSET_HISTORY_SEC", "7200"))  # 2 saatlik pencere
+    CROSS_ASSET_MIN_SAMPLES = int(os.getenv("QUENBOT_CROSS_ASSET_MIN_SAMPLES", "60"))
+    CROSS_ASSET_GRAPH_PATH = os.getenv("QUENBOT_CROSS_ASSET_GRAPH_PATH", "python_agents/.cross_asset/latest_graph.json")
+    CROSS_ASSET_ALERT_COOLDOWN_SEC = int(os.getenv("QUENBOT_CROSS_ASSET_ALERT_COOLDOWN_SEC", "60"))
+    CROSS_ASSET_LEADER_MIN_MOVE_BPS = float(os.getenv("QUENBOT_CROSS_ASSET_LEADER_MIN_BPS", "15"))  # 0.15%
 
     # Phase 3
     FAST_BRAIN_ENABLED = os.getenv("QUENBOT_FAST_BRAIN_ENABLED", "0").lower() in {"1", "true", "yes", "on"}

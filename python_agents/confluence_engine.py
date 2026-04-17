@@ -48,6 +48,7 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
     "signature_coherence": 0.7,
     "obi_drift_vs_price": 0.6,
     "aggressor_divergence": 0.5,
+    "cross_asset_spillover": 0.55,
     "bias": -1.2,
 }
 
@@ -348,6 +349,16 @@ class ConfluenceEngine:
         except Exception as e:
             missing.append("multi_horizon")
             logger.debug("confluence multi_horizon skip: %s", e)
+
+        # cross-asset spillover (Phase 2)
+        try:
+            from cross_asset_graph import get_cross_asset_engine
+            spill = get_cross_asset_engine().spillover_signal(symbol)
+            if spill != 0.0:
+                z["cross_asset_spillover"] = _safe_z(spill)
+            # Aktif spillover yoksa missing'e eklenmez (rutin durum, gürültü olmasın)
+        except Exception as e:
+            logger.debug("confluence cross_asset skip: %s", e)
 
         return z, missing
 

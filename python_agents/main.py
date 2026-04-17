@@ -794,6 +794,42 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.warning("Confluence bootstrap başarısız: %s", e)
 
+        # ── Phase 2: Cross-Asset Graph ────────────────────────────
+        self.cross_asset_engine = None
+        self._cross_asset_rebuild_task = None
+        if getattr(Config, "CROSS_ASSET_ENABLED", False):
+            try:
+                from cross_asset_graph import get_cross_asset_engine
+                symbols_init = list(getattr(Config, "WATCHLIST", []) or []) or list(
+                    getattr(Config, "TRADING_PAIRS", []) or []
+                )
+                self.cross_asset_engine = get_cross_asset_engine(
+                    event_bus=bus,
+                    feature_store=self.feature_store,
+                    symbols=symbols_init,
+                    step_sec=Config.CROSS_ASSET_LAG_STEP_SEC,
+                    history_sec=Config.CROSS_ASSET_HISTORY_SEC,
+                    max_lag_sec=Config.CROSS_ASSET_MAX_LAG_SEC,
+                    min_samples=Config.CROSS_ASSET_MIN_SAMPLES,
+                    min_edge=Config.CROSS_ASSET_MIN_EDGE_STRENGTH,
+                    rebuild_interval_sec=int(Config.CROSS_ASSET_REBUILD_INTERVAL_MIN) * 60,
+                    alert_cooldown_sec=Config.CROSS_ASSET_ALERT_COOLDOWN_SEC,
+                    leader_min_bps=Config.CROSS_ASSET_LEADER_MIN_MOVE_BPS,
+                    graph_path=Config.CROSS_ASSET_GRAPH_PATH,
+                )
+                bus.subscribe(EventType.SCOUT_PRICE_UPDATE, self.cross_asset_engine.on_price_update)
+                self._cross_asset_rebuild_task = asyncio.create_task(
+                    self.cross_asset_engine.rebuild_loop()
+                )
+                logger.info(
+                    "🕸️  CrossAssetGraph online (step=%ds, hist=%ds, rebuild=%dm)",
+                    Config.CROSS_ASSET_LAG_STEP_SEC,
+                    Config.CROSS_ASSET_HISTORY_SEC,
+                    Config.CROSS_ASSET_REBUILD_INTERVAL_MIN,
+                )
+            except Exception as e:
+                logger.warning("CrossAssetGraph bootstrap başarısız: %s", e)
+
     async def _confluence_publisher_loop(self) -> None:
         """Aktif watchlist için periyodik confluence score publish."""
         if not self.confluence_engine:
@@ -3103,6 +3139,7 @@ class AgentOrchestrator:
                 ("ofi", getattr(self, "ofi_engine", None)),
                 ("multi_horizon", getattr(self, "multi_horizon_engine", None)),
                 ("confluence", getattr(self, "confluence_engine", None)),
+                ("cross_asset", getattr(self, "cross_asset_engine", None)),
             ]:
                 if obj is None:
                     out[name] = {"enabled": False}
@@ -3117,6 +3154,48 @@ class AgentOrchestrator:
 
         app.router.add_get("/api/confluence/{symbol}", get_confluence_symbol)
         app.router.add_get("/api/intel/summary", get_intel_summary)
+
+        # ─── Intel Upgrade (Phase 2) endpoints ───
+        async def get_cross_asset_graph(request):
+            """Tüm cross-asset lead/lag grafiği (JSON)."""
+            eng = getattr(self, "cross_asset_engine", None)
+            if eng is None:
+                return web.json_response({"error": "cross_asset disabled"}, status=503)
+            try:
+                return web.json_response(eng.graph_snapshot())
+            except Exception as e:
+                logger.error(f"cross_asset graph error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        async def get_cross_asset_neighbors(request):
+            """Bir sembolün leader/follower komşuları."""
+            symbol = (request.match_info.get("symbol") or "").upper()
+            eng = getattr(self, "cross_asset_engine", None)
+            if eng is None:
+                return web.json_response({"error": "cross_asset disabled"}, status=503)
+            if not symbol:
+                return web.json_response({"error": "symbol required"}, status=400)
+            try:
+                leaders = [
+                    {"symbol": s, "lag_sec": l, "rho": round(r, 4)}
+                    for s, l, r in eng.leaders_of(symbol)
+                ]
+                followers = [
+                    {"symbol": s, "lag_sec": l, "rho": round(r, 4)}
+                    for s, l, r in eng.followers_of(symbol)
+                ]
+                return web.json_response({
+                    "symbol": symbol,
+                    "leaders": leaders,
+                    "followers": followers,
+                    "active_spillover": eng.spillover_signal(symbol),
+                })
+            except Exception as e:
+                logger.error(f"cross_asset neighbors error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        app.router.add_get("/api/cross-asset/graph", get_cross_asset_graph)
+        app.router.add_get("/api/cross-asset/{symbol}", get_cross_asset_neighbors)
 
         # ─── Target Cards endpoint ───
         async def get_target_cards(request):
