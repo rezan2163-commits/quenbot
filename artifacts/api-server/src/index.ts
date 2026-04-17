@@ -2218,6 +2218,35 @@ app.get("/api/backtest/scores", async (_req, res) => {
   }
 });
 
+// Recent closed backtest trades (last 50). Consumed by BacktestPanel.
+app.get("/api/backtest/recent", async (_req, res) => {
+  try {
+    const rows = await sql`
+      SELECT
+        sim.id,
+        s.symbol,
+        s.signal_type,
+        s.direction,
+        s.confidence,
+        sim.entry_price,
+        sim.exit_price,
+        sim.pnl,
+        sim.pnl_pct,
+        sim.entry_time,
+        sim.exit_time,
+        sim.status
+      FROM simulations sim
+      LEFT JOIN signals s ON s.id = sim.signal_id
+      WHERE sim.status = 'closed' AND sim.exit_time IS NOT NULL
+      ORDER BY sim.exit_time DESC
+      LIMIT 50
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 app.get("/api/selfcorrection/status", async (_req, res) => {
   try {
     const [recentPerf, corrections, strategyEvents, rca] = await Promise.all([
