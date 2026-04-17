@@ -2226,7 +2226,7 @@ app.get("/api/backtest/recent", async (_req, res) => {
         sim.id,
         s.symbol,
         s.signal_type,
-        s.direction,
+        COALESCE(s.metadata->>'direction', CASE WHEN s.signal_type ILIKE '%short%' THEN 'short' ELSE 'long' END) AS direction,
         s.confidence,
         sim.entry_price,
         sim.exit_price,
