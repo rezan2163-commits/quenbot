@@ -704,11 +704,117 @@ class AgentOrchestrator:
             "meta-labeler, bandit, conformal, drift, loss-autopsy"
         )
 
+        # ── Intel Upgrade (Phase 1): feature_store + OFI + multi-horizon + confluence ──
+        await self._bootstrap_intel_upgrade()
+
         # Cold-start meta-labeler fit in background (no-op if insufficient samples)
         asyncio.create_task(self._refit_meta_labeler())
         # Periodic retrain every 10 minutes so the labeler leaves "pending"
         # as soon as enough history accumulates.
         asyncio.create_task(self._meta_labeler_trainer_loop())
+
+    async def _bootstrap_intel_upgrade(self) -> None:
+        """Phase 1 pre-move detection stack. Flag'lerle guarded, additive.
+
+        Sırayla:
+          1) FeatureStore (Parquet + DuckDB) — diğer modüller bunu kullanır
+          2) OrderFlowImbalance (L1 orderbook subscribe)
+          3) MultiHorizonSignatures (trade stream subscribe)
+          4) ConfluenceEngine + periyodik 1Hz publish task
+        """
+        self.feature_store = None
+        self.ofi_engine = None
+        self.multi_horizon_engine = None
+        self.confluence_engine = None
+        self._confluence_publisher_task = None
+
+        if not getattr(Config, "FEATURE_STORE_ENABLED", False):
+            logger.info("⏭️  Intel upgrade devre dışı (FEATURE_STORE_ENABLED=False)")
+            return
+
+        try:
+            from feature_store import get_feature_store
+            self.feature_store = get_feature_store(
+                root=Config.FEATURE_STORE_PATH,
+                flush_seconds=Config.FEATURE_STORE_FLUSH_SECONDS,
+                flush_rows=Config.FEATURE_STORE_FLUSH_ROWS,
+                queue_max=Config.FEATURE_STORE_QUEUE_MAX,
+                enable_write=Config.FEATURE_STORE_WRITE,
+            )
+            await self.feature_store.start()
+            logger.info("📦 FeatureStore aktif (path=%s)", Config.FEATURE_STORE_PATH)
+        except Exception as e:
+            logger.warning("FeatureStore bootstrap başarısız: %s", e)
+            self.feature_store = None
+
+        bus = self.event_bus
+
+        if getattr(Config, "OFI_ENABLED", False):
+            try:
+                from order_flow_imbalance import get_ofi_engine
+                self.ofi_engine = get_ofi_engine(
+                    event_bus=bus,
+                    feature_store=self.feature_store,
+                    publish_hz=Config.OFI_PUBLISH_HZ,
+                )
+                bus.subscribe(EventType.ORDER_BOOK_UPDATE, self.ofi_engine.on_order_book)
+                logger.info("🌊 OrderFlowImbalance engine online (Cont-Kukanov-Stoikov + Hurst)")
+            except Exception as e:
+                logger.warning("OFI bootstrap başarısız: %s", e)
+
+        if getattr(Config, "MULTI_HORIZON_SIGNATURES_ENABLED", False):
+            try:
+                from multi_horizon_signatures import get_multi_horizon_engine
+                self.multi_horizon_engine = get_multi_horizon_engine(
+                    event_bus=bus,
+                    feature_store=self.feature_store,
+                    horizons_sec=tuple(Config.MULTI_HORIZON_WINDOWS_SEC),
+                    publish_hz=Config.MULTI_HORIZON_PUBLISH_HZ,
+                )
+                bus.subscribe(EventType.SCOUT_PRICE_UPDATE, self.multi_horizon_engine.on_trade)
+                logger.info("🧭 MultiHorizonSignatures online (ufuklar: %s)",
+                            Config.MULTI_HORIZON_WINDOWS_SEC)
+            except Exception as e:
+                logger.warning("MultiHorizon bootstrap başarısız: %s", e)
+
+        if getattr(Config, "CONFLUENCE_ENABLED", False):
+            try:
+                from confluence_engine import get_confluence_engine
+                self.confluence_engine = get_confluence_engine(
+                    event_bus=bus,
+                    feature_store=self.feature_store,
+                    weights_path=Config.CONFLUENCE_WEIGHTS_PATH,
+                    publish_hz=Config.CONFLUENCE_PUBLISH_HZ,
+                )
+                self._confluence_publisher_task = asyncio.create_task(
+                    self._confluence_publisher_loop()
+                )
+                logger.info("🎯 ConfluenceEngine online (Bayesian fusion, %.1f Hz)",
+                            Config.CONFLUENCE_PUBLISH_HZ)
+            except Exception as e:
+                logger.warning("Confluence bootstrap başarısız: %s", e)
+
+    async def _confluence_publisher_loop(self) -> None:
+        """Aktif watchlist için periyodik confluence score publish."""
+        if not self.confluence_engine:
+            return
+        hz = max(0.1, float(getattr(Config, "CONFLUENCE_PUBLISH_HZ", 1.0)))
+        interval = 1.0 / hz
+        while True:
+            try:
+                symbols = list(getattr(Config, "WATCHLIST", []) or []) or list(Config.TRADING_PAIRS)
+                for sym in symbols:
+                    try:
+                        await self.confluence_engine.maybe_publish(sym)
+                    except Exception as e:
+                        logger.debug("confluence publish %s skip: %s", sym, e)
+                    # yay yayılım: iki sembol arası küçük bekleme
+                    await asyncio.sleep(max(0.005, interval / max(len(symbols), 1)))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug("confluence publisher hiccup: %s", e)
+                await asyncio.sleep(1.0)
 
     async def _warmup_llm(self):
         """Prime the active model to reduce first-response latency for chat."""
@@ -2972,6 +3078,45 @@ class AgentOrchestrator:
         app.router.add_post("/api/code/tasks", create_code_task)
         app.router.add_post("/api/code/tasks/{task_id}/apply", apply_code_task)
         app.router.add_post("/api/control/execute", execute_control)
+
+        # ─── Intel Upgrade (Phase 1) endpoints ───
+        async def get_confluence_symbol(request):
+            """Bir sembol için anlık confluence score + top contributors."""
+            symbol = (request.match_info.get("symbol") or "").upper()
+            if not symbol:
+                return web.json_response({"error": "symbol required"}, status=400)
+            if not getattr(self, "confluence_engine", None):
+                return web.json_response({"error": "confluence disabled"}, status=503)
+            try:
+                # Fresh compute (aynı zamanda cache'e yazar)
+                res = await self.confluence_engine.compute(symbol)
+                return web.json_response(res.to_dict())
+            except Exception as e:
+                logger.error(f"confluence endpoint error: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
+        async def get_intel_summary(request):
+            """Tüm Intel modüllerinin health özeti."""
+            out: Dict[str, Any] = {}
+            for name, obj in [
+                ("feature_store", getattr(self, "feature_store", None)),
+                ("ofi", getattr(self, "ofi_engine", None)),
+                ("multi_horizon", getattr(self, "multi_horizon_engine", None)),
+                ("confluence", getattr(self, "confluence_engine", None)),
+            ]:
+                if obj is None:
+                    out[name] = {"enabled": False}
+                    continue
+                try:
+                    h = await obj.health_check()
+                    m = obj.metrics() if hasattr(obj, "metrics") else {}
+                    out[name] = {"enabled": True, "health": h, "metrics": m}
+                except Exception as e:
+                    out[name] = {"enabled": True, "error": str(e)}
+            return web.json_response(out)
+
+        app.router.add_get("/api/confluence/{symbol}", get_confluence_symbol)
+        app.router.add_get("/api/intel/summary", get_intel_summary)
 
         # ─── Target Cards endpoint ───
         async def get_target_cards(request):

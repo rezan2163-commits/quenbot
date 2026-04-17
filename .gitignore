@@ -27,3 +27,14 @@ pip-delete-this-directory.txt
 *~
 .cache
 .tmp
+
+# Intel Upgrade artifacts — never commit
+python_agents/.feature_store/
+python_agents/.models/
+python_agents/.cross_asset/
+python_agents/.confluence_weights.json
+python_agents/.fast_brain_checkpoint.json
+python_agents/.backfill_checkpoint.json
+*.parquet
+*.lgb
+*.duckdb

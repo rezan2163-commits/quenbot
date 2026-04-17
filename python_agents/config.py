@@ -150,3 +150,44 @@ class Config:
             }
         }
         return configs.get(agent_name, {})
+
+    # ─────────────────────────────────────────────────────────────
+    # Intel Upgrade — Pre-Move Detection Engine (Phase 1+)
+    # Tüm flag'ler default konservatif. Shadow doğrulaması olmadan
+    # live path davranışını değiştiremeyecek şekilde tasarlandı.
+    # ─────────────────────────────────────────────────────────────
+    FEATURE_STORE_ENABLED = os.getenv("QUENBOT_FEATURE_STORE_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    FEATURE_STORE_WRITE = os.getenv("QUENBOT_FEATURE_STORE_WRITE", "1").lower() in {"1", "true", "yes", "on"}
+    FEATURE_STORE_PATH = os.getenv("QUENBOT_FEATURE_STORE_PATH", "python_agents/.feature_store")
+    FEATURE_STORE_FLUSH_SECONDS = float(os.getenv("QUENBOT_FEATURE_STORE_FLUSH_SECONDS", "15"))
+    FEATURE_STORE_FLUSH_ROWS = int(os.getenv("QUENBOT_FEATURE_STORE_FLUSH_ROWS", "2000"))
+    FEATURE_STORE_QUEUE_MAX = int(os.getenv("QUENBOT_FEATURE_STORE_QUEUE_MAX", "20000"))
+
+    OFI_ENABLED = os.getenv("QUENBOT_OFI_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    OFI_PUBLISH_HZ = float(os.getenv("QUENBOT_OFI_PUBLISH_HZ", "2.0"))
+
+    MULTI_HORIZON_SIGNATURES_ENABLED = os.getenv("QUENBOT_MH_SIGNATURES_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    MULTI_HORIZON_WINDOWS_SEC = [300, 1800, 7200, 21600]  # 5m, 30m, 2h, 6h
+    MULTI_HORIZON_PUBLISH_HZ = float(os.getenv("QUENBOT_MH_PUBLISH_HZ", "0.5"))
+
+    CONFLUENCE_ENABLED = os.getenv("QUENBOT_CONFLUENCE_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    CONFLUENCE_WEIGHTS_PATH = os.getenv("QUENBOT_CONFLUENCE_WEIGHTS_PATH", "python_agents/.confluence_weights.json")
+    CONFLUENCE_PUBLISH_HZ = float(os.getenv("QUENBOT_CONFLUENCE_PUBLISH_HZ", "1.0"))
+    CONFLUENCE_INJECT_LLM = os.getenv("QUENBOT_CONFLUENCE_INJECT_LLM", "1").lower() in {"1", "true", "yes", "on"}
+
+    # Phase 2
+    CROSS_ASSET_ENABLED = os.getenv("QUENBOT_CROSS_ASSET_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    CROSS_ASSET_REBUILD_INTERVAL_MIN = int(os.getenv("QUENBOT_CROSS_ASSET_REBUILD_MIN", "15"))
+    CROSS_ASSET_MIN_EDGE_STRENGTH = float(os.getenv("QUENBOT_CROSS_ASSET_MIN_EDGE", "0.08"))
+
+    # Phase 3
+    FAST_BRAIN_ENABLED = os.getenv("QUENBOT_FAST_BRAIN_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    FAST_BRAIN_MODEL_PATH = os.getenv("QUENBOT_FAST_BRAIN_MODEL_PATH", "python_agents/.models/fast_brain_latest.lgb")
+    FAST_BRAIN_T_HIGH = float(os.getenv("QUENBOT_FAST_BRAIN_T_HIGH", "0.65"))
+    FAST_BRAIN_T_LOW = float(os.getenv("QUENBOT_FAST_BRAIN_T_LOW", "0.45"))
+    DECISION_ROUTER_ENABLED = os.getenv("QUENBOT_DECISION_ROUTER_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    DECISION_ROUTER_SHADOW = os.getenv("QUENBOT_DECISION_ROUTER_SHADOW", "1").lower() in {"1", "true", "yes", "on"}
+
+    # Phase 5
+    METRICS_EXPORTER_ENABLED = os.getenv("QUENBOT_METRICS_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    METRICS_EXPORTER_PORT = int(os.getenv("QUENBOT_METRICS_PORT", "9108"))

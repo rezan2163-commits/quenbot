@@ -12,3 +12,11 @@ chromadb==1.2.0
 websocket-client==1.9.0
 optuna==4.5.0
 llama-cpp-python==0.3.9
+# Intel Upgrade (Phase 1+) — feature store + historical queries
+pyarrow>=15.0.0
+duckdb>=0.10.0
+# Phase 3 (fast brain)
+lightgbm>=4.0.0
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.23.0

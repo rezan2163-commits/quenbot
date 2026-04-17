@@ -103,6 +103,21 @@ class EventType(str, Enum):
     META_MODEL_REFIT = "learning.meta_refit"
     DRIFT_ALERT = "learning.drift_alert"
 
+    # ── Intel Upgrade (Phase 1+) — ADDITIVE, never rename ──
+    ORDER_FLOW_IMBALANCE = "intel.ofi"
+    MULTI_HORIZON_SIGNATURE = "intel.mh_signature"
+    CONFLUENCE_SCORE = "intel.confluence"
+    # Phase 2
+    LEAD_LAG_ALERT = "intel.lead_lag"
+    CROSS_ASSET_GRAPH_UPDATED = "intel.cross_asset_updated"
+    # Phase 3
+    FAST_BRAIN_PREDICTION = "intel.fast_brain"
+    FINAL_DECISION = "intel.final_decision"
+    DECISION_SHADOW = "intel.decision_shadow"
+    # Phase 4
+    COUNTERFACTUAL_UPDATE = "intel.counterfactual"
+    CONFLUENCE_WEIGHTS_ROTATED = "intel.weights_rotated"
+
 
 @dataclass
 class Event:

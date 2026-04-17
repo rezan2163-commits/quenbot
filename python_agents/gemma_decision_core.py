@@ -149,7 +149,7 @@ SYNTHESIS_PROMPT_TEMPLATE = """## KARAR İSTEĞİ — {symbol} ({timeframe})
 - Kurumsal vs Retail: {retail_vs_institutional:.1%} (yüksek=kurumsal)
 - Tahmini Fiyat Etkisi: {estimated_price_impact_bps:.1f} bps
 {bot_signatures_summary}
-
+{confluence_block}
 ---
 Tüm verileri (özellikle imza eşleşmesi ve sistematik ticaret analizini) sentezle ve nihai kararını JSON formatında ver.
 Bot tespit verilerini kullanarak "büyük oyuncular ne yapıyor" sorusuna yanıt ver.
@@ -625,6 +625,44 @@ class GemmaDecisionCore:
             'bot_signatures_summary': '\n'.join(signatures_summary) if signatures_summary else '- Önemli bot imzası yok',
         }
 
+    def _get_confluence_block(self, symbol: str) -> str:
+        """
+        Confluence Engine cache'inden LLM prompt bloğu.
+        - Flag kapalıysa, cache boşsa veya herhangi bir hata varsa boş string döner.
+        - Karar akışı kritik — hiçbir koşulda exception yükseltmez.
+        """
+        try:
+            from config import Config
+            if not getattr(Config, 'CONFLUENCE_INJECT_LLM', True):
+                return ""
+            if not getattr(Config, 'CONFLUENCE_ENABLED', False):
+                return ""
+            if not symbol:
+                return ""
+            from confluence_engine import get_confluence_engine
+            engine = get_confluence_engine()
+            # explain() sync + cache-based — publisher loop bu cache'i doldurur
+            info = engine.explain(symbol)
+            if not info:
+                return ""
+            score = float(info.get('score', 0.0) or 0.0)
+            direction = str(info.get('direction', 'neutral'))
+            top = info.get('top') or []
+            top_line = ", ".join(top) if top else "—"
+            snap = engine.snapshot(symbol) or {}
+            log_odds = float(snap.get('log_odds', 0.0) or 0.0)
+            missing = snap.get('missing_signals') or []
+            n_active = max(0, len(top))
+            return (
+                "\n### 🎯 CONFLUENCE ENGINE (Pre-Move Fingerprint)\n"
+                f"- Skor: {score:.3f} | Yön: {direction} | log-odds: {log_odds:+.2f}\n"
+                f"- En Güçlü Katkılar: {top_line}\n"
+                f"- Eksik Sinyaller: {', '.join(missing) if missing else 'yok'} | Aktif top-K: {n_active}\n"
+            )
+        except Exception:
+            return ""
+
+
     def _build_context(self,
                        pattern_data: Dict,
                        scout_data: Optional[Dict],
@@ -724,6 +762,8 @@ class GemmaDecisionCore:
             'signature_provenance': pattern_data.get('signature_provenance', 'İmza eşleşmesi bulunamadı.'),
             # Systematic Trade Detection (Bot Analysis)
             **self._get_systematic_context(pattern_data.get('symbol', '')),
+            # Confluence Engine (Phase 1 Intel Upgrade) — guarded, boş string ise LLM promptuna hiçbir etki yapmaz
+            'confluence_block': self._get_confluence_block(pattern_data.get('symbol', '')),
         }
 
     async def _gemma_evaluate(self, symbol: str, timeframe: str,
