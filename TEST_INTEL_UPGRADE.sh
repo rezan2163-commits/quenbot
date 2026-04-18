@@ -28,6 +28,7 @@ done
 PHASE1_OK=0
 PHASE2_OK=0
 PHASE3_OK=0
+PHASE6_OK=0
 
 section() {
   echo ""
@@ -126,15 +127,39 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# PHASE 6 — Oracle Stack (detectors + factor graph + brain + supervisor)
+#   Tüm flag'ler default-OFF; flag'siz smoke (pytest) çalıştırır.
+# --------------------------------------------------------------------------
+section "PHASE 6 — Oracle Stack smoke"
+(
+  cd "$ROOT/python_agents"
+  /workspaces/quenbot/.venv/bin/pytest -q \
+    tests/test_oracle_signal_bus.py \
+    tests/test_bocpd.py tests/test_hawkes.py tests/test_lob_thermodynamics.py \
+    tests/test_wasserstein.py tests/test_path_signatures.py \
+    tests/test_mirror_flow.py tests/test_topology.py tests/test_ccm.py \
+    tests/test_factor_graph.py tests/test_oracle_rag.py tests/test_oracle_brain.py \
+    tests/test_runtime_supervisor.py 2>&1 | tee "$LOG_DIR/phase6.log"
+)
+if grep -qE "passed" "$LOG_DIR/phase6.log" && ! grep -qE "failed" "$LOG_DIR/phase6.log"; then
+  PHASE6_OK=1
+  echo "✅ PHASE 6 OK"
+else
+  PHASE6_OK=0
+  echo "❌ PHASE 6 FAIL — see $LOG_DIR/phase6.log"
+fi
+
+# --------------------------------------------------------------------------
 # Final rapor
 # --------------------------------------------------------------------------
 section "SONUÇ"
 echo "  PHASE 1 ALL_OFF        : $([ $PHASE1_OK = 1 ] && echo ✅ || echo ❌)"
 echo "  PHASE 2 ALL_ON         : $([ $PHASE2_OK = 1 ] && echo ✅ || echo ❌)"
 echo "  PHASE 3 TRIP_SIMULATION: $([ $PHASE3_OK = 1 ] && echo ✅ || echo ❌)"
+echo "  PHASE 6 ORACLE_STACK   : $([ $PHASE6_OK = 1 ] && echo ✅ || echo ❌)"
 echo "  Loglar: $LOG_DIR"
 
-if [ "$PHASE1_OK" = "1" ] && [ "$PHASE2_OK" = "1" ] && [ "$PHASE3_OK" = "1" ]; then
+if [ "$PHASE1_OK" = "1" ] && [ "$PHASE2_OK" = "1" ] && [ "$PHASE3_OK" = "1" ] && [ "$PHASE6_OK" = "1" ]; then
   echo ""
   echo "🟢 INTEL UPGRADE FINALIZATION: TUM FAZLAR YESIL"
   exit 0
