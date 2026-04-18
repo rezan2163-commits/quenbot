@@ -4498,8 +4498,92 @@ class AgentOrchestrator:
                 logger.debug("mission-control SSE loop err: %s", e)
             return response
 
-        # Qwen autopsy cache: (module_id, int(time/60)) → bundle
-        _mc_autopsy_cache: Dict[tuple, Dict[str, Any]] = {}
+        # Qwen autopsy cache: module_id → {diagnosis, generated_at, in_flight}
+        # LLM is fired-and-forgotten so the HTTP response is never blocked by
+        # a 20-30s cold-start (which upstream proxies can convert to 500/504).
+        _mc_autopsy_cache: Dict[str, Dict[str, Any]] = {}
+        _MC_AUTOPSY_TTL = 300.0  # 5 minutes
+
+        async def _generate_qwen_diagnosis(
+            module_id: str, bundle: Dict[str, Any], log_tail: list
+        ):
+            """Background task: compute Qwen diagnosis and store in cache."""
+            try:
+                from module_registry import MODULE_REGISTRY
+                bridge = self.llm_bridge if hasattr(self, "llm_bridge") else None
+                if bridge is None:
+                    return
+                try:
+                    available = bool(await bridge.is_available())
+                except Exception:
+                    available = False
+                if not available:
+                    return
+                spec = MODULE_REGISTRY[module_id]
+                metric_windows = bundle.get("timeline_5min", {})
+                deps_summary = "\n".join(
+                    f"- {d['id']} ({d['impact_direction']}, {d['status']})"
+                    for d in bundle.get("dependencies_status", [])
+                ) or "-"
+                log_block = "\n".join(log_tail[-20:]) or "-"
+                prompt = (
+                    f"Hücre: {spec.display_name} ({module_id})\n"
+                    f"Görevi: {spec.description}\n"
+                    f"Mevcut sağlık skoru: {bundle.get('current_health', 0)}/100\n"
+                    f"Durum: {bundle.get('status')}\n\n"
+                    f"Son 5 dakika metrikleri (kısa):\n{metric_windows}\n\n"
+                    f"Son 20 log satırı:\n{log_block}\n\n"
+                    f"Bağlı hücreler:\n{deps_summary}\n\n"
+                    "Lütfen Türkçe yanıt ver:\n"
+                    "1. Özet (1-2 cümle)\n"
+                    "2. Muhtemel kök neden\n"
+                    "3. Bağlı hücreler etkisi\n"
+                    "4. Önerilen 2-3 aksiyon\n"
+                    "5. Aciliyet: düşük | orta | yüksek | kritik"
+                )
+                system_prompt = (
+                    "Sen QuenBot sistem tanı uzmanısın. "
+                    "Yalnızca verilen verilere dayanarak kısa, operatöre dönük Türkçe tanı yaz."
+                )
+                try:
+                    res = await asyncio.wait_for(
+                        bridge.call_llm(
+                            task="mission_control_autopsy",
+                            system=system_prompt,
+                            prompt=prompt,
+                            json_mode=False,
+                            temperature=0.2,
+                        ),
+                        timeout=90.0,
+                    )
+                except asyncio.TimeoutError:
+                    res = None
+                    logger.debug("mission-control qwen diagnosis timeout (bg)")
+                if isinstance(res, dict) and res.get("success") and res.get("text"):
+                    _mc_autopsy_cache[module_id] = {
+                        "diagnosis": {
+                            "summary_tr": str(res["text"]).strip(),
+                            "suggested_actions_tr": [],
+                            "confidence": 0.7,
+                            "generated_at": time.time(),
+                        },
+                        "generated_at": time.time(),
+                        "in_flight": False,
+                    }
+                else:
+                    # Keep an in_flight=False marker so we do not retry for 60s.
+                    _mc_autopsy_cache[module_id] = {
+                        "diagnosis": None,
+                        "generated_at": time.time(),
+                        "in_flight": False,
+                    }
+            except Exception as e:
+                logger.debug("mission-control qwen diagnosis bg err: %s", e)
+                _mc_autopsy_cache[module_id] = {
+                    "diagnosis": None,
+                    "generated_at": time.time(),
+                    "in_flight": False,
+                }
 
         async def get_mission_control_autopsy(request):
             module_id = request.match_info.get("module_id", "")
@@ -4532,74 +4616,30 @@ class AgentOrchestrator:
 
             bundle = autopsy_bundle(module_id, log_tail=log_tail)
 
-            # Qwen diagnosis (cached 60s per module)
-            cache_key = (module_id, int(time.time() // 60))
-            cached = _mc_autopsy_cache.get(cache_key)
-            if cached is not None:
-                bundle["qwen_diagnosis"] = cached
+            # Non-blocking Qwen diagnosis: serve from cache if fresh, otherwise
+            # kick off a background task and tell the client to poll again.
+            now = time.time()
+            entry = _mc_autopsy_cache.get(module_id)
+            if entry and (now - entry.get("generated_at", 0)) < _MC_AUTOPSY_TTL:
+                bundle["qwen_diagnosis"] = entry.get("diagnosis")
+                bundle["qwen_pending"] = bool(entry.get("in_flight"))
             else:
-                diagnosis = None
-                try:
-                    bridge = self.llm_bridge if hasattr(self, "llm_bridge") else None
-                    if bridge is not None:
-                        available = False
-                        try:
-                            available = bool(await bridge.is_available())
-                        except Exception:
-                            available = False
-                        if available:
-                            spec = MODULE_REGISTRY[module_id]
-                            metric_windows = bundle.get("timeline_5min", {})
-                            deps_summary = "\n".join(
-                                f"- {d['id']} ({d['impact_direction']}, {d['status']})"
-                                for d in bundle.get("dependencies_status", [])
-                            ) or "-"
-                            log_block = "\n".join(log_tail[-20:]) or "-"
-                            prompt = (
-                                f"Hücre: {spec.display_name} ({module_id})\n"
-                                f"Görevi: {spec.description}\n"
-                                f"Mevcut sağlık skoru: {bundle.get('current_health', 0)}/100\n"
-                                f"Durum: {bundle.get('status')}\n\n"
-                                f"Son 5 dakika metrikleri (kısa):\n"
-                                f"{metric_windows}\n\n"
-                                f"Son 20 log satırı:\n{log_block}\n\n"
-                                f"Bağlı hücreler:\n{deps_summary}\n\n"
-                                "Lütfen Türkçe yanıt ver:\n"
-                                "1. Özet (1-2 cümle)\n"
-                                "2. Muhtemel kök neden\n"
-                                "3. Bağlı hücreler etkisi\n"
-                                "4. Önerilen 2-3 aksiyon\n"
-                                "5. Aciliyet: düşük | orta | yüksek | kritik"
-                            )
-                            system_prompt = (
-                                "Sen QuenBot sistem tanı uzmanısın. "
-                                "Yalnızca verilen verilere dayanarak kısa, operatöre dönük Türkçe tanı yaz."
-                            )
-                            try:
-                                res = await asyncio.wait_for(
-                                    bridge.call_llm(
-                                        task="mission_control_autopsy",
-                                        system=system_prompt,
-                                        prompt=prompt,
-                                        json_mode=False,
-                                        temperature=0.2,
-                                    ),
-                                    timeout=25.0,
-                                )
-                            except asyncio.TimeoutError:
-                                res = None
-                                logger.debug("mission-control qwen diagnosis timeout")
-                            if isinstance(res, dict) and res.get("success") and res.get("text"):
-                                diagnosis = {
-                                    "summary_tr": str(res["text"]).strip(),
-                                    "suggested_actions_tr": [],
-                                    "confidence": 0.7,
-                                    "generated_at": time.time(),
-                                }
-                except Exception as e:
-                    logger.debug("mission-control qwen diagnosis skip: %s", e)
-                _mc_autopsy_cache[cache_key] = diagnosis
-                bundle["qwen_diagnosis"] = diagnosis
+                bundle["qwen_diagnosis"] = None
+                bundle["qwen_pending"] = True
+                # Only start one background task per module at a time
+                if not entry or not entry.get("in_flight"):
+                    _mc_autopsy_cache[module_id] = {
+                        "diagnosis": entry.get("diagnosis") if entry else None,
+                        "generated_at": now,
+                        "in_flight": True,
+                    }
+                    try:
+                        asyncio.create_task(
+                            _generate_qwen_diagnosis(module_id, bundle, log_tail)
+                        )
+                    except Exception as e:
+                        logger.debug("mc autopsy bg dispatch err: %s", e)
+                        _mc_autopsy_cache[module_id]["in_flight"] = False
                 # Prune cache keep last 64 entries
                 if len(_mc_autopsy_cache) > 64:
                     for k in list(_mc_autopsy_cache.keys())[:-64]:

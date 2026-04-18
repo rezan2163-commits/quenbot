@@ -50,21 +50,36 @@ export function AutopsyDrawer({ moduleId, onClose }: Props) {
       return;
     }
     let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
     setLoading(true);
     setError(null);
     setBundle(null);
-    fetchAutopsy(moduleId)
-      .then((b) => {
-        if (!cancelled) setBundle(b);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Hata");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+
+    const load = (silent: boolean) => {
+      if (!silent) setLoading(true);
+      fetchAutopsy(moduleId)
+        .then((b) => {
+          if (cancelled) return;
+          setBundle(b);
+          setError(null);
+          // If Qwen diagnosis is still being generated in the background,
+          // poll again in 4s until it resolves (or we give up after ~120s).
+          if (b.qwen_pending && !b.qwen_diagnosis) {
+            pollTimer = setTimeout(() => load(true), 4000);
+          }
+        })
+        .catch((e) => {
+          if (!cancelled) setError(e instanceof Error ? e.message : "Hata");
+        })
+        .finally(() => {
+          if (!cancelled && !silent) setLoading(false);
+        });
+    };
+    load(false);
+
     return () => {
       cancelled = true;
+      if (pollTimer) clearTimeout(pollTimer);
     };
   }, [moduleId]);
 
@@ -222,9 +237,14 @@ export function AutopsyDrawer({ moduleId, onClose }: Props) {
                     Güven: {(diag.confidence * 100).toFixed(0)}% · {formatAge(diag.generated_at)}
                   </div>
                 </>
+              ) : bundle.qwen_pending ? (
+                <p className="mt-1.5 flex items-center gap-2 text-xs text-purple-200/80">
+                  <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-purple-300" />
+                  Qwen tanı üretiyor… (arka planda, ~30 sn)
+                </p>
               ) : (
                 <p className="mt-1.5 text-xs text-gray-500">
-                  Qwen yanıtı alınamadı (LLM soğuk başlatma veya zaman aşımı). Metrikler aşağıda.
+                  Qwen yanıtı alınamadı (LLM erişilemiyor). Metrikler aşağıda.
                 </p>
               )}
             </div>

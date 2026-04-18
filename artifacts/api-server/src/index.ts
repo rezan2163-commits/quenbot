@@ -1372,7 +1372,19 @@ app.get("/api/signals/outcomes", async (_req, res) => {
                  THEN COALESCE((s.metadata->>'target_pct')::double precision, 0.02)
                  ELSE 0 END
              ) AS actual_change_pct,
-             COALESCE(sim.exit_time, s.timestamp) AS resolved_at
+             COALESCE(
+               sim.exit_time,
+               (s.metadata->>'closed_at')::timestamptz,
+               (s.metadata->>'exit_time')::timestamptz,
+               (s.metadata->>'resolved_at')::timestamptz,
+               (SELECT MAX((h->>'closed_at')::timestamptz)
+                FROM jsonb_array_elements(s.metadata->'target_horizons') h
+                WHERE h->>'closed_at' IS NOT NULL),
+               (SELECT MAX((h->>'evaluated_at')::timestamptz)
+                FROM jsonb_array_elements(s.metadata->'target_horizons') h
+                WHERE h->>'evaluated_at' IS NOT NULL),
+               s.timestamp
+             ) AS resolved_at
       FROM signals s
       LEFT JOIN LATERAL (
         SELECT pnl_pct, exit_time FROM simulations
@@ -2937,9 +2949,13 @@ app.get("/api/mission-control/snapshot", async (_req, res) => {
 });
 app.get("/api/mission-control/autopsy/:module_id", async (req, res) => {
   try {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), 15_000);
     const r = await fetch(
-      `${DIRECTIVE_API}/api/mission-control/autopsy/${encodeURIComponent(req.params.module_id)}`
+      `${DIRECTIVE_API}/api/mission-control/autopsy/${encodeURIComponent(req.params.module_id)}`,
+      { signal: ctrl.signal }
     );
+    clearTimeout(to);
     res.status(r.status).json(await r.json());
   } catch {
     res.status(502).json({ error: "autopsy unavailable" });

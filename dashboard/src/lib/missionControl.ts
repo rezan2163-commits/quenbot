@@ -135,6 +135,7 @@ export interface AutopsyBundle {
   current_activity: AutopsyCurrentActivity;
   timeline_5min: AutopsyTimeline;
   qwen_diagnosis: AutopsyQwenDiagnosis | null;
+  qwen_pending?: boolean;
   operator_actions_available: string[];
 }
 

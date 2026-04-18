@@ -72,9 +72,21 @@ function classifyOutcome(o: any): { kind: "win" | "loss" | "neutral"; change: nu
   );
   const dirRaw = String(o?.direction ?? meta.direction ?? meta.position_bias ?? o?.side ?? "").toLowerCase();
   const isShort = dirRaw === "short" || dirRaw === "sell";
-  const resolvedAt = toTimestampMs(
-    meta.closed_at ?? meta.exit_time ?? meta.resolved_at ?? o?.evaluated_at ?? o?.signal_time ?? o?.timestamp,
-  );
+
+  // Real close time — backend provides it as `resolved_at` at the row root.
+  // Fall back through metadata and horizon evaluation timestamps BEFORE
+  // defaulting to signal_time (entry time) so the card never shows
+  // "giriş == kapanış".
+  const hzns = Array.isArray(meta.target_horizons) ? meta.target_horizons : [];
+  const hzClose = hzns
+    .map((h: any) => toTimestampMs(h?.closed_at || h?.evaluated_at))
+    .filter((t: number) => t > 0);
+  const horizonCloseTs = hzClose.length ? Math.max(...hzClose) : 0;
+  const signalTs = toTimestampMs(o?.signal_time ?? o?.timestamp);
+  const rootResolved = toTimestampMs(o?.resolved_at ?? o?.closed_at ?? o?.evaluated_at);
+  const metaResolved = toTimestampMs(meta.closed_at ?? meta.exit_time ?? meta.resolved_at ?? meta.evaluated_at);
+  const candidates = [rootResolved, metaResolved, horizonCloseTs].filter((t) => t > 0 && t > signalTs);
+  const resolvedAt = candidates.length ? candidates[0] : (rootResolved || metaResolved || horizonCloseTs || signalTs);
 
   if (entry > 0 && exit > 0) {
     const raw = (exit - entry) / entry;
@@ -84,30 +96,33 @@ function classifyOutcome(o: any): { kind: "win" | "loss" | "neutral"; change: nu
     return { kind: "neutral", change, resolvedAt };
   }
 
-  // Fallback #1: explicit status field set by the outcome engine
+  // Fallback #1: backend-computed `resolved_kind` + `actual_change_pct` columns.
+  const kindFromBackend = String(o?.resolved_kind ?? "").toLowerCase();
+  const backendPct = toNumber(o?.actual_change_pct, 0) * 100;
+  if (kindFromBackend === "win") return { kind: "win", change: backendPct, resolvedAt };
+  if (kindFromBackend === "loss") return { kind: "loss", change: backendPct, resolvedAt };
+
+  // Fallback #2: explicit status field
   const status = String(o?.status ?? meta.status ?? "").toLowerCase();
   if (status.includes("target_hit") || status.includes("target_reached") || meta.was_correct === true || meta.target_hit === true) {
     return { kind: "win", change: toNumber(o?.target_pct ?? meta.target_pct, 0) * 100, resolvedAt };
   }
   if (
     status.includes("stop_loss") || status.includes("stopped") || status.includes("expired") ||
+    status.includes("target_missed") || status.includes("failed") ||
     meta.was_correct === false || meta.close_reason === "stop_loss"
   ) {
     return { kind: "loss", change: -Math.abs(toNumber(meta.target_pct, 0)) * 100, resolvedAt };
   }
 
-  // Fallback #2: legacy target_horizons metadata
-  const hzns = Array.isArray(meta.target_horizons) ? meta.target_horizons : [];
+  // Fallback #3: legacy target_horizons metadata
   const hit = hzns.find((h: any) => h?.status === "hit");
   const allMissed = hzns.length > 0 && hzns.every((h: any) => ["missed", "expired"].includes(String(h?.status)));
   const primary = hit || hzns[0];
   const change = toNumber(primary?.actual_change_pct, 0) * 100;
-  const altResolvedAt = toTimestampMs(
-    primary?.closed_at || primary?.evaluated_at || o?.evaluated_at || o?.signal_time || o?.timestamp,
-  );
-  if (hit) return { kind: "win", change, hitHorizon: hit, resolvedAt: altResolvedAt };
-  if (allMissed) return { kind: "loss", change, resolvedAt: altResolvedAt };
-  return { kind: "neutral", change, resolvedAt: altResolvedAt };
+  if (hit) return { kind: "win", change, hitHorizon: hit, resolvedAt };
+  if (allMissed) return { kind: "loss", change, resolvedAt };
+  return { kind: "neutral", change, resolvedAt };
 }
 
 function TabPill({
