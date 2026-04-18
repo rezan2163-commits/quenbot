@@ -302,3 +302,45 @@ export function useRuntimeStatus() {
     `${API}/api/runtime/status`, fetcher, { refreshInterval: 10000 }
   );
 }
+
+/* ───── Aşama 3 — Free Roam ───── */
+
+export interface Asama3Status {
+  phase: "asama_3" | "asama_2_degraded" | "unknown";
+  weekly_ack?: {
+    enabled?: boolean;
+    running?: boolean;
+    degraded?: boolean;
+    current_week?: string;
+    ack_present?: boolean;
+    ack_path?: string;
+    grace_hours?: number;
+    week_started_at_ts?: number | null;
+  };
+  emergency_lockdown?: {
+    engaged?: boolean;
+    engaged_at?: number | null;
+    reason?: string | null;
+    source?: string | null;
+    snapshot_path?: string | null;
+  };
+  self_audit?: {
+    month_label?: string;
+    disagreement_rate?: number;
+    sample_size?: number;
+    alert_emitted?: boolean;
+    threshold?: number;
+  };
+  config?: {
+    max_directives_per_hour?: number;
+    allowlist?: string[];
+    blocklist_hard?: string[];
+  };
+  error?: string;
+}
+
+export function useAsama3Status() {
+  return useSWR<Asama3Status>(`${API}/api/oracle/asama3/status`, fetcher, {
+    refreshInterval: 10000,
+  });
+}

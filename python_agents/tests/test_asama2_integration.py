@@ -114,7 +114,10 @@ def test_config_defaults_use_aşama2_values():
     if os.getenv("QUENBOT_ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN") is None:
         assert Config.ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN == 0.65
     if os.getenv("QUENBOT_ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR") is None:
-        assert Config.ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR == 10
+        # Aşama 3 raises this to 30 (was 10 in A2). Accept either to keep the
+        # test stable across phases while still guarding against regressions
+        # below the A2 floor.
+        assert Config.ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR in (10, 30)
     if os.getenv("QUENBOT_AUTO_ROLLBACK_ACCURACY_MIN") is None:
         assert Config.AUTO_ROLLBACK_ACCURACY_THRESHOLD == 0.50
     # Hard blocklist always includes FORCE_TRADE & DISABLE_SAFETY_NET.
