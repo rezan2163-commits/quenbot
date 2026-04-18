@@ -469,24 +469,61 @@ function CrossAssetView({ symbol }: { symbol: string }) {
 }
 
 function ConfluenceView({ symbol }: { symbol: string }) {
-  const { data } = useConfluence(symbol);
-  if (!data) return <EmptyState title="Yükleniyor..." />;
+  const { data, error, isLoading } = useConfluence(symbol);
 
-  // Backend `top_contributors` Contribution dict listesi gönderir:
-  //   [{feature, z, weight, log_odds}, ...]
-  // Eski fallback'ler `contributors` (obje) veya tuple listesi olabilir.
-  // Her iki şekli de normalize ederek patlamayı önle.
-  const raw = data.top_contributors ?? data.contributors ?? [];
+  // 1) Ağ/HTTP hatası — ErrorBoundary'ye düşmek yerine anlamlı mesaj göster.
+  if (error) {
+    const msg = String((error as any)?.message || error || "");
+    const is503 = msg.includes("503");
+    return (
+      <Card className="p-4">
+        <div className="flex items-start gap-3">
+          <div className="rounded-md bg-warn/15 p-2 text-warn"><AlertCircle size={16} /></div>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold">
+              {is503 ? "Confluence Dormant" : "Confluence erişilemiyor"}
+            </div>
+            <p className="mt-1 break-words text-[11px] text-gray-500">
+              {is503
+                ? "confluence_engine kapalı. .env içinde QUENBOT_CONFLUENCE_ENABLED=true ile açıp pm2 restart."
+                : `API hatası: ${msg || "bilinmiyor"}`}
+            </p>
+            {is503 && <Badge variant="warn" className="mt-2">QUENBOT_CONFLUENCE_ENABLED=false</Badge>}
+          </div>
+        </div>
+      </Card>
+    );
+  }
+
+  if (isLoading || !data) return <EmptyState title="Yükleniyor..." />;
+
+  // 2) Backend `{"error": "..."}` şeklinde 200/5xx dönebilir — güvenli parse.
+  if (typeof data !== "object" || (data as any).error) {
+    return (
+      <Card className="p-4">
+        <div className="flex items-start gap-3">
+          <div className="rounded-md bg-warn/15 p-2 text-warn"><AlertCircle size={16} /></div>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold">Confluence veri yok</div>
+            <p className="mt-1 break-words text-[11px] text-gray-500">
+              {String((data as any)?.error || "Backend confluence sonucu döndüremedi.")}
+            </p>
+          </div>
+        </div>
+      </Card>
+    );
+  }
+
+  // 3) top_contributors hem tuple hem Contribution dict hem {k:v} olabilir.
+  const raw = (data as any).top_contributors ?? (data as any).contributors ?? [];
   const normalized: Array<[string, number]> = [];
   try {
     if (Array.isArray(raw)) {
       for (const item of raw) {
         if (Array.isArray(item) && item.length >= 2) {
-          // tuple: [name, value]
-          normalized.push([String(item[0]), Number(item[1]) || 0]);
+          normalized.push([String(item[0] ?? ""), Number(item[1]) || 0]);
         } else if (item && typeof item === "object") {
-          // Contribution dict
-          const obj = item as unknown as Record<string, unknown>;
+          const obj = item as Record<string, unknown>;
           const name = String(obj.feature ?? obj.name ?? obj.symbol ?? "");
           const val = Number(
             obj.log_odds ?? obj.contribution ?? obj.value ?? obj.weight ?? 0,
@@ -495,33 +532,44 @@ function ConfluenceView({ symbol }: { symbol: string }) {
         }
       }
     } else if (raw && typeof raw === "object") {
-      // {feature_name: value}
       for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
         normalized.push([String(k), Number(v) || 0]);
       }
     }
   } catch {
-    // normalize başarısız — boş gösterim
+    /* normalize başarısız — boş gösterim */
   }
-  const sorted = normalized.slice().sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
-  const maxAbs = Math.max(0.01, ...sorted.map(([, v]) => Math.abs(v)));
-  const score = Number(data.confluence_score ?? 0);
+  const sorted = normalized
+    .filter(([name]) => !!name)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+  const maxAbs = sorted.length > 0
+    ? Math.max(0.01, ...sorted.map(([, v]) => Math.abs(v)))
+    : 0.01;
+
+  // 4) Backend confluence_score ∈ [0,1] üretir (σ(log_odds)). Donut 0-1 alır.
+  const rawScore = Number((data as any).confluence_score);
+  const score = Number.isFinite(rawScore) ? rawScore : 0;
+  const rawLogOdds = Number((data as any).log_odds);
+  const logOdds = Number.isFinite(rawLogOdds) ? rawLogOdds : 0;
+  // Yön göstergesi: log_odds yönü (0'ın üstü/altı)
+  const scoreTone: "bull" | "bear" | "warn" =
+    logOdds > 0.1 ? "bull" : logOdds < -0.1 ? "bear" : "warn";
 
   return (
     <div className="flex flex-col gap-3">
       <div className="grid grid-cols-[auto_1fr] items-center gap-3">
         <Card className="flex flex-col items-center p-3">
-          <Donut value={(score + 1) / 2} size={92}
-                 tone={score > 0.1 ? "bull" : score < -0.1 ? "bear" : "warn"}
+          <Donut value={score} size={92}
+                 tone={scoreTone}
                  label={<div className="text-base font-bold font-mono">{score.toFixed(2)}</div>} />
-          <Badge className="mt-2" variant={score > 0.1 ? "success" : score < -0.1 ? "danger" : "warn"}>
+          <Badge className="mt-2" variant={scoreTone === "bull" ? "success" : scoreTone === "bear" ? "danger" : "warn"}>
             Score
           </Badge>
         </Card>
         <div className="grid min-w-0 grid-cols-1 gap-2">
-          <Stat label="Log Odds" value={Number(data.log_odds ?? 0).toFixed(3)} />
+          <Stat label="Log Odds" value={logOdds.toFixed(3)} />
           <Stat label="Contributors" value={sorted.length} />
-          <Stat label="Symbol" value={data.symbol || symbol} />
+          <Stat label="Symbol" value={String((data as any).symbol || symbol)} />
         </div>
       </div>
 
@@ -532,13 +580,14 @@ function ConfluenceView({ symbol }: { symbol: string }) {
         </CardHeader>
         <CardContent>
           {sorted.length === 0 ? (
-            <EmptyState title="Veri toplanıyor..." />
+            <EmptyState title="Veri toplanıyor..."
+                        description="Henüz yeterli sinyal yok. Feature store dolduktan sonra gelir." />
           ) : (
             <div className="flex flex-col gap-2">
-              {sorted.slice(0, 12).map(([name, val]) => {
+              {sorted.slice(0, 12).map(([name, val], idx) => {
                 const n = Number(val) || 0;
                 return (
-                  <HBar key={name} label={name} value={Math.abs(n)} max={maxAbs}
+                  <HBar key={`${name}-${idx}`} label={name} value={Math.abs(n)} max={maxAbs}
                         tone={n >= 0 ? "bull" : "bear"}
                         right={n.toFixed(3)} />
                 );
