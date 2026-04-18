@@ -75,3 +75,45 @@ def test_legacy_microstructure_unchanged():
     assert hasattr(m, "all_snapshots") and callable(m.all_snapshots)
     assert hasattr(ice, "fingerprint") and callable(ice.fingerprint)
     assert hasattr(ice, "all_fingerprints") and callable(ice.all_fingerprints)
+
+
+def test_phase5_safety_net_event_types():
+    """Phase 5 Finalization — safety_net event types ADDITIVE olmus olmali."""
+    from event_bus import EventType
+    assert hasattr(EventType, "SAFETY_NET_TRIPPED")
+    assert hasattr(EventType, "SAFETY_NET_RESET")
+    assert hasattr(EventType, "SAFETY_NET_DRIFT_ALERT")
+    assert hasattr(EventType, "SAFETY_NET_FS_DEGRADED")
+    # Phase 4 counterfactual / rotation da var olmali
+    assert hasattr(EventType, "COUNTERFACTUAL_UPDATE")
+    assert hasattr(EventType, "CONFLUENCE_WEIGHTS_ROTATED")
+
+
+def test_phase5_safety_net_config_flags():
+    from config import Config
+    for flag in [
+        "SAFETY_NET_ENABLED",
+        "SAFETY_NET_BRIER_TOL",
+        "SAFETY_NET_HITRATE_TOL",
+        "SAFETY_NET_DEGRADATION_WINDOW_MIN",
+        "SAFETY_NET_CONFLUENCE_DRIFT_SIGMA",
+        "SAFETY_NET_FS_FAILURE_TOL",
+        "SAFETY_NET_BASELINE_PATH",
+        "SAFETY_NET_TRIP_SENTINEL",
+        # Online learning Phase 4 Finalization
+        "ONLINE_LEARNING_PERSIST_DB",
+        "ONLINE_LEARNING_DB_OFFSET_PATH",
+    ]:
+        assert hasattr(Config, flag), f"Config.{flag} eksik"
+    # Safety net default OFF — live path davranisini bozamaz
+    assert Config.SAFETY_NET_ENABLED is False
+
+
+def test_database_has_counterfactual_table_api():
+    """Database sinifinda counterfactual metodlari eklenmis olmali."""
+    from database import Database
+    assert hasattr(Database, "create_counterfactual_table")
+    assert hasattr(Database, "insert_counterfactual_observation")
+    assert hasattr(Database, "fetch_counterfactual_labels")
+    assert hasattr(Database, "counterfactual_metrics")
+

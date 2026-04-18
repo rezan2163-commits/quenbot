@@ -85,6 +85,10 @@ class OnlineLearningEvaluator:
         state_path: str = "python_agents/.online_learning_state.json",
         window: int = 2000,
         price_lookup: Optional[Callable[[str], Optional[float]]] = None,
+        event_bus: Any = None,
+        database: Any = None,
+        db_offset_path: str = "python_agents/.online_learning_db_offset.json",
+        persist_db: bool = False,
     ) -> None:
         self.log_path = Path(log_path)
         self.horizon_sec = int(horizon_min) * 60
@@ -102,7 +106,47 @@ class OnlineLearningEvaluator:
         self._last_run_ts: float = 0.0
         self._total_scored = 0
         self._task: Optional[asyncio.Task] = None
+
+        # Phase 4 Finalization — DB-backed counterfactual store.
+        # JSONL kalmaya devam eder (write-ahead log). DB ikincil persist.
+        self._event_bus = event_bus
+        self._database = database
+        self._db_offset_path = Path(db_offset_path)
+        self._persist_db = bool(persist_db) and database is not None
+        self._db_offset: int = 0
+        self._db_persisted_total: int = 0
+        self._weights_frozen: bool = False  # safety_net tripped gate
+
         self._load_state()
+        self._load_db_offset()
+        self._subscribe_safety_net()
+
+    # ─────────── safety_net integration ───────────
+    def _subscribe_safety_net(self) -> None:
+        bus = self._event_bus
+        if bus is None:
+            return
+        try:
+            from event_bus import EventType
+            subscribe = getattr(bus, "subscribe", None)
+            if subscribe is None:
+                return
+            subscribe(EventType.SAFETY_NET_TRIPPED, self._on_safety_net_tripped)
+            subscribe(EventType.SAFETY_NET_RESET, self._on_safety_net_reset)
+        except Exception as exc:
+            logger.debug("online_learning safety_net subscribe skipped: %s", exc)
+
+    async def _on_safety_net_tripped(self, event: Any) -> None:
+        self._weights_frozen = True
+        logger.warning("🛡️ online_learning: SAFETY_NET_TRIPPED → weight rotation dondu")
+
+    async def _on_safety_net_reset(self, event: Any) -> None:
+        self._weights_frozen = False
+        logger.info("🛡️ online_learning: SAFETY_NET_RESET → weight rotation aktif")
+
+    @property
+    def weights_frozen(self) -> bool:
+        return bool(self._weights_frozen)
 
     # ─────────── public metrics ───────────
     def rolling_metrics(self, symbol: Optional[str] = None) -> Dict[str, Any]:
@@ -193,6 +237,9 @@ class OnlineLearningEvaluator:
             "pending_rows": len(self._pending),
             "last_offset": self._last_offset,
             "tracked_symbols": len(self._scored),
+            "persist_db": self._persist_db,
+            "db_persisted_total": self._db_persisted_total,
+            "weights_frozen": self._weights_frozen,
         }
 
     def metrics(self) -> Dict[str, Any]:
@@ -200,6 +247,8 @@ class OnlineLearningEvaluator:
             "online_learning_scored_total": self._total_scored,
             "online_learning_pending": len(self._pending),
             "online_learning_tracked_symbols": len(self._scored),
+            "online_learning_db_persisted_total": self._db_persisted_total,
+            "online_learning_weights_frozen": int(bool(self._weights_frozen)),
         }
 
     # ─────────── loop ───────────
@@ -222,9 +271,219 @@ class OnlineLearningEvaluator:
     async def _run_once(self) -> Dict[str, Any]:
         added = self._ingest_new_rows()
         matured = self._score_matured_rows()
+        persisted = 0
+        if self._persist_db:
+            persisted = await self._persist_to_db()
         self._last_run_ts = time.time()
         self._save_state()
-        return {"ingested": added, "scored": matured}
+        return {"ingested": added, "scored": matured, "persisted_db": persisted}
+
+    # ─────────── DB persistence (Phase 4 Finalization) ───────────
+    async def _persist_to_db(self) -> int:
+        """JSONL'i DB'ye tail eder. JSONL kaybolmaz; DB yazilamazsa retry."""
+        if not self._persist_db or self._database is None:
+            return 0
+        if not self.log_path.exists():
+            return 0
+        inserted = 0
+        batch_rows: List[Dict[str, Any]] = []
+        try:
+            size = self.log_path.stat().st_size
+            if size < self._db_offset:
+                self._db_offset = 0  # log rotated
+            with self.log_path.open("r", encoding="utf-8") as f:
+                f.seek(self._db_offset)
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    mapped = self._row_to_cf_observation(row)
+                    if mapped is None:
+                        continue
+                    batch_rows.append(mapped)
+                new_offset = f.tell()
+            for mapped in batch_rows:
+                try:
+                    rid = await self._database.insert_counterfactual_observation(mapped)
+                    if rid is not None:
+                        inserted += 1
+                        self._db_persisted_total += 1
+                except Exception as exc:
+                    logger.debug("cf insert skipped: %s", exc)
+            # only advance offset if all batch rows processed without raising
+            self._db_offset = new_offset
+            self._save_db_offset()
+            if inserted > 0:
+                await self._emit_counterfactual_update(inserted)
+        except Exception as exc:
+            logger.debug("persist_to_db tail error: %s", exc)
+        return inserted
+
+    def _row_to_cf_observation(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Shadow JSONL satirini counterfactual_observations satira cevirir."""
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol:
+            return None
+        ts = row.get("ts") or row.get("_ingest_ts")
+        # determine label heuristically from realized outcome if available
+        realized = row.get("realized_pnl_pct")
+        fast_dir = _direction_sign(str(row.get("fast_direction", "neutral")))
+        label = "TN"
+        decided = bool(row.get("chosen_by") and row.get("chosen_by") != "none")
+        if realized is not None:
+            try:
+                realized = float(realized)
+                if decided and fast_dir != 0:
+                    # signal issued
+                    if (fast_dir > 0 and realized > 0) or (fast_dir < 0 and realized < 0):
+                        label = "TP" if abs(realized) >= 2.0 else "FP"
+                    else:
+                        label = "FP"
+                else:
+                    label = "FN" if abs(realized) >= 2.0 else "TN"
+            except Exception:
+                realized = None
+        return {
+            "symbol": symbol,
+            "event_ts": ts,
+            "move_magnitude_pct": abs(float(realized)) if realized is not None else 0.0,
+            "move_direction": "up" if (realized or 0) > 0 else ("down" if (realized or 0) < 0 else "flat"),
+            "label": label,
+            "horizon_minutes": int(self.horizon_sec // 60),
+            "features_t_minus_1h": row.get("features") if isinstance(row.get("features"), dict) else None,
+            "confluence_score_t_minus_1h": row.get("confluence_score"),
+            "fast_brain_p_t_minus_1h": row.get("fast_probability"),
+            "conformal_lower": row.get("conformal_lower"),
+            "conformal_upper": row.get("conformal_upper"),
+            "decided": decided,
+            "decision_source": row.get("chosen_by"),
+            "decision_path": row.get("path"),
+            "realized_pnl_pct": realized,
+            "attribution": row.get("attribution"),
+        }
+
+    async def _emit_counterfactual_update(self, last_batch: int) -> None:
+        bus = self._event_bus
+        if bus is None:
+            return
+        try:
+            from event_bus import EventType
+            publish = getattr(bus, "publish", None)
+            if publish is None:
+                return
+            payload = {
+                "last_batch": int(last_batch),
+                "persisted_total": int(self._db_persisted_total),
+                "weights_frozen": self._weights_frozen,
+            }
+            result = publish(EventType.COUNTERFACTUAL_UPDATE, payload)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            pass
+
+    def _load_db_offset(self) -> None:
+        try:
+            if not self._db_offset_path.exists():
+                return
+            d = json.loads(self._db_offset_path.read_text(encoding="utf-8"))
+            self._db_offset = int(d.get("offset", 0))
+            self._db_persisted_total = int(d.get("persisted_total", 0))
+        except Exception:
+            pass
+
+    def _save_db_offset(self) -> None:
+        try:
+            self._db_offset_path.parent.mkdir(parents=True, exist_ok=True)
+            self._db_offset_path.write_text(
+                json.dumps({
+                    "offset": self._db_offset,
+                    "persisted_total": self._db_persisted_total,
+                }),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    async def recompute_from_db(self, limit: int = 100000) -> Dict[str, Any]:
+        """Warm-start: DB'deki son N counterfactual'dan logistic SGD cikar.
+
+        Sonuc `.confluence_weights_candidate.json` dosyasina yazilir —
+        live weights'e DOKUNMAZ. Promotion `promote_confluence_weights.py`
+        ile yapilir.
+        """
+        if self._database is None:
+            return {"healthy": False, "error": "no_database"}
+        if self._weights_frozen:
+            return {"healthy": False, "error": "weights_frozen"}
+        try:
+            from datetime import datetime, timedelta
+            since = datetime.utcnow() - timedelta(days=30)
+            rows = await self._database.fetch_counterfactual_labels(since, int(limit))
+        except Exception as exc:
+            return {"healthy": False, "error": str(exc)}
+        if not rows:
+            return {"healthy": True, "samples": 0, "weights_path": None}
+        # minimal logistic SGD over features_t_minus_1h keys common to all
+        from collections import defaultdict
+        feature_sum: Dict[str, float] = defaultdict(float)
+        feature_cnt: Dict[str, int] = defaultdict(int)
+        pos = 0
+        neg = 0
+        for r in rows:
+            lbl = str(r.get("label") or "").upper()
+            if lbl in {"TP", "FN"}:
+                pos += 1
+                y = 1
+            else:
+                neg += 1
+                y = 0
+            feats = r.get("features_t_minus_1h") or {}
+            if isinstance(feats, str):
+                try:
+                    feats = json.loads(feats)
+                except Exception:
+                    feats = {}
+            if not isinstance(feats, dict):
+                continue
+            for k, v in feats.items():
+                try:
+                    vf = float(v)
+                except Exception:
+                    continue
+                if not math.isfinite(vf):
+                    continue
+                feature_sum[k] += vf * (1 if y else -1)
+                feature_cnt[k] += 1
+        # naive candidate weights: mean signed contribution clipped to [-1, 1]
+        candidate: Dict[str, float] = {}
+        for k, s in feature_sum.items():
+            cnt = feature_cnt[k]
+            if cnt < 10:
+                continue
+            w = s / max(1, cnt)
+            candidate[k] = max(-1.0, min(1.0, w))
+        out_path = Path("python_agents/.confluence_weights_candidate.json")
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps({
+                "generated_at": time.time(),
+                "samples": len(rows),
+                "positives": pos,
+                "negatives": neg,
+                "weights": candidate,
+            }, indent=2), encoding="utf-8")
+        except Exception as exc:
+            return {"healthy": False, "error": str(exc), "samples": len(rows)}
+        return {
+            "healthy": True,
+            "samples": len(rows),
+            "weights_path": str(out_path),
+            "keys": len(candidate),
+            "positives": pos,
+            "negatives": neg,
+        }
 
     # ─────────── internals ───────────
     def _ingest_new_rows(self) -> int:

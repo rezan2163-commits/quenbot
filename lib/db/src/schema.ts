@@ -1,4 +1,4 @@
-import { pgTable, serial, varchar, decimal, timestamp, jsonb, integer, text } from "drizzle-orm/pg-core";
+import { pgTable, serial, bigserial, varchar, decimal, timestamp, jsonb, integer, text, doublePrecision, boolean } from "drizzle-orm/pg-core";
 
 // Trades table
 export const trades = pgTable("trades", {
@@ -90,4 +90,31 @@ export const agentConfig = pgTable("agent_config", {
   configKey: varchar("config_key", { length: 100 }).notNull(),
   configValue: jsonb("config_value").notNull(),
   updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// ─── Intel Upgrade (Phase 4 Finalization) — ADDITIVE ONLY ───
+// Counterfactual observations: every ≥2% price move is compared against
+// what the fast-brain / confluence / LLM predicted an hour earlier.
+// Feeds online_learning weight rotation + safety-net accuracy guards.
+export const counterfactualObservations = pgTable("counterfactual_observations", {
+  id: bigserial("id", { mode: "bigint" }).primaryKey(),
+  symbol: varchar("symbol", { length: 32 }).notNull(),
+  eventTs: timestamp("event_ts", { withTimezone: true }).notNull(),
+  moveMagnitudePct: doublePrecision("move_magnitude_pct").notNull(),
+  moveDirection: varchar("move_direction", { length: 8 }).notNull(),  // up|down|flat
+  label: varchar("label", { length: 4 }).notNull(),                   // TP|FP|FN|TN
+  horizonMinutes: integer("horizon_minutes").notNull(),
+  featuresTMinus30m: jsonb("features_t_minus_30m"),
+  featuresTMinus1h:  jsonb("features_t_minus_1h"),
+  featuresTMinus2h:  jsonb("features_t_minus_2h"),
+  confluenceScoreTMinus1h: doublePrecision("confluence_score_t_minus_1h"),
+  fastBrainPTMinus1h:      doublePrecision("fast_brain_p_t_minus_1h"),
+  conformalLower:          doublePrecision("conformal_lower"),
+  conformalUpper:          doublePrecision("conformal_upper"),
+  decided: boolean("decided").notNull().default(false),
+  decisionSource: varchar("decision_source", { length: 32 }),
+  decisionPath:   varchar("decision_path",   { length: 16 }),
+  realizedPnlPct: doublePrecision("realized_pnl_pct"),
+  attribution:    jsonb("attribution"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
