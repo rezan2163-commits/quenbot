@@ -16,11 +16,11 @@
   },
   {
     "route": "/mission-control",
-    "firstLoadUncompressedJsBytes": 561789,
+    "firstLoadUncompressedJsBytes": 561918,
     "firstLoadChunkPaths": [
       ".next/static/chunks/0bw39c4064cuw.js",
       ".next/static/chunks/0jzkg5~l3f10f.js",
-      ".next/static/chunks/16nujf707onq9.js",
+      ".next/static/chunks/11n8yn3ec9f5j.js",
       ".next/static/chunks/07kw5ods2r-yd.js",
       ".next/static/chunks/13vta.gs5or19.js",
       ".next/static/chunks/04vtj13a0h9.p.js",

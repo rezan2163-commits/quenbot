@@ -290,6 +290,7 @@ _ALL: List[ModuleSpec] = [
         source="event_bus", key="bocpd_detector", period=120,
         events=(EventType.BOCPD_CONSENSUS_CHANGEPOINT.value,),
         deps=("scout_agent",),
+        state="flag_gated", flag_env="QUENBOT_BOCPD_ENABLED",
     ),
     _spec(
         "hawkes_kernel_fitter", "Hawkes Çekirdek Ölçer",
@@ -298,6 +299,7 @@ _ALL: List[ModuleSpec] = [
         source="event_bus", key="hawkes_kernel_fitter", period=120,
         events=(EventType.HAWKES_KERNEL_UPDATE.value,),
         deps=("scout_agent", "microstructure"),
+        state="flag_gated", flag_env="QUENBOT_HAWKES_ENABLED",
     ),
     _spec(
         "lob_thermodynamics", "LOB Termodinamiği",
@@ -306,6 +308,7 @@ _ALL: List[ModuleSpec] = [
         source="event_bus", key="lob_thermodynamics", period=120,
         events=(EventType.LOB_THERMODYNAMIC_STATE.value,),
         deps=("scout_agent",),
+        state="flag_gated", flag_env="QUENBOT_LOB_THERMO_ENABLED",
     ),
     _spec(
         "wasserstein_drift", "Wasserstein Drift",
@@ -314,6 +317,7 @@ _ALL: List[ModuleSpec] = [
         source="event_bus", key="wasserstein_drift", period=180,
         events=(EventType.DISTRIBUTION_SHIFT.value,),
         deps=("scout_agent",),
+        state="flag_gated", flag_env="QUENBOT_WASSERSTEIN_ENABLED",
     ),
     _spec(
         "path_signature_engine", "Path Signature Motoru",
@@ -322,6 +326,7 @@ _ALL: List[ModuleSpec] = [
         source="event_bus", key="path_signature_engine", period=180,
         events=(EventType.PATH_SIGNATURE_MATCH.value,),
         deps=("scout_agent",),
+        state="flag_gated", flag_env="QUENBOT_PATH_SIGNATURE_ENABLED",
     ),
     _spec(
         "mirror_flow_analyzer", "Ayna Akış Analizcisi",
@@ -330,6 +335,7 @@ _ALL: List[ModuleSpec] = [
         source="event_bus", key="mirror_flow_analyzer", period=180,
         events=(EventType.MIRROR_EXECUTION_DETECTED.value,),
         deps=("scout_agent",),
+        state="flag_gated", flag_env="QUENBOT_MIRROR_FLOW_ENABLED",
     ),
     _spec(
         "topological_lob_analyzer", "Topolojik LOB Analizcisi",
@@ -338,6 +344,7 @@ _ALL: List[ModuleSpec] = [
         source="event_bus", key="topological_lob_analyzer", period=180,
         events=(EventType.TOPOLOGICAL_ANOMALY.value,),
         deps=("scout_agent",),
+        state="flag_gated", flag_env="QUENBOT_TDA_ENABLED",
     ),
     _spec(
         "causal_onchain_bridge", "On-Chain Nedensel Köprü",
@@ -367,6 +374,7 @@ _ALL: List[ModuleSpec] = [
         events=(EventType.INVISIBLE_FOOTPRINT_INDEX.value,),
         deps=("hawkes_kernel_fitter", "bocpd_detector", "wasserstein_drift",
               "lob_thermodynamics", "path_signature_engine"),
+        state="flag_gated", flag_env="QUENBOT_FACTOR_GRAPH_ENABLED",
     ),
     _spec(
         "oracle_signal_bus", "Oracle Sinyal Barı",
@@ -452,6 +460,7 @@ _ALL: List[ModuleSpec] = [
         source="event_bus", key="online_learning", period=300,
         events=(EventType.EXPERIENCE_RECORDED.value,),
         deps=("meta_labeler",),
+        state="flag_gated", flag_env="QUENBOT_ONLINE_LEARNING_ENABLED",
     ),
 
     # ─── SAFETY & RUNTIME ──────────────────────────────────────────────────
@@ -462,6 +471,7 @@ _ALL: List[ModuleSpec] = [
         source="event_bus", key="decision_router", period=60,
         events=(EventType.FINAL_DECISION.value,),
         deps=("fast_brain", "confluence_engine"),
+        state="flag_gated", flag_env="QUENBOT_DECISION_ROUTER_ENABLED",
     ),
     _spec(
         "safety_net", "Güvenlik Ağı",
@@ -473,6 +483,7 @@ _ALL: List[ModuleSpec] = [
                 EventType.SAFETY_NET_FS_DEGRADED.value,
                 EventType.SAFETY_NET_DIRECTIVE_REGRESSION.value),
         deps=("decision_router", "directive_impact_tracker"),
+        state="flag_gated", flag_env="QUENBOT_SAFETY_NET_ENABLED",
     ),
     _spec(
         "runtime_supervisor", "Runtime Süpervizör",
@@ -481,6 +492,7 @@ _ALL: List[ModuleSpec] = [
         source="callable", key="runtime_supervisor", period=60,
         events=(),
         deps=(),
+        state="flag_gated", flag_env="QUENBOT_RUNTIME_SUPERVISOR_ENABLED",
     ),
     _spec(
         "risk_manager", "Risk Yöneticisi",
@@ -506,6 +518,7 @@ _ALL: List[ModuleSpec] = [
         source="callable", key="metrics_exporter", period=60,
         events=(),
         deps=(),
+        state="flag_gated", flag_env="QUENBOT_METRICS_ENABLED",
     ),
     _spec(
         "event_bus", "Event Bus",

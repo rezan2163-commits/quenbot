@@ -117,7 +117,7 @@ export function ConstellationCanvas({ modules, edges, qwenPhase, onSelect, selec
               <circle
                 r={baseR}
                 fill={color}
-                fillOpacity={m.status === "disabled" ? 0.15 : 0.9}
+                fillOpacity={m.status === "disabled" ? 0.15 : m.status === "idle" ? 0.45 : 0.9}
                 stroke={selected ? "#fff" : color}
                 strokeWidth={selected ? 2.5 : 1}
               />
@@ -158,6 +158,7 @@ function statusHex(s: string): string {
   if (s === "healthy") return "#10b981";
   if (s === "slow") return "#f59e0b";
   if (s === "unhealthy") return "#ef4444";
+  if (s === "idle") return "#38bdf8";
   if (s === "dormant") return "#64748b";
   if (s === "disabled") return "#475569";
   return "#94a3b8";

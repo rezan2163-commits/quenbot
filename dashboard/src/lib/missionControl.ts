@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 
 export type ModuleOrgan = "agent" | "brain" | "detector" | "fusion" | "learning" | "safety" | "runtime";
-export type ModuleStatusKind = "healthy" | "slow" | "unhealthy" | "dormant" | "disabled" | "unknown";
+export type ModuleStatusKind = "healthy" | "slow" | "unhealthy" | "dormant" | "idle" | "disabled" | "unknown";
 export type EdgeActivityBucket = "hot" | "warm" | "cool" | "silent";
 export type ConnectionState = "live" | "polling" | "offline";
 
@@ -257,6 +257,7 @@ export const STATUS_COLORS: Record<ModuleStatusKind, { fg: string; bg: string; b
   healthy: { fg: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/40", label: "Sağlıklı" },
   slow: { fg: "text-amber-300", bg: "bg-amber-500/10", border: "border-amber-500/40", label: "Yavaş" },
   unhealthy: { fg: "text-red-300", bg: "bg-red-500/10", border: "border-red-500/40", label: "Arızalı" },
+  idle: { fg: "text-sky-300", bg: "bg-sky-500/10", border: "border-sky-500/40", label: "Hazır" },
   dormant: { fg: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/40", label: "Uyku" },
   disabled: { fg: "text-zinc-500", bg: "bg-zinc-500/10", border: "border-zinc-500/40", label: "Kapalı" },
   unknown: { fg: "text-gray-400", bg: "bg-gray-500/10", border: "border-gray-500/40", label: "Bilinmiyor" },

@@ -100,33 +100,26 @@ def _score_module(
     h = 100
 
     if heartbeat_age is None:
-        # agent/brain MUST heartbeat via the DB-backed pulse; missing = broken.
-        # Everything else (detectors / learning / safety / runtime / fusion) is
-        # event-driven and may idle legitimately until triggered — treat as
-        # "armed / idle" with only a minor penalty so the module renders green
-        # instead of red when the system is healthy but the trigger hasn't fired.
+        # Agent/brain MUST heartbeat via the DB-backed pulse; missing = broken.
         if spec.organ in {"agent", "brain"}:
-            h -= 50
-        else:
-            h -= 10
-    else:
-        if heartbeat_age > spec.expected_period_sec * 2:
-            h -= 40
-        if heartbeat_age > spec.expected_period_sec * 5:
-            h -= 30
+            return 40, "unhealthy"
+        # Event-driven modules (detectors/learning/safety/runtime/fusion) that
+        # are enabled but haven't produced their signature event yet render as
+        # "armed / idle" — grey, not red. They will flip to healthy on first
+        # signature event (heartbeat_age becomes defined).
+        return 60, "idle"
+
+    # Have a heartbeat signal — grade it against the declared period.
+    if heartbeat_age > spec.expected_period_sec * 2:
+        h -= 40
+    if heartbeat_age > spec.expected_period_sec * 5:
+        h -= 30
 
     if error_rate > 0.05:
         h -= 20
 
-    if latency_p95 is not None:
-        # Generic threshold: penalise > 500ms at p95 regardless of module.
-        if latency_p95 > 500.0:
-            h -= 15
-
-    # Historical throughput-based penalty removed: heartbeat is the authoritative
-    # liveness signal. An agent that pulses but hasn't emitted a signature event
-    # (e.g. strategist with no SIGNAL_GENERATED in the last minute because the
-    # market is calm) is still healthy.
+    if latency_p95 is not None and latency_p95 > 500.0:
+        h -= 15
 
     h = max(0, min(100, int(h)))
 
