@@ -124,6 +124,21 @@ class EventType(str, Enum):
     SAFETY_NET_DRIFT_ALERT = "intel.safety_net_drift"
     SAFETY_NET_FS_DEGRADED = "intel.safety_net_fs_degraded"
 
+    # ── Phase 6: Oracle Stack — ADDITIVE only, never rename ──────
+    # Detector events (§1–§8 of phase 6 plan)
+    BOCPD_CONSENSUS_CHANGEPOINT = "oracle.bocpd_consensus"
+    HAWKES_KERNEL_UPDATE = "oracle.hawkes_kernel"
+    LOB_THERMODYNAMIC_STATE = "oracle.lob_thermodynamics"
+    DISTRIBUTION_SHIFT = "oracle.wasserstein_drift"
+    PATH_SIGNATURE_MATCH = "oracle.path_signature"
+    MIRROR_EXECUTION_DETECTED = "oracle.mirror_flow"
+    TOPOLOGICAL_ANOMALY = "oracle.topology"
+    ONCHAIN_CAUSAL_SIGNAL = "oracle.onchain_causal"
+    # Fusion + brain (§10–§11)
+    INVISIBLE_FOOTPRINT_INDEX = "oracle.ifi"
+    ORACLE_DIRECTIVE_ISSUED = "oracle.directive"
+    ORACLE_REASONING_TRACE = "oracle.reasoning_trace"
+
 
 @dataclass
 class Event:

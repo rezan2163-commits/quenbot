@@ -12,6 +12,7 @@ import {
 import {
   useIntelSummary, useFastBrain, useDecisionRouter, useCrossAssetGraph,
   useCrossAssetNeighbors, useConfluence, useOnlineLearning,
+  useOracleSummary, useOracleChannels,
 } from "@/lib/intel";
 import { useWatchlist } from "@/lib/api";
 import {
@@ -20,17 +21,18 @@ import {
 } from "./ui/primitives";
 import { Sparkline, HBar, CalibrationChart, Donut } from "./ui/charts";
 
-type PhaseKey = "overview" | "fast_brain" | "decision_router" | "cross_asset" | "confluence" | "online_learning";
+type PhaseKey = "overview" | "fast_brain" | "decision_router" | "cross_asset" | "confluence" | "online_learning" | "oracle";
 
 const PHASES: Array<{
   key: PhaseKey; label: string; phase: string; icon: any; desc: string;
 }> = [
-  { key: "overview",        label: "Genel Bakış",     phase: "Phase 1-5", icon: Activity,  desc: "Tüm modüllerin sağlık özeti" },
+  { key: "overview",        label: "Genel Bakış",     phase: "Phase 1-6", icon: Activity,  desc: "Tüm modüllerin sağlık özeti" },
   { key: "fast_brain",      label: "Fast Brain",      phase: "Phase 3",   icon: Zap,       desc: "LightGBM hızlı tahmin" },
   { key: "decision_router", label: "Decision Router", phase: "Phase 3",   icon: GitBranch, desc: "Gemma vs FastBrain yönlendirme" },
   { key: "cross_asset",     label: "Cross-Asset Graph", phase: "Phase 2", icon: Network,   desc: "Lead/lag bağımlılık grafiği" },
   { key: "confluence",      label: "Confluence",      phase: "Phase 1",   icon: Sparkles,  desc: "Çok sinyalli Bayesian skor" },
   { key: "online_learning", label: "Online Learning", phase: "Phase 4",   icon: Gauge,     desc: "Rolling kalibrasyon + hit rate" },
+  { key: "oracle",          label: "Oracle Stack",    phase: "Phase 6",   icon: Flame,     desc: "8 dedektör + sinyal veriyolu" },
 ];
 
 function StatusPill({ enabled, healthy }: { enabled: boolean; healthy?: boolean }) {
@@ -103,6 +105,7 @@ export default function IntelPanel() {
           {active === "cross_asset" && <CrossAssetView symbol={symbol} />}
           {active === "confluence" && <ConfluenceView symbol={symbol} />}
           {active === "online_learning" && <OnlineLearningView symbol={symbol} />}
+          {active === "oracle" && <OracleView symbol={symbol} />}
         </div>
       </main>
     </div>
@@ -130,6 +133,7 @@ function OverviewView({ onNavigate }: { onNavigate: (k: PhaseKey) => void }) {
     { key: "fast_brain",       name: "Fast Brain",     data: data.fast_brain,     icon: Zap,        phase: "3" },
     { key: "decision_router",  name: "Decision Router", data: data.decision_router, icon: GitBranch, phase: "3" },
     { key: "online_learning",  name: "Online Learning", data: data.online_learning, icon: Gauge,    phase: "4" },
+    { key: "oracle",           name: "Oracle Stack",    data: data.oracle,         icon: Flame,    phase: "6" },
   ];
 
   const enabled = modules.filter(m => m.data?.enabled).length;
@@ -639,6 +643,129 @@ function OnlineLearningView({ symbol }: { symbol: string }) {
           </CardContent>
         </Card>
       </div>
+    </div>
+  );
+}
+
+/* ───────── Phase 6: Oracle Stack ───────── */
+function OracleView({ symbol }: { symbol: string }) {
+  const { data: summary, error: sumErr } = useOracleSummary();
+  const { data: channels, error: chErr } = useOracleChannels(symbol);
+
+  if (sumErr) return <EmptyState title="Oracle API erişilemiyor" description={String(sumErr)} icon={<AlertCircle />} />;
+  if (!summary) return <EmptyState title="Yükleniyor..." icon={<Cpu className="animate-pulse" />} />;
+
+  if (!summary.enabled) {
+    return (
+      <div className="flex flex-col gap-3">
+        <Card className="p-4">
+          <div className="flex items-start gap-3">
+            <div className="rounded-md bg-warn/15 p-2 text-warn"><Flame size={16} /></div>
+            <div>
+              <div className="text-sm font-semibold">Oracle Stack Dormant</div>
+              <div className="mt-1 text-[11px] text-gray-500">
+                Signal bus başlatılmadı veya tüm dedektörler OFF.
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1">
+                <Badge variant="warn">QUENBOT_ORACLE_BUS_ENABLED=1</Badge>
+                <Badge variant="outline">QUENBOT_BOCPD_ENABLED=1</Badge>
+                <Badge variant="outline">QUENBOT_HAWKES_ENABLED=1</Badge>
+                <Badge variant="outline">QUENBOT_LOB_THERMO_ENABLED=1</Badge>
+                <Badge variant="outline">QUENBOT_WASSERSTEIN_ENABLED=1</Badge>
+                <Badge variant="outline">QUENBOT_PATH_SIGNATURE_ENABLED=1</Badge>
+                <Badge variant="outline">QUENBOT_MIRROR_FLOW_ENABLED=1</Badge>
+                <Badge variant="outline">QUENBOT_TDA_ENABLED=1</Badge>
+                <Badge variant="outline">QUENBOT_ONCHAIN_ENABLED=1</Badge>
+              </div>
+            </div>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  const channelMap = (channels?.channels ?? {}) as Record<string, any>;
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* KPIs */}
+      <div className="grid grid-cols-3 gap-2">
+        <Stat label="Dedektör" value={summary.detectors.length} icon={<Flame size={14} />} tone="bull" />
+        <Stat label="Kanal" value={summary.channels.length} icon={<Network size={14} />} />
+        <Stat label="Aktif" value={symbol} hint="okunan sembol" icon={<Target size={14} />} />
+      </div>
+
+      {/* Channels for current symbol */}
+      <Card className="p-3">
+        <CardTitle className="mb-2 flex items-center gap-2 text-[12px]">
+          <Sparkles size={12} /> Oracle Kanalları — {symbol}
+        </CardTitle>
+        {chErr && <div className="text-[10px] text-bear">{String(chErr)}</div>}
+        {!chErr && summary.channels.length === 0 && (
+          <div className="text-[10px] text-gray-500">Henüz kanal kaydedilmedi.</div>
+        )}
+        <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
+          {summary.channels.map((ch) => {
+            const entry = channelMap[ch];
+            const val = typeof entry === "number" ? entry : (entry?.value ?? null);
+            const hasVal = typeof val === "number" && Number.isFinite(val);
+            const width = hasVal ? Math.min(100, Math.abs(val) * 100) : 0;
+            const tone = !hasVal ? "bg-gray-700/40" : val >= 0 ? "bg-accent/60" : "bg-bear/60";
+            return (
+              <div key={ch} className="rounded-md border border-surface-border bg-surface-card/40 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <code className="truncate text-[10px] text-gray-300">{ch}</code>
+                  <span className="shrink-0 font-mono text-[11px] text-gray-200">
+                    {hasVal ? (val as number).toFixed(3) : "—"}
+                  </span>
+                </div>
+                <div className="mt-1 h-1 overflow-hidden rounded bg-surface-border/40">
+                  <div className={cn("h-full transition-all", tone)} style={{ width: `${width}%` }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* Detectors list */}
+      <Card className="p-3">
+        <CardTitle className="mb-2 flex items-center gap-2 text-[12px]">
+          <Cpu size={12} /> Dedektörler
+        </CardTitle>
+        <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+          {summary.detectors.map((d) => {
+            const healthy = d.health?.healthy !== false && !d.error;
+            return (
+              <div key={d.name} className="rounded-md border border-surface-border bg-surface-card/40 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-[11px] font-semibold capitalize">{d.name.replace(/_/g, " ")}</div>
+                    {d.channel && (
+                      <code className="truncate text-[9px] text-gray-500">{d.channel}</code>
+                    )}
+                  </div>
+                  <StatusPill enabled={true} healthy={healthy} />
+                </div>
+                {d.health && (
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {Object.entries(d.health)
+                      .filter(([k, v]) => typeof v === "number" && !k.endsWith("_ts"))
+                      .slice(0, 4)
+                      .map(([k, v]) => (
+                        <Badge key={k} variant="outline">
+                          <span className="text-gray-500">{k}:</span>
+                          <span className="font-mono text-gray-200">{fmtNum(v as number)}</span>
+                        </Badge>
+                      ))}
+                  </div>
+                )}
+                {d.error && <div className="mt-1 break-words text-[10px] text-bear">{d.error}</div>}
+              </div>
+            );
+          })}
+        </div>
+      </Card>
     </div>
   );
 }

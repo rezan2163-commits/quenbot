@@ -993,6 +993,175 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.warning("MetricsExporter bootstrap başarısız: %s", e)
 
+        # ── Phase 6: Oracle Stack ─────────────────────────────────
+        # Hepsi DEFAULT-OFF (ORACLE_BUS_ENABLED hariç; o read-only registry).
+        # Flag açılmadan singleton hiç oluşturulmaz; davranışsal hiçbir yol
+        # değişmez. PR1 bu turda §9 (bus) + §1 (BOCPD); §2-§8 sonraki turda.
+        self.oracle_signal_bus = None
+        self._oracle_detectors: list = []
+        try:
+            if getattr(Config, "ORACLE_BUS_ENABLED", True):
+                from oracle_signal_bus import get_oracle_signal_bus
+                self.oracle_signal_bus = get_oracle_signal_bus(event_bus=self.event_bus)
+                logger.info(
+                    "🔮 OracleSignalBus ready (channels=%d)",
+                    len(self.oracle_signal_bus.registered_channels()),
+                )
+        except Exception as e:
+            logger.warning("OracleSignalBus bootstrap başarısız: %s", e)
+
+        # §1 BOCPD — Bayesian Online Changepoint Detection (default OFF)
+        if getattr(Config, "BOCPD_ENABLED", False):
+            try:
+                from bocpd_detector import get_bocpd_detector
+                bocpd = get_bocpd_detector(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    hazard_lambda_sec=Config.BOCPD_HAZARD_LAMBDA_SEC,
+                    min_streams=Config.BOCPD_MIN_STREAMS,
+                    consensus_window_sec=Config.BOCPD_CONSENSUS_WINDOW_SEC,
+                    cp_threshold=Config.BOCPD_CP_THRESHOLD,
+                    run_length_truncation=Config.BOCPD_RUN_LENGTH_TRUNCATION,
+                    publish_hz=Config.BOCPD_PUBLISH_HZ,
+                )
+                await bocpd.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(
+                        bocpd.ORACLE_CHANNEL_NAME, "bocpd_detector",
+                    )
+                self._oracle_detectors.append(("bocpd", bocpd))
+                logger.info("🧭 BOCPD detector online (λ=%.0fs)", Config.BOCPD_HAZARD_LAMBDA_SEC)
+            except Exception as e:
+                logger.warning("BOCPDDetector bootstrap başarısız: %s", e)
+
+        # §2 Hawkes Kernel Fitter (default OFF)
+        if getattr(Config, "HAWKES_ENABLED", False):
+            try:
+                from hawkes_kernel_fitter import get_hawkes_fitter
+                det = get_hawkes_fitter(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    publish_hz=Config.HAWKES_PUBLISH_HZ,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "hawkes_kernel_fitter")
+                self._oracle_detectors.append(("hawkes", det))
+                logger.info("🧭 Hawkes detector online")
+            except Exception as e:
+                logger.warning("HawkesKernelFitter bootstrap başarısız: %s", e)
+
+        # §3 LOB Thermodynamics (default OFF)
+        if getattr(Config, "LOB_THERMO_ENABLED", False):
+            try:
+                from lob_thermodynamics import get_lob_thermodynamics
+                det = get_lob_thermodynamics(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    publish_hz=Config.LOB_THERMO_PUBLISH_HZ,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "lob_thermodynamics")
+                self._oracle_detectors.append(("lob_thermo", det))
+                logger.info("🧭 LOB Thermodynamics detector online")
+            except Exception as e:
+                logger.warning("LOBThermodynamics bootstrap başarısız: %s", e)
+
+        # §4 Wasserstein Drift (default OFF)
+        if getattr(Config, "WASSERSTEIN_ENABLED", False):
+            try:
+                from wasserstein_drift import get_wasserstein_drift
+                det = get_wasserstein_drift(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    publish_hz=Config.WASSERSTEIN_PUBLISH_HZ,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "wasserstein_drift")
+                self._oracle_detectors.append(("wasserstein", det))
+                logger.info("🧭 Wasserstein detector online")
+            except Exception as e:
+                logger.warning("WassersteinDrift bootstrap başarısız: %s", e)
+
+        # §5 Path Signature Engine (default OFF)
+        if getattr(Config, "PATH_SIGNATURE_ENABLED", False):
+            try:
+                from path_signature_engine import get_path_signature
+                det = get_path_signature(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    publish_hz=Config.PATH_SIG_PUBLISH_HZ,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "path_signature_engine")
+                self._oracle_detectors.append(("path_signature", det))
+                logger.info("🧭 Path Signature detector online")
+            except Exception as e:
+                logger.warning("PathSignatureEngine bootstrap başarısız: %s", e)
+
+        # §6 Mirror Flow Analyzer (default OFF)
+        if getattr(Config, "MIRROR_FLOW_ENABLED", False):
+            try:
+                from mirror_flow_analyzer import get_mirror_flow
+                det = get_mirror_flow(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "mirror_flow_analyzer")
+                self._oracle_detectors.append(("mirror_flow", det))
+                logger.info("🧭 Mirror Flow detector online")
+            except Exception as e:
+                logger.warning("MirrorFlowAnalyzer bootstrap başarısız: %s", e)
+
+        # §7 Topological LOB (default OFF)
+        if getattr(Config, "TDA_ENABLED", False):
+            try:
+                from topological_lob_analyzer import get_topology
+                det = get_topology(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "topological_lob_analyzer")
+                self._oracle_detectors.append(("topology", det))
+                logger.info("🧭 Topological LOB detector online")
+            except Exception as e:
+                logger.warning("TopologicalLOBAnalyzer bootstrap başarısız: %s", e)
+
+        # §8 Causal On-Chain Bridge (default OFF)
+        if getattr(Config, "ONCHAIN_ENABLED", False):
+            try:
+                from onchain_client import get_onchain_client
+                from causal_onchain_bridge import get_causal_onchain
+                oc = get_onchain_client()
+                await oc.start()
+                det = get_causal_onchain(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    onchain_client=oc,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "causal_onchain_bridge")
+                self._oracle_detectors.append(("ccm", det))
+                logger.info("🧭 Causal On-Chain detector online")
+            except Exception as e:
+                logger.warning("CausalOnChainBridge bootstrap başarısız: %s", e)
+
     async def _confluence_publisher_loop(self) -> None:
         """Aktif watchlist için periyodik confluence score publish."""
         if not self.confluence_engine:
@@ -3320,10 +3489,112 @@ class AgentOrchestrator:
                     out[name] = {"enabled": True, "health": h, "metrics": m}
                 except Exception as e:
                     out[name] = {"enabled": True, "error": str(e)}
+            # ─── Phase 6: Oracle Stack (additive) ─────────────────
+            try:
+                bus = getattr(self, "oracle_signal_bus", None)
+                detectors = list(getattr(self, "_oracle_detectors", []) or [])
+                oracle_block: Dict[str, Any] = {
+                    "enabled": bus is not None,
+                    "detectors_active": len(detectors),
+                    "channels_registered": (
+                        len(bus.registered_channels()) if bus is not None and hasattr(bus, "registered_channels") else 0
+                    ),
+                    "modules": {},
+                }
+                for name, det in detectors:
+                    try:
+                        h = await det.health_check() if hasattr(det, "health_check") else {}
+                        m = det.metrics() if hasattr(det, "metrics") else {}
+                        oracle_block["modules"][name] = {
+                            "enabled": True,
+                            "channel": getattr(det, "ORACLE_CHANNEL_NAME", None),
+                            "health": h,
+                            "metrics": m,
+                        }
+                    except Exception as e:
+                        oracle_block["modules"][name] = {"enabled": True, "error": str(e)}
+                out["oracle"] = oracle_block
+            except Exception as e:
+                out["oracle"] = {"enabled": False, "error": str(e)}
             return web.json_response(out)
+
+        # ─── Phase 6: Oracle Stack endpoints ───
+        async def get_oracle_summary(request):
+            """Oracle dedektör + signal bus özeti."""
+            bus = getattr(self, "oracle_signal_bus", None)
+            detectors = list(getattr(self, "_oracle_detectors", []) or [])
+            payload: Dict[str, Any] = {
+                "enabled": bus is not None,
+                "detectors": [],
+                "channels": [],
+            }
+            if bus is not None and hasattr(bus, "registered_channels"):
+                try:
+                    payload["channels"] = list(bus.registered_channels())
+                except Exception as e:
+                    payload["channels_error"] = str(e)
+            for name, det in detectors:
+                try:
+                    h = await det.health_check() if hasattr(det, "health_check") else {}
+                    m = det.metrics() if hasattr(det, "metrics") else {}
+                    payload["detectors"].append({
+                        "name": name,
+                        "channel": getattr(det, "ORACLE_CHANNEL_NAME", None),
+                        "health": h,
+                        "metrics": m,
+                    })
+                except Exception as e:
+                    payload["detectors"].append({"name": name, "error": str(e)})
+            return web.json_response(payload)
+
+        async def get_oracle_channels_symbol(request):
+            """Bir sembol için tüm oracle kanal değerleri."""
+            symbol = (request.match_info.get("symbol") or "").upper()
+            if not symbol:
+                return web.json_response({"error": "symbol required"}, status=400)
+            bus = getattr(self, "oracle_signal_bus", None)
+            detectors = list(getattr(self, "_oracle_detectors", []) or [])
+            channels: Dict[str, Any] = {}
+            if bus is not None and hasattr(bus, "all_snapshots"):
+                try:
+                    snap = bus.all_snapshots()
+                    if isinstance(snap, dict):
+                        sym_block = snap.get(symbol) or {}
+                        if isinstance(sym_block, dict):
+                            channels.update(sym_block)
+                except Exception as e:
+                    channels["__bus_error__"] = str(e)
+            # Fallback: query detectors directly for their channel value
+            for name, det in detectors:
+                ch = getattr(det, "ORACLE_CHANNEL_NAME", None)
+                if ch and ch not in channels:
+                    try:
+                        v = det.oracle_channel_value(symbol) if hasattr(det, "oracle_channel_value") else None
+                        if v is not None:
+                            channels[ch] = {"value": v, "source": name}
+                    except Exception:
+                        pass
+            return web.json_response({"symbol": symbol, "channels": channels})
+
+        async def get_oracle_detector_snapshot(request):
+            """Bir dedektörün tüm sembol snapshot'ları."""
+            dname = (request.match_info.get("name") or "").lower()
+            if not dname:
+                return web.json_response({"error": "name required"}, status=400)
+            for name, det in list(getattr(self, "_oracle_detectors", []) or []):
+                if name == dname:
+                    try:
+                        snaps = det.all_snapshots() if hasattr(det, "all_snapshots") else {}
+                        return web.json_response({"name": name, "snapshots": snaps})
+                    except Exception as e:
+                        return web.json_response({"name": name, "error": str(e)}, status=500)
+            return web.json_response({"error": f"detector '{dname}' not found"}, status=404)
 
         app.router.add_get("/api/confluence/{symbol}", get_confluence_symbol)
         app.router.add_get("/api/intel/summary", get_intel_summary)
+        app.router.add_get("/api/oracle/summary", get_oracle_summary)
+        app.router.add_get("/api/oracle/channels/{symbol}", get_oracle_channels_symbol)
+        app.router.add_get("/api/oracle/detector/{name}", get_oracle_detector_snapshot)
 
         # ─── Intel Upgrade (Phase 2) endpoints ───
         async def get_cross_asset_graph(request):
