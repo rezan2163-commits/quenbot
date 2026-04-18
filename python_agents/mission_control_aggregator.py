@@ -100,8 +100,15 @@ def _score_module(
     h = 100
 
     if heartbeat_age is None:
-        # Active module that should emit but hasn't → treat as very stale.
-        h -= 50
+        # agent/brain MUST heartbeat via the DB-backed pulse; missing = broken.
+        # Everything else (detectors / learning / safety / runtime / fusion) is
+        # event-driven and may idle legitimately until triggered — treat as
+        # "armed / idle" with only a minor penalty so the module renders green
+        # instead of red when the system is healthy but the trigger hasn't fired.
+        if spec.organ in {"agent", "brain"}:
+            h -= 50
+        else:
+            h -= 10
     else:
         if heartbeat_age > spec.expected_period_sec * 2:
             h -= 40
@@ -116,7 +123,13 @@ def _score_module(
         if latency_p95 > 500.0:
             h -= 15
 
-    if throughput_pm <= 0.0 and spec.organ in {"agent", "brain"}:
+    # Only penalise zero throughput for agents/brains that have heartbeats but
+    # haven't produced any signature events — indicates a stuck loop.
+    if (
+        throughput_pm <= 0.0
+        and spec.organ in {"agent", "brain"}
+        and heartbeat_age is not None
+    ):
         h -= 25
 
     h = max(0, min(100, int(h)))
