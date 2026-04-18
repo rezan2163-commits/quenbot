@@ -123,14 +123,10 @@ def _score_module(
         if latency_p95 > 500.0:
             h -= 15
 
-    # Only penalise zero throughput for agents/brains that have heartbeats but
-    # haven't produced any signature events — indicates a stuck loop.
-    if (
-        throughput_pm <= 0.0
-        and spec.organ in {"agent", "brain"}
-        and heartbeat_age is not None
-    ):
-        h -= 25
+    # Historical throughput-based penalty removed: heartbeat is the authoritative
+    # liveness signal. An agent that pulses but hasn't emitted a signature event
+    # (e.g. strategist with no SIGNAL_GENERATED in the last minute because the
+    # market is calm) is still healthy.
 
     h = max(0, min(100, int(h)))
 
