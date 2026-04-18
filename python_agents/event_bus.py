@@ -139,6 +139,12 @@ class EventType(str, Enum):
     ORACLE_DIRECTIVE_ISSUED = "oracle.directive"
     ORACLE_REASONING_TRACE = "oracle.reasoning_trace"
 
+    # ── Aşama 1 — Gatekeeper + Auto-Rollback + Warmup ──
+    DIRECTIVE_REJECTED = "directive.rejected"
+    DIRECTIVE_ACCEPTED = "directive.accepted"
+    ORACLE_AUTO_ROLLBACK = "oracle.auto_rollback"
+    WARMUP_COMPLETED = "oracle.warmup_completed"
+
 
 @dataclass
 class Event:
