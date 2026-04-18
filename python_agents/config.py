@@ -326,23 +326,32 @@ class Config:
     # Hepsi additive; disabled state byte-identical to pre-Aşama-1.
     # ─────────────────────────────────────────────────────────────
     DIRECTIVE_GATEKEEPER_ENABLED = os.getenv("QUENBOT_DIRECTIVE_GATEKEEPER_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
-    ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN = float(os.getenv("QUENBOT_ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN", "0.80"))
-    ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR = int(os.getenv("QUENBOT_ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR", "3"))
+    # Aşama 2 default: 0.65 (was 0.80 in Aşama 1). Operator can flip back via env.
+    ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN = float(os.getenv("QUENBOT_ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN", "0.65"))
+    # Aşama 2 default: 10 (was 3).
+    ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR = int(os.getenv("QUENBOT_ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR", "10"))
     ORACLE_BRAIN_DIRECTIVE_ALLOWLIST = [
         s.strip() for s in os.getenv(
             "QUENBOT_ORACLE_BRAIN_DIRECTIVE_ALLOWLIST",
-            "ADJUST_CONFIDENCE_THRESHOLD,ADJUST_POSITION_SIZE_MULT,PAUSE_SYMBOL",
+            # Aşama 2 default: expanded from 3 to 6 types.
+            "ADJUST_CONFIDENCE_THRESHOLD,ADJUST_POSITION_SIZE_MULT,PAUSE_SYMBOL,"
+            "RESUME_SYMBOL,CHANGE_STRATEGY_WEIGHT,ADJUST_TP_SL_RATIO",
         ).split(",") if s.strip()
     ]
     # Permanently blocked regardless of allowlist — cannot be overridden.
-    ORACLE_BRAIN_DIRECTIVE_BLOCKLIST_HARD = ["CHANGE_STRATEGY", "OVERRIDE_VETO", "FORCE_TRADE"]
+    # Aşama 2 also permanently blocks DISABLE_SAFETY_NET.
+    ORACLE_BRAIN_DIRECTIVE_BLOCKLIST_HARD = [
+        "CHANGE_STRATEGY", "OVERRIDE_VETO", "FORCE_TRADE", "DISABLE_SAFETY_NET",
+    ]
     DIRECTIVE_REJECTED_LOG_PATH = os.getenv("QUENBOT_DIRECTIVE_REJECTED_LOG", "python_agents/.directive_rejected.jsonl")
 
     AUTO_ROLLBACK_ENABLED = os.getenv("QUENBOT_AUTO_ROLLBACK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
-    AUTO_ROLLBACK_REJECTION_RATE_THRESHOLD = float(os.getenv("QUENBOT_AUTO_ROLLBACK_REJECTION_RATE", "0.60"))
+    # Aşama 2 tightens: 0.50 (was 0.60).
+    AUTO_ROLLBACK_REJECTION_RATE_THRESHOLD = float(os.getenv("QUENBOT_AUTO_ROLLBACK_REJECTION_RATE", "0.50"))
     AUTO_ROLLBACK_REJECTION_WINDOW_MIN = int(os.getenv("QUENBOT_AUTO_ROLLBACK_REJECTION_WINDOW_MIN", "30"))
-    AUTO_ROLLBACK_ACCURACY_THRESHOLD = float(os.getenv("QUENBOT_AUTO_ROLLBACK_ACCURACY_MIN", "0.45"))
-    AUTO_ROLLBACK_ACCURACY_WINDOW = int(os.getenv("QUENBOT_AUTO_ROLLBACK_ACCURACY_WINDOW", "50"))
+    # Aşama 2 tightens: 0.50 (was 0.45), window 100 (was 50).
+    AUTO_ROLLBACK_ACCURACY_THRESHOLD = float(os.getenv("QUENBOT_AUTO_ROLLBACK_ACCURACY_MIN", "0.50"))
+    AUTO_ROLLBACK_ACCURACY_WINDOW = int(os.getenv("QUENBOT_AUTO_ROLLBACK_ACCURACY_WINDOW", "100"))
     AUTO_ROLLBACK_META_CONF_MIN = float(os.getenv("QUENBOT_AUTO_ROLLBACK_META_CONF_MIN", "0.40"))
     AUTO_ROLLBACK_META_CONF_STREAK = int(os.getenv("QUENBOT_AUTO_ROLLBACK_META_CONF_STREAK", "10"))
     AUTO_ROLLBACK_UNHEALTHY_GRACE_SEC = int(os.getenv("QUENBOT_AUTO_ROLLBACK_UNHEALTHY_GRACE_SEC", "300"))
@@ -351,8 +360,35 @@ class Config:
     AUTO_ROLLBACK_FORENSIC_DIR = os.getenv("QUENBOT_AUTO_ROLLBACK_FORENSIC_DIR", "python_agents/.auto_rollback")
     AUTO_ROLLBACK_CHECK_INTERVAL_SEC = int(os.getenv("QUENBOT_AUTO_ROLLBACK_CHECK_INTERVAL_SEC", "15"))
 
+    # Aşama 2 — Cascade detector: Qwen-dominant decisions > N% in 1h → rollback.
+    AUTO_ROLLBACK_CASCADE_DETECTION = os.getenv("QUENBOT_AUTO_ROLLBACK_CASCADE_DETECTION", "1").lower() in {"1", "true", "yes", "on"}
+    AUTO_ROLLBACK_MAX_AGENT_OVERRIDE_PCT = float(os.getenv("QUENBOT_AUTO_ROLLBACK_MAX_AGENT_OVERRIDE_PCT", "0.30"))
+    # Aşama 2 — Impact regression detector: avg impact <threshold for window → rollback.
+    AUTO_ROLLBACK_IMPACT_MEAN_MIN = float(os.getenv("QUENBOT_AUTO_ROLLBACK_IMPACT_MEAN_MIN", "-0.15"))
+    AUTO_ROLLBACK_IMPACT_WINDOW_H = int(os.getenv("QUENBOT_AUTO_ROLLBACK_IMPACT_WINDOW_H", "24"))
+
     # Historical warmup
     WARMUP_TRUST_SCORES_PATH = os.getenv("QUENBOT_WARMUP_TRUST_PATH", "python_agents/.channel_trust_scores.json")
     WARMUP_RAG_SOURCE_TAG = "historical_warmup"
     WARMUP_CHECKPOINT_PATH = os.getenv("QUENBOT_WARMUP_CHECKPOINT_PATH", "python_agents/.warmup_checkpoint.json")
     WARMUP_REPORT_DIR = os.getenv("QUENBOT_WARMUP_REPORT_DIR", "python_agents/.warmup_reports")
+
+    # ─────────────────────────────────────────────────────────────
+    # Aşama 2 — Directive Impact Feedback Loop
+    # ─────────────────────────────────────────────────────────────
+    DIRECTIVE_IMPACT_TRACKER_ENABLED = os.getenv("QUENBOT_DIRECTIVE_IMPACT_TRACKER_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    DIRECTIVE_IMPACT_BASELINE_WINDOW_SEC = int(os.getenv("QUENBOT_DIRECTIVE_IMPACT_BASELINE_WINDOW_SEC", "3600"))  # 1h before
+    DIRECTIVE_IMPACT_MEASURE_WINDOW_SEC = int(os.getenv("QUENBOT_DIRECTIVE_IMPACT_MEASURE_WINDOW_SEC", "14400"))  # 4h after
+    DIRECTIVE_IMPACT_CHECK_INTERVAL_SEC = int(os.getenv("QUENBOT_DIRECTIVE_IMPACT_CHECK_INTERVAL_SEC", "60"))
+    DIRECTIVE_IMPACT_CACHE_PATH = os.getenv("QUENBOT_DIRECTIVE_IMPACT_CACHE_PATH", "python_agents/.directive_impact_cache.json")
+    DIRECTIVE_IMPACT_BACKFILL_SOURCE_TAG = "aşama2_backfill"
+
+    # Aşama 2 — Qwen prompt extension
+    ORACLE_PROMPT_IMPACT_LIVE_N = int(os.getenv("QUENBOT_ORACLE_PROMPT_IMPACT_LIVE_N", "20"))
+    ORACLE_PROMPT_IMPACT_SYNTHETIC_N = int(os.getenv("QUENBOT_ORACLE_PROMPT_IMPACT_SYNTHETIC_N", "20"))
+
+    # Aşama 2 — Safety net impact regression guard
+    SAFETY_NET_IMPACT_REGRESSION_ENABLED = os.getenv("QUENBOT_SAFETY_NET_IMPACT_REGRESSION_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    SAFETY_NET_IMPACT_REGRESSION_SIGMA = float(os.getenv("QUENBOT_SAFETY_NET_IMPACT_REGRESSION_SIGMA", "2.0"))
+    SAFETY_NET_IMPACT_REGRESSION_DURATION_SEC = int(os.getenv("QUENBOT_SAFETY_NET_IMPACT_REGRESSION_DURATION_SEC", "10800"))  # 3h
+    SAFETY_NET_IMPACT_BASELINE_PATH = os.getenv("QUENBOT_SAFETY_NET_IMPACT_BASELINE_PATH", "python_agents/.impact_baseline.json")

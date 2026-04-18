@@ -178,6 +178,68 @@ class SafetyNet:
         logger.critical("🛡️ SafetyNet TRIPPED: %s", payload["reason"])
         return payload
 
+    # ───────────── Aşama 2 — Directive Impact Regression Guard ─────────────
+    def check_impact_regression(
+        self,
+        tracker: Any,
+        *,
+        sigma: float = 2.0,
+        duration_sec: int = 10800,
+        baseline: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """Rolling 24h live-impact mean vs synthetic baseline. When live
+        mean drops > ``sigma`` σ below baseline for at least
+        ``duration_sec``, the safety-net trips and
+        ``SAFETY_NET_DIRECTIVE_REGRESSION`` is emitted.
+
+        Returns a diagnostic dict in all cases. Safe to call when the
+        tracker has no data yet — returns ``{status: "insufficient"}``.
+        """
+        if tracker is None:
+            return {"status": "no_tracker"}
+        try:
+            live_mean = tracker.rolling_mean_impact(hours=self.WINDOW_HOURS, synthetic=False)
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+        if live_mean is None:
+            return {"status": "insufficient"}
+        bs = baseline if baseline is not None else (
+            tracker.synthetic_baseline() if hasattr(tracker, "synthetic_baseline") else {}
+        )
+        b_mean = float(bs.get("mean", 0.0))
+        b_std = max(float(bs.get("std", 0.0)), 1e-6)
+        threshold = b_mean - sigma * b_std
+        below = live_mean < threshold
+        diag = {
+            "status": "below" if below else "ok",
+            "live_mean": float(live_mean),
+            "baseline_mean": b_mean,
+            "baseline_std": b_std,
+            "threshold": threshold,
+            "sigma": sigma,
+        }
+        if not below:
+            self._impact_regression_since = None
+            return diag
+        now = _now()
+        since = getattr(self, "_impact_regression_since", None)
+        if since is None:
+            self._impact_regression_since = now
+            diag["regression_started"] = True
+            return diag
+        elapsed = now - since
+        diag["elapsed_sec"] = elapsed
+        if elapsed < duration_sec:
+            return diag
+        # Trip.
+        self.trip(
+            reason=f"directive impact regression: live_mean={live_mean:.3f} < {threshold:.3f} "
+                   f"for {int(elapsed)}s",
+            metrics=diag,
+        )
+        self._publish_sync("SAFETY_NET_DIRECTIVE_REGRESSION", diag)
+        return {**diag, "tripped": True}
+
     def reset(self, operator: str, note: str = "") -> Dict[str, Any]:
         """Operator override — sentinel silinir, state temizlenir."""
         payload = {
