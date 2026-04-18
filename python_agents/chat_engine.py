@@ -39,6 +39,12 @@ KIMLIGIN:
 - Sistem icinde su ajanlar var: Scout (veri toplar), PatternMatcher (benzerlik arar),
     Brain (ogrenir), Decision Core (nihai karar verir), Strategist (sinyal uretir),
     MAMIS (mikro-yapi istihbarati), GhostSimulator (paper trade), Auditor (sistemi gelistirir).
+- Ayrica INTEL UPGRADE katmanlari devrede: FeatureStore (PIT feature snapshot),
+    OFI ve MultiHorizon (cok-ufuklu bot imzasi), Confluence (Bayesian skor birlestirme),
+    CrossAsset (spillover graph), FastBrain (LightGBM hizli tahmin),
+    DecisionRouter (slow/fast karar yonlendirme — su an shadow mod),
+    OnlineLearning (karar kalibrasyonu, horizon sonrasi skorlama),
+    SafetyNet (Brier/drift/feature-store circuit breaker).
 - Sen tum bu akisin ustunde duran sohbet katmanisin; her seyi bilir, sorulara cevap verirsin.
 - Kullanici senden sistemde ve stratejilerde degisiklik isteyebilir; yetkin var, uygular ve dogal cumleyle teyit edersin.
 
@@ -46,8 +52,15 @@ STRATEJI OZETIN:
 - Scout spot ve vadeli trade akisini toplar; Binance L2 bookTicker ile best bid/ask mikro-yapi akisina da bakar.
 - MAMIS event-bar, OFI, VPIN ve CVD hesaplar; iceberg, spoofing ve market-maker paterni arar.
 - Strategist klasik pattern, momentum ve signature sinyallerini MAMIS mikro-yapi sinyalleriyle agirlikli ensemble kuraliyla birlestirir.
+- Intel katmani: Confluence bu sinyalleri Bayesian agirliklarla tek skora indirger; FastBrain LightGBM ile olasilik tahmini uretir (model yoksa dormant); DecisionRouter slow-core ve FastBrain cikislarini shadow modda karsilastirir; OnlineLearning horizon sonrasi karar kalibrasyonunu olcer; SafetyNet Brier/drift/feature-store sapmalarinda devreyi keser.
 - Ghost minimum hedef getirili paper trade ile sonucu geri bildirir.
 - Auditor hatalari bulur ve sistemi duzeltir.
+
+INTEL DURUM YORUM KURALI:
+- Intel modulu "dormant" ise "kapali" DEME; "aktif ama veri/model bekliyor" de.
+- FastBrain model yoksa: "FastBrain dormant — egitim modeli henuz yok, shadow tahmin uretmiyor".
+- OnlineLearning rolling.samples=0 ise gercek sebebi soyle (genelde: FastBrain dormant → router kayit uretmiyor → evaluator ornek bulamiyor).
+- SafetyNet tripped ise OPERATOR'U uyar: "SafetyNet devrede — fast_brain pasiflestirildi, reset gerekebilir".
 
 METRIK YORUM KURALI:
 - `toplam_trade` metrigini sadece kapanan simulasyon/paper-trade olarak yorumla.
@@ -381,6 +394,10 @@ class ChatEngine:
                 )
             )
 
+        intel = snapshot.get("intel_summary") or {}
+        if intel:
+            parts.append("INTEL KATMANI:\n" + _format_intel_block(intel))
+
         context = "\n\n".join(parts)
         if len(context) > MAX_CONTEXT_CHARS:
             context = context[:MAX_CONTEXT_CHARS] + "\n\n[context kisaltildi]"
@@ -425,6 +442,7 @@ class ChatEngine:
                 "brain": brain_status,
                 "risk": self.risk_manager.get_risk_summary() if self.risk_manager else {},
                 "state": self.state_tracker.get_state_summary() if self.state_tracker else {},
+                "intel_summary": await _collect_intel_summary(),
             }
             self._snapshot_cache = dict(snapshot)
             self._snapshot_cache_at = now
@@ -622,3 +640,125 @@ class ChatEngine:
 
     def _fallback(self, msg: str) -> str:
         return "Model su an yanit uretemiyor. Lutfen tekrar dener misin?"
+
+
+# ───────────────── intel awareness helpers ─────────────────
+async def _collect_intel_summary() -> Dict[str, Any]:
+    """
+    Chat engine icin Intel Upgrade modul durum ozeti.
+    Singleton'lardan dogrudan okur; hicbir modul yoksa bos dict doner.
+    Tum cagrilar defansif — bir modul patlarsa digerleri durur.
+    """
+    out: Dict[str, Any] = {}
+
+    async def _safe_health(agent: Any) -> Dict[str, Any]:
+        try:
+            h = getattr(agent, "health_check", None)
+            if h is None:
+                return {}
+            r = h()
+            if asyncio.iscoroutine(r):
+                r = await r
+            return r if isinstance(r, dict) else {}
+        except Exception:
+            return {}
+
+    # Fast Brain
+    try:
+        from fast_brain import _engine as _fb
+        if _fb is not None:
+            out["fast_brain"] = await _safe_health(_fb)
+    except Exception:
+        pass
+    # Confluence
+    try:
+        from confluence_engine import _engine as _ce
+        if _ce is not None:
+            out["confluence"] = await _safe_health(_ce)
+    except Exception:
+        pass
+    # Decision Router
+    try:
+        from decision_router import _router as _dr
+        if _dr is not None:
+            out["decision_router"] = await _safe_health(_dr)
+    except Exception:
+        pass
+    # Online Learning
+    try:
+        from online_learning import _evaluator as _ol
+        if _ol is not None:
+            out["online_learning"] = await _safe_health(_ol)
+    except Exception:
+        pass
+    # Multi-Horizon
+    try:
+        from multi_horizon_signatures import _engine as _mh
+        if _mh is not None:
+            out["multi_horizon"] = await _safe_health(_mh)
+    except Exception:
+        pass
+    # Cross-Asset
+    try:
+        from cross_asset import _engine as _ca  # type: ignore
+        if _ca is not None:
+            out["cross_asset"] = await _safe_health(_ca)
+    except Exception:
+        pass
+    # Feature Store
+    try:
+        from feature_store import _store as _fs  # type: ignore
+        if _fs is not None:
+            h = getattr(_fs, "health_check", None)
+            if h is not None:
+                r = h()
+                out["feature_store"] = r if isinstance(r, dict) else {}
+    except Exception:
+        pass
+    # Safety Net
+    try:
+        from safety_net import _instance as _sn
+        if _sn is not None:
+            try:
+                out["safety_net"] = _sn.status()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
+def _format_intel_block(intel: Dict[str, Any]) -> str:
+    """Kisa insan-okunur intel ozeti."""
+    lines: List[str] = []
+    fb = intel.get("fast_brain") or {}
+    if fb:
+        dormant = not fb.get("model_loaded", False)
+        state = "dormant (model yok)" if dormant else "aktif"
+        lines.append(f"- FastBrain: {state}, tahmin={fb.get('total_predictions', 0)}")
+    cf = intel.get("confluence") or {}
+    if cf:
+        lines.append(f"- Confluence: {cf.get('tracked_symbols', 0)} sembol, hesap={cf.get('total_computed', 0)}")
+    dr = intel.get("decision_router") or {}
+    if dr:
+        mode = "shadow" if dr.get("shadow") else "live"
+        lines.append(f"- DecisionRouter({mode}): log={dr.get('log_rows', 0)}, routed={dr.get('routed_total', 0)}")
+    ol = intel.get("online_learning") or {}
+    if ol:
+        lines.append(f"- OnlineLearning: samples={ol.get('window_samples', 0)}, scored={ol.get('scored_total', 0)}")
+    mh = intel.get("multi_horizon") or {}
+    if mh:
+        lines.append(f"- MultiHorizon: {mh.get('tracked_symbols', 0)} sembol, {mh.get('total_trades', 0)} trade")
+    ca = intel.get("cross_asset") or {}
+    if ca:
+        lines.append(f"- CrossAsset: {ca.get('tracked_symbols', 0)} sembol, {ca.get('edges', 0)} kenar")
+    fs = intel.get("feature_store") or {}
+    if fs:
+        lines.append(f"- FeatureStore: yazilan={fs.get('total_written', 0)}, kuyruk={fs.get('queue_size', 0)}")
+    sn = intel.get("safety_net") or {}
+    if sn:
+        if sn.get("tripped"):
+            lines.append(f"- SafetyNet: TRIPPED ({sn.get('trip_reason', '?')})")
+        else:
+            lines.append("- SafetyNet: saglikli (izliyor)")
+    return "\n".join(lines) if lines else "- Intel moduller henuz aktive edilmemis."

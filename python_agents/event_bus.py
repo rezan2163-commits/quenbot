@@ -118,6 +118,12 @@ class EventType(str, Enum):
     COUNTERFACTUAL_UPDATE = "intel.counterfactual"
     CONFLUENCE_WEIGHTS_ROTATED = "intel.weights_rotated"
 
+    # Phase 5 Finalization — Safety Net (ADDITIVE, never rename)
+    SAFETY_NET_TRIPPED = "intel.safety_net_tripped"
+    SAFETY_NET_RESET = "intel.safety_net_reset"
+    SAFETY_NET_DRIFT_ALERT = "intel.safety_net_drift"
+    SAFETY_NET_FS_DEGRADED = "intel.safety_net_fs_degraded"
+
 
 @dataclass
 class Event:

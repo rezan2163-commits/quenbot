@@ -1963,3 +1963,190 @@ class Database:
                 d = dict(row)
                 return json.loads(_dumps(d))
             return None
+
+    # ─────────────────────────────────────────────────────────────
+    # Intel Upgrade — Phase 4 Finalization (ADDITIVE; append-only)
+    # Counterfactual observations store. All methods guard against
+    # pool eksikligi ve JSONL fallback akisini bozmaz.
+    # ─────────────────────────────────────────────────────────────
+    _COUNTERFACTUAL_DDL: str = (
+        "CREATE TABLE IF NOT EXISTS counterfactual_observations ("
+        " id BIGSERIAL PRIMARY KEY,"
+        " symbol VARCHAR(32) NOT NULL,"
+        " event_ts TIMESTAMPTZ NOT NULL,"
+        " move_magnitude_pct DOUBLE PRECISION NOT NULL,"
+        " move_direction VARCHAR(8) NOT NULL,"
+        " label VARCHAR(4) NOT NULL,"
+        " horizon_minutes INT NOT NULL,"
+        " features_t_minus_30m JSONB,"
+        " features_t_minus_1h  JSONB,"
+        " features_t_minus_2h  JSONB,"
+        " confluence_score_t_minus_1h DOUBLE PRECISION,"
+        " fast_brain_p_t_minus_1h     DOUBLE PRECISION,"
+        " conformal_lower             DOUBLE PRECISION,"
+        " conformal_upper             DOUBLE PRECISION,"
+        " decided BOOLEAN NOT NULL DEFAULT FALSE,"
+        " decision_source VARCHAR(32),"
+        " decision_path   VARCHAR(16),"
+        " realized_pnl_pct DOUBLE PRECISION,"
+        " attribution JSONB,"
+        " created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+        ")"
+    )
+    _COUNTERFACTUAL_INDEXES: List[str] = [
+        "CREATE INDEX IF NOT EXISTS idx_cf_symbol_ts   ON counterfactual_observations(symbol, event_ts DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_cf_label       ON counterfactual_observations(label)",
+        "CREATE INDEX IF NOT EXISTS idx_cf_event_ts    ON counterfactual_observations(event_ts DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_cf_created_at  ON counterfactual_observations(created_at DESC)",
+    ]
+
+    async def create_counterfactual_table(self) -> bool:
+        """Counterfactual observations tablosunu idempotent olarak olustur.
+
+        Phase 4 Finalization. Pool yoksa False doner, asla raise etmez.
+        `lib/db/src/migrations/001_counterfactual_observations.sql` ile
+        birebir aynidir; bu DDL Python tarafinda da kapali tutulur ki
+        online_learning self-bootstrap edebilsin.
+        """
+        if not getattr(self, "pool", None):
+            logger.warning("create_counterfactual_table: DB pool yok, atlaniyor")
+            return False
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(self._COUNTERFACTUAL_DDL)
+                    for stmt in self._COUNTERFACTUAL_INDEXES:
+                        await conn.execute(stmt)
+            logger.info("🧾 counterfactual_observations tablosu hazir")
+            return True
+        except Exception as exc:
+            logger.error("create_counterfactual_table failed: %s", exc)
+            return False
+
+    @staticmethod
+    def _cf_coerce_ts(value: Any) -> datetime:
+        if isinstance(value, datetime):
+            return _utc_naive(value)
+        if isinstance(value, (int, float)):
+            return datetime.utcfromtimestamp(float(value))
+        if isinstance(value, str):
+            try:
+                return _utc_naive(datetime.fromisoformat(value.replace("Z", "+00:00")))
+            except Exception:
+                pass
+        return datetime.utcnow()
+
+    async def insert_counterfactual_observation(self, row: Dict[str, Any]) -> Optional[int]:
+        """Tek bir counterfactual satirini ekler. Hata halinde None doner."""
+        if not getattr(self, "pool", None):
+            return None
+        try:
+            ev_ts = self._cf_coerce_ts(row.get("event_ts") or row.get("ts"))
+            features_30 = row.get("features_t_minus_30m")
+            features_1h = row.get("features_t_minus_1h")
+            features_2h = row.get("features_t_minus_2h")
+            attribution = row.get("attribution")
+            async with self.pool.acquire() as conn:
+                inserted = await conn.fetchval(
+                    "INSERT INTO counterfactual_observations ("
+                    " symbol, event_ts, move_magnitude_pct, move_direction, label,"
+                    " horizon_minutes, features_t_minus_30m, features_t_minus_1h, features_t_minus_2h,"
+                    " confluence_score_t_minus_1h, fast_brain_p_t_minus_1h,"
+                    " conformal_lower, conformal_upper, decided, decision_source, decision_path,"
+                    " realized_pnl_pct, attribution"
+                    ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id",
+                    str(row.get("symbol", "")).upper(),
+                    ev_ts,
+                    float(row.get("move_magnitude_pct") or 0.0),
+                    str(row.get("move_direction") or "flat"),
+                    str(row.get("label") or "TN"),
+                    int(row.get("horizon_minutes") or 60),
+                    _dumps(features_30) if features_30 is not None else None,
+                    _dumps(features_1h) if features_1h is not None else None,
+                    _dumps(features_2h) if features_2h is not None else None,
+                    row.get("confluence_score_t_minus_1h"),
+                    row.get("fast_brain_p_t_minus_1h"),
+                    row.get("conformal_lower"),
+                    row.get("conformal_upper"),
+                    bool(row.get("decided") or False),
+                    row.get("decision_source"),
+                    row.get("decision_path"),
+                    row.get("realized_pnl_pct"),
+                    _dumps(attribution) if attribution is not None else None,
+                )
+                return int(inserted) if inserted is not None else None
+        except Exception as exc:
+            logger.debug("insert_counterfactual_observation failed: %s", exc)
+            return None
+
+    async def fetch_counterfactual_labels(self, since: datetime, limit: int = 10000) -> List[Dict[str, Any]]:
+        """`since` sonrasi counterfactual satirlari (en yeni ilkte)."""
+        if not getattr(self, "pool", None):
+            return []
+        try:
+            rows = await self.fetch(
+                "SELECT id, symbol, event_ts, move_magnitude_pct, move_direction, label,"
+                " horizon_minutes, confluence_score_t_minus_1h, fast_brain_p_t_minus_1h,"
+                " conformal_lower, conformal_upper, decided, decision_source, decision_path,"
+                " realized_pnl_pct, features_t_minus_1h, attribution, created_at"
+                " FROM counterfactual_observations WHERE event_ts >= $1"
+                " ORDER BY event_ts DESC LIMIT $2",
+                _utc_naive(since), int(limit),
+            )
+            return rows
+        except Exception as exc:
+            logger.debug("fetch_counterfactual_labels failed: %s", exc)
+            return []
+
+    async def counterfactual_metrics(self, window_hours: int = 24) -> Dict[str, Any]:
+        """Rolling window TP/FP/FN/TN + precision/recall/F1 + move magnitude stats."""
+        default = {
+            "healthy": False,
+            "window_hours": int(window_hours),
+            "counts": {"TP": 0, "FP": 0, "FN": 0, "TN": 0},
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "magnitude": {"TP_mean": None, "FP_mean": None, "FN_mean": None},
+            "total": 0,
+        }
+        if not getattr(self, "pool", None):
+            return default
+        try:
+            since = datetime.utcnow() - timedelta(hours=int(window_hours))
+            rows = await self.fetch(
+                "SELECT label, COUNT(*) AS n, AVG(move_magnitude_pct) AS mag"
+                " FROM counterfactual_observations WHERE event_ts >= $1 GROUP BY label",
+                since,
+            )
+            counts = {"TP": 0, "FP": 0, "FN": 0, "TN": 0}
+            magnitude = {"TP_mean": None, "FP_mean": None, "FN_mean": None}
+            for r in rows:
+                lbl = str(r.get("label") or "").upper()
+                if lbl not in counts:
+                    continue
+                counts[lbl] = int(r.get("n") or 0)
+                if lbl in magnitude and r.get("mag") is not None:
+                    magnitude[f"{lbl}_mean"] = float(r["mag"])
+            tp = counts["TP"]
+            fp = counts["FP"]
+            fn = counts["FN"]
+            precision = tp / (tp + fp) if (tp + fp) > 0 else None
+            recall = tp / (tp + fn) if (tp + fn) > 0 else None
+            f1 = None
+            if precision is not None and recall is not None and (precision + recall) > 0:
+                f1 = 2 * precision * recall / (precision + recall)
+            return {
+                "healthy": True,
+                "window_hours": int(window_hours),
+                "counts": counts,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "magnitude": magnitude,
+                "total": sum(counts.values()),
+            }
+        except Exception as exc:
+            logger.debug("counterfactual_metrics failed: %s", exc)
+            default["error"] = str(exc)
+            return default

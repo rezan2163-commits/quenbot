@@ -896,6 +896,17 @@ class AgentOrchestrator:
         self._online_learning_task = None
         if getattr(Config, "ONLINE_LEARNING_ENABLED", False):
             try:
+                # Phase 4 Finalization — DB-backed counterfactual store.
+                # create_counterfactual_table idempotent, hata halinde
+                # JSONL-only moda gracefully dusulur.
+                db_ref = getattr(self, "db", None)
+                persist_db = bool(getattr(Config, "ONLINE_LEARNING_PERSIST_DB", False)) and db_ref is not None
+                if persist_db:
+                    try:
+                        await db_ref.create_counterfactual_table()
+                    except Exception as exc:
+                        logger.warning("counterfactual table bootstrap skipped: %s", exc)
+                        persist_db = False
                 from online_learning import get_online_learning_evaluator
                 self.online_learning = get_online_learning_evaluator(
                     log_path=Config.DECISION_ROUTER_LOG_PATH,
@@ -903,15 +914,51 @@ class AgentOrchestrator:
                     interval_min=Config.ONLINE_LEARNING_INTERVAL_MIN,
                     min_samples=Config.ONLINE_LEARNING_MIN_SAMPLES,
                     state_path=Config.ONLINE_LEARNING_STATE_PATH,
+                    event_bus=self.event_bus,
+                    database=db_ref if persist_db else None,
+                    db_offset_path=getattr(Config, "ONLINE_LEARNING_DB_OFFSET_PATH",
+                                           "python_agents/.online_learning_db_offset.json"),
+                    persist_db=persist_db,
                 )
                 self._online_learning_task = self.online_learning.start()
                 logger.info(
-                    "📈 OnlineLearning online (interval=%dm, horizon=%dm)",
+                    "📈 OnlineLearning online (interval=%dm, horizon=%dm, db_persist=%s)",
                     Config.ONLINE_LEARNING_INTERVAL_MIN,
                     Config.ONLINE_LEARNING_HORIZON_MIN,
+                    persist_db,
                 )
             except Exception as e:
                 logger.warning("OnlineLearning bootstrap başarısız: %s", e)
+
+        # ── Phase 5 Finalization: Safety Net ─────────────────────
+        # SAFETY_NET_ENABLED default OFF. Flag acikken bile sadece izleyici
+        # olarak baslar; sentinel varsa bootta fast_brain disable kalir.
+        self.safety_net = None
+        self._safety_net_task = None
+        if getattr(Config, "SAFETY_NET_ENABLED", False):
+            try:
+                from safety_net import get_safety_net
+                self.safety_net = get_safety_net(
+                    event_bus=self.event_bus,
+                    config=Config,
+                    database=getattr(self, "db", None),
+                    feature_store=getattr(self, "feature_store", None),
+                    baseline_path=getattr(Config, "SAFETY_NET_BASELINE_PATH",
+                                          "python_agents/.safety_net_baseline.json"),
+                    trip_sentinel_path=getattr(Config, "SAFETY_NET_TRIP_SENTINEL",
+                                               "python_agents/.safety_net_trip.json"),
+                    brier_tol=getattr(Config, "SAFETY_NET_BRIER_TOL", 1.25),
+                    hitrate_tol=getattr(Config, "SAFETY_NET_HITRATE_TOL", 0.80),
+                    degradation_window_min=getattr(Config, "SAFETY_NET_DEGRADATION_WINDOW_MIN", 120),
+                    drift_sigma=getattr(Config, "SAFETY_NET_CONFLUENCE_DRIFT_SIGMA", 3.0),
+                    fs_failure_tol=getattr(Config, "SAFETY_NET_FS_FAILURE_TOL", 0.05),
+                    bg_interval_sec=getattr(Config, "SAFETY_NET_BG_INTERVAL_SEC", 30),
+                )
+                self._safety_net_task = self.safety_net.start()
+                logger.info("🛡️ SafetyNet online (brier_tol=%.2f hitrate_tol=%.2f)",
+                            Config.SAFETY_NET_BRIER_TOL, Config.SAFETY_NET_HITRATE_TOL)
+            except Exception as e:
+                logger.warning("SafetyNet bootstrap başarısız: %s", e)
 
         # ── Phase 5: Metrics Exporter ─────────────────────────────
         self.metrics_exporter = None
@@ -934,6 +981,14 @@ class AgentOrchestrator:
                 ]:
                     if obj is not None and hasattr(obj, "metrics"):
                         self.metrics_exporter.register(name, obj.metrics)
+                # safety_net is registered separately because it may boot
+                # under different flags; treat its absence as soft-miss.
+                sn = getattr(self, "safety_net", None)
+                if sn is not None and hasattr(sn, "metrics"):
+                    try:
+                        self.metrics_exporter.register("safety_net", sn.metrics)
+                    except Exception:
+                        pass
                 await self.metrics_exporter.start()
             except Exception as e:
                 logger.warning("MetricsExporter bootstrap başarısız: %s", e)
@@ -3252,12 +3307,15 @@ class AgentOrchestrator:
                 ("decision_router", getattr(self, "decision_router", None)),
                 ("online_learning", getattr(self, "online_learning", None)),
                 ("metrics_exporter", getattr(self, "metrics_exporter", None)),
+                ("safety_net", getattr(self, "safety_net", None)),
             ]:
                 if obj is None:
                     out[name] = {"enabled": False}
                     continue
                 try:
-                    h = await obj.health_check()
+                    h = await obj.health_check() if hasattr(obj, "health_check") else (
+                        obj.status() if hasattr(obj, "status") else {}
+                    )
                     m = obj.metrics() if hasattr(obj, "metrics") else {}
                     out[name] = {"enabled": True, "health": h, "metrics": m}
                 except Exception as e:
@@ -3381,6 +3439,32 @@ class AgentOrchestrator:
                 return web.json_response({"error": str(e)}, status=500)
 
         app.router.add_get("/api/online-learning/stats", get_online_learning_stats)
+
+        # ─── Intel Upgrade (Phase 5 Finalization) — Safety Net ───
+        async def get_safety_net_status(request):
+            sn = getattr(self, "safety_net", None)
+            if sn is None:
+                return web.json_response({"enabled": False, "reason": "SAFETY_NET_ENABLED=0"})
+            try:
+                return web.json_response(sn.status())
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
+        async def get_counterfactual_metrics(request):
+            db = getattr(self, "db", None)
+            if db is None or not hasattr(db, "counterfactual_metrics"):
+                return web.json_response({"enabled": False})
+            try:
+                hours = int(request.query.get("window_hours", "24"))
+            except Exception:
+                hours = 24
+            try:
+                return web.json_response(await db.counterfactual_metrics(window_hours=hours))
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
+        app.router.add_get("/api/intel/safety_net", get_safety_net_status)
+        app.router.add_get("/api/intel/counterfactuals", get_counterfactual_metrics)
 
         # ─── Target Cards endpoint ───
         async def get_target_cards(request):
@@ -3644,9 +3728,26 @@ class AgentOrchestrator:
 
         await runner.cleanup()
 
-async def main():
+async def main(dry_run: bool = False, exit_after_seconds: Optional[int] = None):
     orchestrator = AgentOrchestrator()
+    if dry_run:
+        logger.warning("🧪 DRY-RUN mode: initialize only; no start / no network loops")
+        try:
+            await orchestrator.initialize()
+            logger.info("✅ dry-run initialize complete")
+        finally:
+            try:
+                await orchestrator.stop()
+            except Exception:
+                pass
+        return
     try:
+        if exit_after_seconds and exit_after_seconds > 0:
+            async def _killer():
+                await asyncio.sleep(int(exit_after_seconds))
+                logger.warning("⏱️  exit-after-seconds=%ss reached; shutting down", exit_after_seconds)
+                orchestrator.running = False
+            asyncio.create_task(_killer())
         await orchestrator.initialize()
         await orchestrator.start()
     except Exception as e:
@@ -3656,4 +3757,14 @@ async def main():
         await orchestrator.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse as _argparse
+    _parser = _argparse.ArgumentParser(description="Quenbot agent orchestrator")
+    _parser.add_argument("--dry-run", action="store_true",
+                         help="Initialize subsystems and exit without starting live loops")
+    _parser.add_argument("--exit-after-seconds", type=int, default=0,
+                         help="Graceful shutdown after N seconds (0 = disabled)")
+    _args, _ = _parser.parse_known_args()
+    asyncio.run(main(
+        dry_run=bool(_args.dry_run),
+        exit_after_seconds=int(_args.exit_after_seconds) if _args.exit_after_seconds else None,
+    ))

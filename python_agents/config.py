@@ -205,7 +205,24 @@ class Config:
     ONLINE_LEARNING_HORIZON_MIN = int(os.getenv("QUENBOT_ONLINE_LEARNING_HORIZON_MIN", "60"))
     ONLINE_LEARNING_MIN_SAMPLES = int(os.getenv("QUENBOT_ONLINE_LEARNING_MIN_SAMPLES", "50"))
     ONLINE_LEARNING_STATE_PATH = os.getenv("QUENBOT_ONLINE_LEARNING_STATE_PATH", "python_agents/.online_learning_state.json")
+    # Phase 4 Finalization — DB-backed counterfactual store (JSONL WAL + DB persist)
+    ONLINE_LEARNING_PERSIST_DB = os.getenv("QUENBOT_ONLINE_LEARNING_PERSIST_DB", "1").lower() in {"1", "true", "yes", "on"}
+    ONLINE_LEARNING_DB_OFFSET_PATH = os.getenv("QUENBOT_ONLINE_LEARNING_DB_OFFSET_PATH", "python_agents/.online_learning_db_offset.json")
 
     # Phase 5
     METRICS_EXPORTER_ENABLED = os.getenv("QUENBOT_METRICS_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
     METRICS_EXPORTER_PORT = int(os.getenv("QUENBOT_METRICS_PORT", "9108"))
+
+    # Phase 5 Finalization — Safety Net (accuracy + drift + feature-store guards)
+    # Hepsi default OFF, running path'i etkilemez. Ramp plan icin bkz.
+    # FINALIZATION_REPORT.md. SAFETY_NET_ENABLED=1 ilk aktiflestirilmesi
+    # gereken flag; DECISION_ROUTER_ENABLED'dan onceki guvenlik katmani.
+    SAFETY_NET_ENABLED = os.getenv("QUENBOT_SAFETY_NET_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    SAFETY_NET_BRIER_TOL = float(os.getenv("QUENBOT_SAFETY_NET_BRIER_TOL", "1.25"))
+    SAFETY_NET_HITRATE_TOL = float(os.getenv("QUENBOT_SAFETY_NET_HITRATE_TOL", "0.80"))
+    SAFETY_NET_DEGRADATION_WINDOW_MIN = int(os.getenv("QUENBOT_SAFETY_NET_DEGRADATION_WINDOW_MIN", "120"))
+    SAFETY_NET_CONFLUENCE_DRIFT_SIGMA = float(os.getenv("QUENBOT_SAFETY_NET_CONFLUENCE_DRIFT_SIGMA", "3.0"))
+    SAFETY_NET_FS_FAILURE_TOL = float(os.getenv("QUENBOT_SAFETY_NET_FS_FAILURE_TOL", "0.05"))
+    SAFETY_NET_BASELINE_PATH = os.getenv("QUENBOT_SAFETY_NET_BASELINE_PATH", "python_agents/.safety_net_baseline.json")
+    SAFETY_NET_TRIP_SENTINEL = os.getenv("QUENBOT_SAFETY_NET_TRIP_SENTINEL", "python_agents/.safety_net_trip.json")
+    SAFETY_NET_BG_INTERVAL_SEC = int(os.getenv("QUENBOT_SAFETY_NET_BG_INTERVAL_SEC", "30"))
