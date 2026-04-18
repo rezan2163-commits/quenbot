@@ -15,7 +15,7 @@ module.exports = {
         "--model", "/root/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
         "--alias", "qwen2.5-7b",
         "--ctx-size", "4096",
-        "--threads", "6",
+        "--threads", "10",
         "--parallel", "1",
         "--jinja",
         "-ngl", "0",
