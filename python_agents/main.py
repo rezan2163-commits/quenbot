@@ -183,6 +183,38 @@ class AgentOrchestrator:
         meta["strategy_approved"] = bool(meta.get("strategy_approved", False) or approved)
         meta["dashboard_candidate"] = bool(eligible if dashboard_candidate is None else dashboard_candidate)
         meta["target_candidate"] = bool(meta["dashboard_candidate"])
+        # Attach additive ETA + reasoning bundles for the signal card. Failures
+        # are swallowed so the original signal emission path stays untouched.
+        try:
+            from utils.eta import build_eta_bundle
+            from utils.reasoning import build_reasoning_bundle
+
+            entry = float(meta.get("entry_price") or meta.get("current_price_at_signal") or 0.0)
+            target = float(meta.get("target_price") or 0.0)
+            atr_pm = meta.get("atr_per_minute") or meta.get("atr_pm")
+            similar = meta.get("similar_patterns") if isinstance(meta.get("similar_patterns"), dict) else None
+            oracle_state = meta.get("oracle_state") if isinstance(meta.get("oracle_state"), dict) else None
+
+            if entry > 0 and target > 0:
+                eta_bundle = build_eta_bundle(
+                    entry_price=entry,
+                    target_price=target,
+                    atr_per_minute=float(atr_pm) if atr_pm else None,
+                    directional_bias=float(meta.get("directional_bias", 0.5) or 0.5),
+                    similar_patterns=similar,
+                    oracle_state=oracle_state,
+                )
+                if eta_bundle and "eta" not in meta:
+                    meta["eta"] = eta_bundle
+
+            if "reasoning" not in meta:
+                meta["reasoning"] = build_reasoning_bundle(
+                    meta,
+                    regime=meta.get("regime"),
+                    similar_patterns=similar,
+                )
+        except Exception as _bundle_err:  # pragma: no cover - defensive
+            logger.debug(f"Signal metadata bundle skipped: {_bundle_err}")
         return meta
 
     def _is_mamis_target_candidate(self, confidence: float, target_pct: float, estimated_volatility: float) -> bool:
@@ -1980,7 +2012,17 @@ class AgentOrchestrator:
         if entry_price <= 0:
             return
 
-        direction = metadata.get('position_bias', 'long')
+        # Direction must be resolved defensively: older rows store only
+        # ``position_bias`` while newer rows mirror it into ``direction``.
+        # We additionally read the top-level signal column so short trades are
+        # never silently evaluated with long-biased formulas.
+        raw_direction = (
+            metadata.get('direction')
+            or metadata.get('position_bias')
+            or signal.get('direction')
+            or 'long'
+        )
+        direction = 'short' if str(raw_direction).strip().lower() in ('short', 'sell', 'down', 'bear') else 'long'
         symbol = signal['symbol']
         current_price = tracker.get_price(symbol)
         if not current_price or current_price <= 0:
@@ -2082,7 +2124,13 @@ class AgentOrchestrator:
                 metadata = json.loads(metadata)
 
             symbol = signal['symbol']
-            direction = metadata.get('position_bias', 'long')
+            raw_direction = (
+                metadata.get('direction')
+                or metadata.get('position_bias')
+                or signal.get('direction')
+                or 'long'
+            )
+            direction = 'short' if str(raw_direction).strip().lower() in ('short', 'sell', 'down', 'bear') else 'long'
             hits = [h for h in horizons if h.get('status') == 'hit']
             misses = [h for h in horizons if h.get('status') == 'missed']
             was_correct = len(hits) > len(misses)

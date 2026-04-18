@@ -146,6 +146,32 @@ export interface Signal {
   metadata: Record<string, any>;
 }
 
+export interface SignalEtaBundle {
+  p50_seconds: number;
+  p80_seconds: number;
+  basis: string;
+  confidence?: number;
+}
+
+export interface SignalReasoningTrigger {
+  label: string;
+  strength: number;
+  category: string;
+}
+
+export interface SignalReasoningBundle {
+  triggers: SignalReasoningTrigger[];
+  confluence_score?: number | null;
+  ifi_score?: number | null;
+  regime?: string | null;
+  data_density?: number | null;
+  similar_patterns?: {
+    count: number;
+    avg_realized_pct?: number | null;
+    win_rate?: number | null;
+  } | null;
+}
+
 export interface SignalTargetHorizon {
   label: string;
   eta_minutes: number;
@@ -448,12 +474,37 @@ export function useWatchlist() {
   });
 }
 
-export async function addWatchlistCoin(symbol: string, opts?: { exchange?: string; market_type?: string }) {
+export type WatchlistExchange = "binance" | "bybit" | "both" | "all";
+export type WatchlistMarketType = "spot" | "futures" | "both";
+export type WatchlistQuote = "USDT" | "USDC" | "BTC" | "ETH";
+
+export interface AddWatchlistOptions {
+  exchange?: WatchlistExchange;
+  /** Legacy single-market input (spot/futures/both). Prefer `market_types`. */
+  market_type?: WatchlistMarketType;
+  /** New multi-market input. When present, `market_type` is ignored. */
+  market_types?: Array<"spot" | "futures">;
+  quote?: WatchlistQuote;
+}
+
+export async function addWatchlistCoin(baseSymbol: string, opts?: AddWatchlistOptions) {
+  const quote: WatchlistQuote = opts?.quote || "USDT";
+  const cleanBase = baseSymbol.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const symbol = cleanBase.endsWith(quote) ? cleanBase : cleanBase + quote;
+
+  const markets: Array<"spot" | "futures"> =
+    opts?.market_types && opts.market_types.length > 0
+      ? opts.market_types
+      : opts?.market_type === "spot" || opts?.market_type === "futures"
+      ? [opts.market_type]
+      : ["spot", "futures"];
+  const marketType: WatchlistMarketType = markets.length === 2 ? "both" : markets[0];
+
   const attempts = [
-    { exchange: opts?.exchange || "both", market_type: opts?.market_type || "both" },
-    { exchange: "all", market_type: "both" },
-    { exchange: "all", market_type: "spot" },
-  ];
+    { exchange: opts?.exchange || "both", market_type: marketType, market_types: markets },
+    { exchange: "all", market_type: "both", market_types: markets },
+    { exchange: "all", market_type: "spot", market_types: ["spot"] },
+  ] as const;
 
   let lastError = "";
   for (const attempt of attempts) {
@@ -464,6 +515,8 @@ export async function addWatchlistCoin(symbol: string, opts?: { exchange?: strin
         symbol,
         exchange: attempt.exchange,
         market_type: attempt.market_type,
+        market_types: attempt.market_types,
+        quote,
       }),
     });
 
@@ -478,6 +531,37 @@ export async function addWatchlistCoin(symbol: string, opts?: { exchange?: strin
   }
 
   throw new Error(lastError || "Coin eklenemedi");
+}
+
+export interface SymbolSearchResult {
+  symbol: string;
+  base: string;
+  quote: string;
+  exchange: string;
+  market_type: string;
+  tradeable: boolean;
+  volume_24h_usd?: number;
+}
+
+export async function searchSymbols(
+  q: string,
+  opts?: { exchange?: string; quote?: string; market_type?: string; limit?: number },
+): Promise<SymbolSearchResult[]> {
+  const params = new URLSearchParams({
+    q,
+    exchange: opts?.exchange || "binance",
+    quote: opts?.quote || "USDT",
+    market_type: opts?.market_type || "spot",
+    limit: String(opts?.limit ?? 20),
+  });
+  try {
+    const res = await fetch(`${API}/api/symbols/search?${params.toString()}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : [];
+  } catch {
+    return [];
+  }
 }
 
 export async function removeWatchlistCoin(symbol: string, opts?: { exchange?: string; market_type?: string }) {

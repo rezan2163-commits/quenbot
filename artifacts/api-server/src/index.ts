@@ -4,6 +4,7 @@ import compression from "compression";
 import fs from "fs/promises";
 import path from "path";
 import { connectDatabase, createTables, sql } from "./db";
+import { searchSymbols as registrySearchSymbols } from "./exchange_registry";
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
@@ -1138,6 +1139,35 @@ app.post("/api/chat/send", async (req, res) => {
 
 // ─── User Watchlist Endpoints ───
 
+app.get("/api/symbols/search", async (req, res) => {
+  try {
+    const q = String(req.query.q ?? "").trim();
+    if (!q) {
+      res.json({ results: [], warnings: [] });
+      return;
+    }
+    const exchangeRaw = String(req.query.exchange ?? "binance").toLowerCase();
+    const exchange = exchangeRaw === "bybit" || exchangeRaw === "both" || exchangeRaw === "all"
+      ? (exchangeRaw as "bybit" | "both" | "all")
+      : "binance";
+    const quote = String(req.query.quote ?? "USDT").toUpperCase();
+    const marketTypeRaw = String(req.query.market_type ?? "spot").toLowerCase();
+    const market_type = marketTypeRaw === "futures" ? "futures" : "spot";
+    const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 100);
+
+    const response = await registrySearchSymbols({
+      query: q,
+      exchange,
+      quote,
+      market_type,
+      limit,
+    });
+    res.json(response.results);
+  } catch (error) {
+    res.status(500).json({ error: String(error), results: [] });
+  }
+});
+
 app.get("/api/watchlist", async (req, res) => {
   try {
     const rows = await sql`
@@ -1152,7 +1182,7 @@ app.get("/api/watchlist", async (req, res) => {
 
 app.post("/api/watchlist/add", async (req, res) => {
   try {
-    const { symbol, exchange, market_type } = req.body;
+    const { symbol, exchange, market_type, market_types, quote } = req.body ?? {};
     if (!symbol || typeof symbol !== "string") {
       return res.status(400).json({ error: "Symbol is required" });
     }
@@ -1165,41 +1195,65 @@ app.post("/api/watchlist/add", async (req, res) => {
       LITECOIN: "LTC",
       DOGECOIN: "DOGE",
     };
-    let sym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20);
+    const ALLOWED_QUOTES = ["USDT", "USDC", "BTC", "ETH"] as const;
+    const rawQuote = typeof quote === "string" ? quote.toUpperCase() : "USDT";
+    const normalizedQuote: string = (ALLOWED_QUOTES as readonly string[]).includes(rawQuote) ? rawQuote : "USDT";
+
+    let sym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 20);
     if (aliasMap[sym]) {
       sym = aliasMap[sym];
     }
-    if (sym && !sym.endsWith("USDT")) sym = `${sym}USDT`;
+    const endsWithAnyQuote = ALLOWED_QUOTES.some((q) => sym.endsWith(q));
+    if (sym && !endsWithAnyQuote) sym = `${sym}${normalizedQuote}`;
 
-    const exchRaw = (exchange || "all").toLowerCase().slice(0, 50);
-    const mtRaw = (market_type || "spot").toLowerCase();
-
-    if (!["spot", "futures", "both"].includes(mtRaw)) {
-      return res.status(400).json({ error: "market_type must be 'spot', 'futures' or 'both'" });
+    const exchRaw = String(exchange || "all").toLowerCase().slice(0, 50);
+    let markets: string[];
+    if (Array.isArray(market_types) && market_types.length > 0) {
+      markets = market_types
+        .map((m) => String(m).toLowerCase())
+        .filter((m) => m === "spot" || m === "futures");
+      if (markets.length === 0) {
+        return res.status(400).json({ error: "market_types must contain 'spot' or 'futures'" });
+      }
+    } else {
+      const mtRaw = String(market_type || "spot").toLowerCase();
+      if (!["spot", "futures", "both"].includes(mtRaw)) {
+        return res.status(400).json({ error: "market_type must be 'spot', 'futures' or 'both'" });
+      }
+      markets = mtRaw === "both" ? ["spot", "futures"] : [mtRaw];
     }
+
     if (!["all", "binance", "bybit", "both"].includes(exchRaw)) {
       return res.status(400).json({ error: "exchange must be 'all', 'binance', 'bybit' or 'both'" });
     }
 
-    const exchanges = exchRaw === "both" ? ["binance", "bybit"] : [exchRaw];
-    const markets = mtRaw === "both" ? ["spot", "futures"] : [mtRaw];
-    const addedRows: any[] = [];
+    const exchanges = exchRaw === "both" || exchRaw === "all" ? ["binance", "bybit"] : [exchRaw];
+    const added: Array<{ venue: string; symbol: string; status: string }> = [];
+    const errors: Array<{ venue: string; symbol: string; error: string }> = [];
 
     for (const exch of exchanges) {
       for (const mt of markets) {
-        const [row] = await sql`
-          INSERT INTO user_watchlist (symbol, exchange, market_type)
-          VALUES (${sym}, ${exch}, ${mt})
-          ON CONFLICT (symbol, exchange, market_type)
-          DO UPDATE SET active = TRUE
-          RETURNING id, symbol, exchange, market_type, active
-        `;
-        if (row) addedRows.push(row);
+        try {
+          const [row] = await sql`
+            INSERT INTO user_watchlist (symbol, exchange, market_type)
+            VALUES (${sym}, ${exch}, ${mt})
+            ON CONFLICT (symbol, exchange, market_type)
+            DO UPDATE SET active = TRUE
+            RETURNING id, symbol, exchange, market_type, active
+          `;
+          if (row) {
+            added.push({ venue: `${exch}_${mt}`, symbol: sym, status: "ok" });
+          }
+        } catch (insertErr) {
+          errors.push({ venue: `${exch}_${mt}`, symbol: sym, error: String(insertErr) });
+        }
       }
     }
 
-    const first = addedRows[0] || { symbol: sym, exchange: exchRaw, market_type: mtRaw, active: true };
-    res.json({ success: true, ...first, entries: addedRows });
+    const first = added[0]
+      ? { symbol: sym, exchange: exchanges[0], market_type: markets[0], active: true }
+      : { symbol: sym, exchange: exchRaw, market_type: markets[0], active: true };
+    res.json({ success: added.length > 0, ...first, quote: normalizedQuote, added, skipped: [], errors });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }

@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { mutate } from "swr";
 import { addWatchlistCoin, removeWatchlistCoin, useLivePrices, useTopMovers, useWatchlist } from "@/lib/api";
-import { Plus, TrendingUp, TrendingDown, Wifi, WifiOff, Trash2, Check, RefreshCw } from "lucide-react";
+import { Plus, TrendingUp, TrendingDown, Wifi, WifiOff, Trash2, RefreshCw } from "lucide-react";
+import AddCoinDialog from "./AddCoinDialog";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -11,11 +12,13 @@ export default function WatchlistManager() {
   const { data: prices, error: priceErr } = useLivePrices();
   const { data: movers } = useTopMovers();
   const { data: watchlist, mutate: mutateWatchlist } = useWatchlist();
-  const [showAdd, setShowAdd] = useState(false);
-  const [symbolInput, setSymbolInput] = useState("");
-  const [adding, setAdding] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+
+  // Keep the (unused-but-kept-for-backwards-compat) helper accessible so external
+  // callers importing it continue to work. eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _legacyAdd = addWatchlistCoin;
 
   const toNumber = (value: unknown, fallback = 0) => {
     const n = Number(value);
@@ -23,30 +26,6 @@ export default function WatchlistManager() {
   };
 
   const connected = !priceErr && !!prices;
-
-  const aliasMap: Record<string, string> = {
-    BITCOIN: "BTCUSDT",
-    ETHEREUM: "ETHUSDT",
-    RIPPLE: "XRPUSDT",
-    SOLANA: "SOLUSDT",
-    CARDANO: "ADAUSDT",
-    LITECOIN: "LTCUSDT",
-    DOGECOIN: "DOGEUSDT",
-    AVALANCHE: "AVAXUSDT",
-    APTOS: "APTUSDT",
-    POLKADOT: "DOTUSDT",
-    CHAINLINK: "LINKUSDT",
-    BNB: "BNBUSDT",
-    BINANCE: "BNBUSDT",
-  };
-
-  const normalizeInputSymbol = (rawInput: string) => {
-    const clean = rawInput.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-    if (!clean) return "";
-    if (aliasMap[clean]) return aliasMap[clean];
-    if (clean.endsWith("USDT")) return clean;
-    return clean + "USDT";
-  };
 
   const watchedSymbols = new Set((watchlist || []).map((w) => w.symbol.toUpperCase()));
 
@@ -70,26 +49,11 @@ export default function WatchlistManager() {
   });
 
   const tickers = Array.from(symbolMap.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
-  const knownSymbols = Array.from(new Set((prices || []).map((p) => String(p.symbol || "").toUpperCase()))).filter(Boolean);
 
-  const handleAdd = async () => {
-    const raw = symbolInput.trim();
-    if (!raw || adding) return;
-    const normalized = normalizeInputSymbol(raw);
-    if (!normalized) return;
-    setAdding(true);
-    setFeedback(null);
-    try {
-      await addWatchlistCoin(normalized, { exchange: "both", market_type: "both" });
-      await Promise.all([mutateWatchlist(), mutate(API + "/api/live/prices")]);
-      setFeedback({ type: "success", msg: normalized + " takibe eklendi" });
-      setSymbolInput("");
-      setTimeout(() => setFeedback(null), 3000);
-    } catch (err: any) {
-      setFeedback({ type: "error", msg: err?.message || "Coin eklenemedi" });
-    } finally {
-      setAdding(false);
-    }
+  const handleAdded = async ({ symbol }: { symbol: string }) => {
+    await Promise.all([mutateWatchlist(), mutate(API + "/api/live/prices")]);
+    setFeedback({ type: "success", msg: symbol + " takibe eklendi" });
+    setTimeout(() => setFeedback(null), 3000);
   };
 
   const handleRemove = async (symbol: string) => {
@@ -117,8 +81,8 @@ export default function WatchlistManager() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setShowAdd((v) => !v)}
-            className={"inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] transition-colors " + (showAdd ? "bg-bull/20 border-bull text-bull" : "border-surface-border text-gray-300 hover:bg-white/[0.04]")}
+            onClick={() => setDialogOpen(true)}
+            className="inline-flex items-center gap-1 rounded border border-surface-border px-2 py-1 text-[10px] text-gray-300 hover:bg-white/[0.04]"
             title="Coin ekle"
           >
             <Plus size={10} /> Ekle
@@ -129,32 +93,11 @@ export default function WatchlistManager() {
         </div>
       </div>
 
-      {showAdd && (
-        <div className="px-3 py-2 border-b border-surface-border bg-surface/50">
-          <div className="flex items-center gap-2">
-            <input
-              value={symbolInput}
-              onChange={(e) => setSymbolInput(e.target.value)}
-              list="watchlist-known-symbols"
-              placeholder="Orn: BTC, bitcoin veya BTCUSDT"
-              className="flex-1 rounded border border-surface-border bg-surface px-2 py-1 text-xs text-gray-200 placeholder:text-gray-600 focus:outline-none focus:border-accent/50"
-              onKeyDown={(e) => { if (e.key === "Enter") void handleAdd(); }}
-            />
-            <datalist id="watchlist-known-symbols">
-              {knownSymbols.slice(0, 80).map((s) => <option key={s} value={s.replace("USDT", "")} />)}
-            </datalist>
-            <button
-              onClick={() => void handleAdd()}
-              disabled={adding || !symbolInput.trim()}
-              className="rounded bg-bull px-3 py-1 text-[10px] font-medium text-white disabled:opacity-50 flex items-center gap-1"
-            >
-              {adding ? <RefreshCw size={10} className="animate-spin" /> : <Check size={10} />}
-              {adding ? "..." : "Ekle"}
-            </button>
-          </div>
-          <p className="mt-1 text-[10px] text-gray-500">Spot + Futures & Binance + Bybit akisina eklenir.</p>
-        </div>
-      )}
+      <AddCoinDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        onAdded={handleAdded}
+      />
 
       {feedback && (
         <div className={"px-3 py-1.5 border-b border-surface-border text-[10px] " + (feedback.type === "success" ? "text-bull bg-bull/5" : "text-bear bg-bear/5")}>
@@ -166,7 +109,7 @@ export default function WatchlistManager() {
         {tickers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-gray-500 text-xs gap-2 p-4">
             <p>Henuz coin eklenmedi</p>
-            <button onClick={() => setShowAdd(true)} className="px-3 py-1.5 rounded bg-accent text-white text-[10px]">
+            <button onClick={() => setDialogOpen(true)} className="px-3 py-1.5 rounded bg-accent text-white text-[10px]">
               Ilk coini ekle
             </button>
           </div>
