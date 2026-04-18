@@ -145,6 +145,10 @@ class EventType(str, Enum):
     ORACLE_AUTO_ROLLBACK = "oracle.auto_rollback"
     WARMUP_COMPLETED = "oracle.warmup_completed"
 
+    # ── Aşama 2 — Impact Feedback Loop ──
+    DIRECTIVE_IMPACT_MEASURED = "directive.impact_measured"
+    SAFETY_NET_DIRECTIVE_REGRESSION = "safety_net.directive_regression"
+
 
 @dataclass
 class Event:
