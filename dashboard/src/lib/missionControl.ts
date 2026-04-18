@@ -61,17 +61,81 @@ export interface MissionSnapshot {
   qwen_pulse: QwenPulse;
 }
 
+export interface AutopsyDependency {
+  id: string;
+  status: ModuleStatusKind | "affected";
+  impact_direction: "upstream" | "downstream";
+}
+
+export interface AutopsyCollaborator {
+  id: string;
+  display_name: string;
+  status: ModuleStatusKind | "affected";
+  health_score: number;
+  last_event_at: number | null;
+}
+
+export interface AutopsyRecentEvent {
+  ts: number;
+  type: string;
+  preview: string;
+}
+
+export interface AutopsyMissionSummary {
+  total_events_5min: number;
+  events_last_minute: number;
+  avg_throughput_per_sec: number;
+  peak_throughput_per_sec: number;
+  dependency_count: number;
+  downstream_count: number;
+}
+
+export interface AutopsyCurrentActivity {
+  is_active: boolean;
+  description_tr: string;
+  last_event_ts: number | null;
+  last_event_type: string | null;
+  last_event_preview: string | null;
+  seconds_since_last_event: number | null;
+  expected_period_sec: number;
+}
+
+export interface AutopsyQwenDiagnosis {
+  summary_tr: string;
+  suggested_actions_tr: string[];
+  confidence: number;
+  generated_at: number;
+}
+
+export interface AutopsyTimelinePoint { t: number; v: number }
+export interface AutopsyTimeline {
+  module_id: string;
+  throughput: AutopsyTimelinePoint[];
+  error_rate?: AutopsyTimelinePoint[];
+  latency_p95?: AutopsyTimelinePoint[];
+}
+
 export interface AutopsyBundle {
   module_id: string;
   display_name: string;
+  description_tr: string;
   organ: ModuleOrgan;
   status: ModuleStatusKind;
-  health_score: number;
+  current_health: number;
   warnings: string[];
-  recent_events: Array<{ ts: number; type: string; preview: string }>;
-  dependencies: Array<{ id: string; status: ModuleStatusKind; health_score: number }>;
-  diagnosis: string | null;
-  generated_at: number;
+  recent_logs: string[];
+  recent_events: AutopsyRecentEvent[];
+  recent_errors: string[];
+  dependencies_status: AutopsyDependency[];
+  collaborators: {
+    upstream: AutopsyCollaborator[];
+    downstream: AutopsyCollaborator[];
+  };
+  mission_summary: AutopsyMissionSummary;
+  current_activity: AutopsyCurrentActivity;
+  timeline_5min: AutopsyTimeline;
+  qwen_diagnosis: AutopsyQwenDiagnosis | null;
+  operator_actions_available: string[];
 }
 
 const API = process.env.NEXT_PUBLIC_API_URL || "";

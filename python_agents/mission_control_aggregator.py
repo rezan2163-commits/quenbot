@@ -698,6 +698,22 @@ def timeline(module_id: str, window_sec: float = 300.0) -> Dict[str, Any]:
     }
 
 
+def _parse_log_line(line: str) -> Dict[str, Any]:
+    """Best-effort parse of the main.py-produced log lines.
+
+    Format produced upstream: ``f"{timestamp:.2f} {type} {preview}"``.
+    Returns ``{ts, type, preview}`` with graceful fallbacks.
+    """
+    try:
+        parts = str(line).split(" ", 2)
+        ts = float(parts[0]) if parts and parts[0] else 0.0
+        typ = parts[1] if len(parts) > 1 else ""
+        preview = parts[2] if len(parts) > 2 else ""
+        return {"ts": ts, "type": typ, "preview": preview}
+    except Exception:
+        return {"ts": 0.0, "type": "", "preview": str(line)}
+
+
 def autopsy_bundle(module_id: str, log_tail: Optional[List[str]] = None) -> Dict[str, Any]:
     """Build the payload consumed by the ``/api/mission-control/autopsy`` route.
 
@@ -711,34 +727,119 @@ def autopsy_bundle(module_id: str, log_tail: Optional[List[str]] = None) -> Dict
     snap = snapshot()
     mod_entry = next((m for m in snap["modules"] if m["id"] == module_id), None)
     dependencies_status: List[Dict[str, Any]] = []
+    upstream_collab: List[Dict[str, Any]] = []
+    downstream_collab: List[Dict[str, Any]] = []
     for dep_id in spec.dependencies:
         dep_entry = next((m for m in snap["modules"] if m["id"] == dep_id), None)
+        dep_spec = MODULE_REGISTRY.get(dep_id)
+        dep_status_val = dep_entry["status"] if dep_entry else "unknown"
         dependencies_status.append({
             "id": dep_id,
-            "status": dep_entry["status"] if dep_entry else "unknown",
+            "status": dep_status_val,
             "impact_direction": "upstream",
+        })
+        upstream_collab.append({
+            "id": dep_id,
+            "display_name": dep_spec.display_name if dep_spec else dep_id,
+            "status": dep_status_val,
+            "health_score": dep_entry["health_score"] if dep_entry else 0,
+            "last_event_at": dep_entry.get("last_event_at") if dep_entry else None,
         })
     # Downstream: who depends on this module?
     for m in snap["modules"]:
         if module_id in m.get("dependencies", []):
-            dep_status = "affected" if mod_entry and mod_entry["status"] in {
+            dep_status_val = "affected" if mod_entry and mod_entry["status"] in {
                 "unhealthy", "slow"
             } else m["status"]
             dependencies_status.append({
                 "id": m["id"],
-                "status": dep_status,
+                "status": dep_status_val,
                 "impact_direction": "downstream",
             })
+            dn_spec = MODULE_REGISTRY.get(m["id"])
+            downstream_collab.append({
+                "id": m["id"],
+                "display_name": dn_spec.display_name if dn_spec else m["id"],
+                "status": dep_status_val,
+                "health_score": m.get("health_score", 0),
+                "last_event_at": m.get("last_event_at"),
+            })
+
+    # Parse recent log lines into structured events for the UI
+    raw_logs = list(log_tail or [])
+    recent_events: List[Dict[str, Any]] = [_parse_log_line(ln) for ln in raw_logs]
+
+    # Derive mission / activity summary from the timeline + recent events
+    tl = timeline(module_id)
+    tp_series = tl.get("throughput", []) if isinstance(tl, dict) else []
+    bucket_values = [float(p.get("v", 0) or 0) for p in tp_series]
+    now_ts = time.time()
+    total_events_5min = 0.0
+    for p in tp_series:
+        try:
+            total_events_5min += float(p.get("v", 0) or 0) * 15.0  # 15s bucket
+        except Exception:
+            pass
+    events_last_minute = 0.0
+    for p in tp_series[-4:]:  # last 4 × 15s = 1 min
+        try:
+            events_last_minute += float(p.get("v", 0) or 0) * 15.0
+        except Exception:
+            pass
+    avg_throughput = sum(bucket_values) / len(bucket_values) if bucket_values else 0.0
+    peak_throughput = max(bucket_values) if bucket_values else 0.0
+
+    last_event = recent_events[-1] if recent_events else None
+    last_event_ts = float(last_event["ts"]) if last_event and last_event.get("ts") else None
+    seconds_since_last = (now_ts - last_event_ts) if last_event_ts else None
+    is_active = bool(seconds_since_last is not None and seconds_since_last <= max(
+        30.0, float(spec.expected_period_sec) * 2.0
+    ))
+
+    if is_active and last_event:
+        activity_desc = f"Aktif — son olay {int(seconds_since_last or 0)}s önce ({last_event.get('type') or 'event'})"
+    elif last_event_ts:
+        activity_desc = f"Sessiz — son olay {int(seconds_since_last or 0)}s önce"
+    else:
+        activity_desc = "Son 5 dk'da olay yok"
+
+    mission_summary = {
+        "total_events_5min": round(total_events_5min, 1),
+        "events_last_minute": round(events_last_minute, 1),
+        "avg_throughput_per_sec": round(avg_throughput, 3),
+        "peak_throughput_per_sec": round(peak_throughput, 3),
+        "dependency_count": len(spec.dependencies),
+        "downstream_count": len(downstream_collab),
+    }
+    current_activity = {
+        "is_active": is_active,
+        "description_tr": activity_desc,
+        "last_event_ts": last_event_ts,
+        "last_event_type": last_event.get("type") if last_event else None,
+        "last_event_preview": last_event.get("preview") if last_event else None,
+        "seconds_since_last_event": round(seconds_since_last, 1) if seconds_since_last is not None else None,
+        "expected_period_sec": float(spec.expected_period_sec),
+    }
 
     return {
         "module_id": module_id,
         "display_name": spec.display_name,
+        "description_tr": spec.description,
+        "organ": spec.organ,
         "current_health": mod_entry["health_score"] if mod_entry else 0,
         "status": mod_entry["status"] if mod_entry else "unknown",
-        "timeline_5min": timeline(module_id),
-        "recent_logs": list(log_tail or []),
+        "timeline_5min": tl,
+        "recent_logs": raw_logs,
+        "recent_events": recent_events,
         "recent_errors": [],
         "dependencies_status": dependencies_status,
+        "collaborators": {
+            "upstream": upstream_collab,
+            "downstream": downstream_collab,
+        },
+        "mission_summary": mission_summary,
+        "current_activity": current_activity,
+        "warnings": [],
         "qwen_diagnosis": None,
         "operator_actions_available": ["restart", "download_logs", "view_source"],
     }

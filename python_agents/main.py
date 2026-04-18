@@ -4575,13 +4575,20 @@ class AgentOrchestrator:
                                 "Sen QuenBot sistem tanı uzmanısın. "
                                 "Yalnızca verilen verilere dayanarak kısa, operatöre dönük Türkçe tanı yaz."
                             )
-                            res = await bridge.call_llm(
-                                task="mission_control_autopsy",
-                                system=system_prompt,
-                                prompt=prompt,
-                                json_mode=False,
-                                temperature=0.2,
-                            )
+                            try:
+                                res = await asyncio.wait_for(
+                                    bridge.call_llm(
+                                        task="mission_control_autopsy",
+                                        system=system_prompt,
+                                        prompt=prompt,
+                                        json_mode=False,
+                                        temperature=0.2,
+                                    ),
+                                    timeout=25.0,
+                                )
+                            except asyncio.TimeoutError:
+                                res = None
+                                logger.debug("mission-control qwen diagnosis timeout")
                             if isinstance(res, dict) and res.get("success") and res.get("text"):
                                 diagnosis = {
                                     "summary_tr": str(res["text"]).strip(),

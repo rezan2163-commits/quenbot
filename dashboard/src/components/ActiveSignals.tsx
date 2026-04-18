@@ -64,17 +64,50 @@ function resolvePrimaryTarget(signal: Signal | any) {
 }
 
 function classifyOutcome(o: any): { kind: "win" | "loss" | "neutral"; change: number; hitHorizon?: any; resolvedAt: number } {
-  const hzns = Array.isArray(o?.metadata?.target_horizons) ? o.metadata.target_horizons : [];
+  const meta = o?.metadata || {};
+  const entry = toNumber(o?.entry_price ?? meta.entry_price ?? o?.price, 0);
+  const exit = toNumber(
+    o?.exit_price ?? meta.exit_price ?? o?.close_price ?? meta.close_price ?? o?.actual_price ?? meta.actual_price,
+    0,
+  );
+  const dirRaw = String(o?.direction ?? meta.direction ?? meta.position_bias ?? o?.side ?? "").toLowerCase();
+  const isShort = dirRaw === "short" || dirRaw === "sell";
+  const resolvedAt = toTimestampMs(
+    meta.closed_at ?? meta.exit_time ?? meta.resolved_at ?? o?.evaluated_at ?? o?.signal_time ?? o?.timestamp,
+  );
+
+  if (entry > 0 && exit > 0) {
+    const raw = (exit - entry) / entry;
+    const change = (isShort ? -raw : raw) * 100;
+    if (change > 0) return { kind: "win", change, resolvedAt };
+    if (change < 0) return { kind: "loss", change, resolvedAt };
+    return { kind: "neutral", change, resolvedAt };
+  }
+
+  // Fallback #1: explicit status field set by the outcome engine
+  const status = String(o?.status ?? meta.status ?? "").toLowerCase();
+  if (status.includes("target_hit") || status.includes("target_reached") || meta.was_correct === true || meta.target_hit === true) {
+    return { kind: "win", change: toNumber(o?.target_pct ?? meta.target_pct, 0) * 100, resolvedAt };
+  }
+  if (
+    status.includes("stop_loss") || status.includes("stopped") || status.includes("expired") ||
+    meta.was_correct === false || meta.close_reason === "stop_loss"
+  ) {
+    return { kind: "loss", change: -Math.abs(toNumber(meta.target_pct, 0)) * 100, resolvedAt };
+  }
+
+  // Fallback #2: legacy target_horizons metadata
+  const hzns = Array.isArray(meta.target_horizons) ? meta.target_horizons : [];
   const hit = hzns.find((h: any) => h?.status === "hit");
   const allMissed = hzns.length > 0 && hzns.every((h: any) => ["missed", "expired"].includes(String(h?.status)));
   const primary = hit || hzns[0];
   const change = toNumber(primary?.actual_change_pct, 0) * 100;
-  const resolvedAt = toTimestampMs(
-    primary?.closed_at || primary?.evaluated_at || o?.evaluated_at || o?.signal_time || o?.timestamp
+  const altResolvedAt = toTimestampMs(
+    primary?.closed_at || primary?.evaluated_at || o?.evaluated_at || o?.signal_time || o?.timestamp,
   );
-  if (hit) return { kind: "win", change, hitHorizon: hit, resolvedAt };
-  if (allMissed) return { kind: "loss", change, resolvedAt };
-  return { kind: "neutral", change, resolvedAt };
+  if (hit) return { kind: "win", change, hitHorizon: hit, resolvedAt: altResolvedAt };
+  if (allMissed) return { kind: "loss", change, resolvedAt: altResolvedAt };
+  return { kind: "neutral", change, resolvedAt: altResolvedAt };
 }
 
 function TabPill({
