@@ -6,9 +6,12 @@ import {
   Trash2, X, CheckCircle2, XCircle, Timer, Activity,
   Trophy, Skull, Flame, Zap, Calendar,
 } from "lucide-react";
-import { clearSignals, dismissSignal, useSignals, useSignalOutcomes, type Signal } from "@/lib/api";
+import { clearSignals, dismissSignal, useSignals, useSignalOutcomes, type Signal, type SignalEtaBundle, type SignalReasoningBundle } from "@/lib/api";
 import { formatInQuenbotTimeZone, parseQuenbotDate, toTimestampMs } from "@/lib/time";
+import { computeSignalPnlPct, classifySignalOutcome, resolveRealizedPrice } from "@/lib/pnl";
 import { Badge, cn } from "./ui/primitives";
+import SignalEtaBadge from "./SignalEtaBadge";
+import SignalReasoning from "./SignalReasoning";
 
 type TabKey = "active" | "winners" | "losers";
 
@@ -68,12 +71,42 @@ function classifyOutcome(o: any): { kind: "win" | "loss" | "neutral"; change: nu
   const hit = hzns.find((h: any) => h?.status === "hit");
   const allMissed = hzns.length > 0 && hzns.every((h: any) => ["missed", "expired"].includes(String(h?.status)));
   const primary = hit || hzns[0];
-  const change = toNumber(primary?.actual_change_pct, 0) * 100;
+
+  // Direction-aware P&L: recompute using the shared util so that SHORT
+  // signals show positive change when price fell (profit) and negative change
+  // when price rose (loss). Fall back to the stored ``actual_change_pct`` when
+  // we cannot derive a realized price.
+  const realized = resolveRealizedPrice(o);
+  const entryPrice = toNumber(o?.entry_price ?? o?.metadata?.entry_price ?? o?.price, 0);
+  let change = toNumber(primary?.actual_change_pct, 0) * 100;
+  if (realized !== null && entryPrice > 0) {
+    const pnl = computeSignalPnlPct({
+      direction: o?.direction,
+      entry_price: entryPrice,
+      exit_price: realized,
+      metadata: o?.metadata,
+    });
+    if (pnl !== null) change = pnl;
+  }
+
   const resolvedAt = toTimestampMs(
     primary?.closed_at || primary?.evaluated_at || o?.evaluated_at || o?.signal_time || o?.timestamp
   );
+
+  // When horizons are present, their status remains the authoritative classifier
+  // (it is written server-side from the same direction-aware formula).
   if (hit) return { kind: "win", change, hitHorizon: hit, resolvedAt };
   if (allMissed) return { kind: "loss", change, resolvedAt };
+
+  // Horizon-less fallback — derive bucket from the signed pnl.
+  const bucket = classifySignalOutcome({
+    direction: o?.direction,
+    entry_price: entryPrice,
+    exit_price: realized,
+    metadata: o?.metadata,
+  });
+  if (bucket === "profit") return { kind: "win", change, resolvedAt };
+  if (bucket === "loss") return { kind: "loss", change, resolvedAt };
   return { kind: "neutral", change, resolvedAt };
 }
 
@@ -379,6 +412,10 @@ function ActiveCard({ s, dismissing, onDismiss }: { s: Signal; dismissing: boole
 
       <div className="flex flex-wrap items-center gap-1 text-[9px]">
         <Badge variant="info"><BrainCircuit size={9} />{source}</Badge>
+        <SignalEtaBadge
+          eta={meta.eta as SignalEtaBundle | undefined}
+          fallbackMinutes={eta}
+        />
         {toNumber(meta.avg_similarity ?? meta.similarity, 0) > 0 && (
           <Badge variant="outline">sim %{(toNumber(meta.avg_similarity ?? meta.similarity) * 100).toFixed(0)}</Badge>
         )}
@@ -387,6 +424,8 @@ function ActiveCard({ s, dismissing, onDismiss }: { s: Signal; dismissing: boole
         {meta.mamis_ensemble?.aligned && <Badge variant="success">MAMIS ✓</Badge>}
         {meta.mamis_ensemble?.opposite && <Badge variant="danger">MAMIS ✗</Badge>}
       </div>
+
+      <SignalReasoning reasoning={meta.reasoning as SignalReasoningBundle | undefined} />
     </div>
   );
 }
