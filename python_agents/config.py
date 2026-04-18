@@ -226,3 +226,97 @@ class Config:
     SAFETY_NET_BASELINE_PATH = os.getenv("QUENBOT_SAFETY_NET_BASELINE_PATH", "python_agents/.safety_net_baseline.json")
     SAFETY_NET_TRIP_SENTINEL = os.getenv("QUENBOT_SAFETY_NET_TRIP_SENTINEL", "python_agents/.safety_net_trip.json")
     SAFETY_NET_BG_INTERVAL_SEC = int(os.getenv("QUENBOT_SAFETY_NET_BG_INTERVAL_SEC", "30"))
+
+    # ─────────────────────────────────────────────────────────────
+    # Phase 6 — Oracle Stack (8 dedektör + füzyon + brain + supervisor)
+    # Tüm flag'ler default OFF. Ramp planı: ORACLE_OPERATIONS_MANUAL.md.
+    # Davranışsal hiçbir yol bu PR ile değişmez; eklemeler salt additive.
+    # ─────────────────────────────────────────────────────────────
+    # §9 Oracle Signal Bus (read-only registry; default ON, hiçbir yan etki)
+    ORACLE_BUS_ENABLED = os.getenv("QUENBOT_ORACLE_BUS_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+
+    # §1 BOCPD — Bayesian Online Changepoint Detection
+    BOCPD_ENABLED = os.getenv("QUENBOT_BOCPD_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    BOCPD_HAZARD_LAMBDA_SEC = float(os.getenv("QUENBOT_BOCPD_HAZARD_LAMBDA_SEC", "1800"))
+    BOCPD_MIN_STREAMS = int(os.getenv("QUENBOT_BOCPD_MIN_STREAMS", "4"))
+    BOCPD_CONSENSUS_WINDOW_SEC = int(os.getenv("QUENBOT_BOCPD_CONSENSUS_WINDOW_SEC", "60"))
+    BOCPD_CP_THRESHOLD = float(os.getenv("QUENBOT_BOCPD_CP_THRESHOLD", "0.9"))
+    BOCPD_RUN_LENGTH_TRUNCATION = int(os.getenv("QUENBOT_BOCPD_RUN_LENGTH_TRUNCATION", "300"))
+    BOCPD_PUBLISH_HZ = float(os.getenv("QUENBOT_BOCPD_PUBLISH_HZ", "1.0"))
+
+    # §2 Hawkes — Self-exciting order flow
+    HAWKES_ENABLED = os.getenv("QUENBOT_HAWKES_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    HAWKES_WINDOW_MIN = int(os.getenv("QUENBOT_HAWKES_WINDOW_MIN", "30"))
+    HAWKES_EM_ITER = int(os.getenv("QUENBOT_HAWKES_EM_ITER", "50"))
+    HAWKES_MIN_EVENTS = int(os.getenv("QUENBOT_HAWKES_MIN_EVENTS", "500"))
+    HAWKES_PUBLISH_HZ = float(os.getenv("QUENBOT_HAWKES_PUBLISH_HZ", "0.5"))
+
+    # §3 LOB Thermodynamics — Shannon entropy + production rate
+    LOB_THERMO_ENABLED = os.getenv("QUENBOT_LOB_THERMO_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    LOB_THERMO_COOLING_WINDOW_SEC = int(os.getenv("QUENBOT_LOB_THERMO_COOLING_WINDOW_SEC", "180"))
+    LOB_THERMO_COOLING_THRESHOLD = float(os.getenv("QUENBOT_LOB_THERMO_COOLING_THRESHOLD", "1e-4"))
+    LOB_THERMO_LEVELS = int(os.getenv("QUENBOT_LOB_THERMO_LEVELS", "20"))
+    LOB_THERMO_PUBLISH_HZ = float(os.getenv("QUENBOT_LOB_THERMO_PUBLISH_HZ", "0.5"))
+
+    # §4 Wasserstein — Distributional drift
+    WASSERSTEIN_ENABLED = os.getenv("QUENBOT_WASSERSTEIN_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    WASSERSTEIN_BASELINE_HOURS = int(os.getenv("QUENBOT_WASSERSTEIN_BASELINE_HOURS", "24"))
+    WASSERSTEIN_WINDOW_MIN = int(os.getenv("QUENBOT_WASSERSTEIN_WINDOW_MIN", "60"))
+    WASSERSTEIN_PUBLISH_HZ = float(os.getenv("QUENBOT_WASSERSTEIN_PUBLISH_HZ", "0.2"))
+
+    # §5 Path Signature — Lyons rough paths
+    PATH_SIGNATURE_ENABLED = os.getenv("QUENBOT_PATH_SIGNATURE_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    PATH_SIG_WINDOW_SEC = int(os.getenv("QUENBOT_PATH_SIG_WINDOW_SEC", "30"))
+    PATH_SIG_DEPTH = int(os.getenv("QUENBOT_PATH_SIG_DEPTH", "3"))
+    PATH_SIG_MIN_SIMILARITY = float(os.getenv("QUENBOT_PATH_SIG_MIN_SIMILARITY", "0.85"))
+    PATH_SIG_CHROMA_COLLECTION = os.getenv("QUENBOT_PATH_SIG_CHROMA_COLLECTION", "whale_execution_signatures")
+    PATH_SIG_PUBLISH_HZ = float(os.getenv("QUENBOT_PATH_SIG_PUBLISH_HZ", "0.5"))
+
+    # §6 Mirror Flow — Cross-exchange synchronized execution
+    MIRROR_FLOW_ENABLED = os.getenv("QUENBOT_MIRROR_FLOW_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    MIRROR_DTW_WINDOW_MIN = int(os.getenv("QUENBOT_MIRROR_DTW_WINDOW_MIN", "30"))
+    MIRROR_DTW_RADIUS = int(os.getenv("QUENBOT_MIRROR_DTW_RADIUS", "10"))
+    MIRROR_SIG_PVALUE = float(os.getenv("QUENBOT_MIRROR_SIG_PVALUE", "0.01"))
+    MIRROR_PUBLISH_HZ = float(os.getenv("QUENBOT_MIRROR_PUBLISH_HZ", "0.1"))
+
+    # §7 TDA — Topological data analysis (persistent homology)
+    TDA_ENABLED = os.getenv("QUENBOT_TDA_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    TDA_WINDOW_MIN = int(os.getenv("QUENBOT_TDA_WINDOW_MIN", "5"))
+    TDA_PERSISTENCE_THRESHOLD = float(os.getenv("QUENBOT_TDA_PERSISTENCE_THRESHOLD", "0.15"))
+    TDA_UPDATE_HZ = float(os.getenv("QUENBOT_TDA_UPDATE_HZ", "0.1"))
+
+    # §8 Onchain — Convergent Cross Mapping (Sugihara 2012)
+    ONCHAIN_ENABLED = os.getenv("QUENBOT_ONCHAIN_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    ONCHAIN_POLL_SEC = int(os.getenv("QUENBOT_ONCHAIN_POLL_SEC", "300"))
+    CCM_LIBRARY_SIZES = os.getenv("QUENBOT_CCM_LIBRARY_SIZES", "100,500,2000")
+    CCM_SATURATION_THRESHOLD = float(os.getenv("QUENBOT_CCM_SATURATION_THRESHOLD", "0.6"))
+    ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
+    BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY", "")
+
+    # §10 Factor Graph Fusion (loopy belief propagation → IFI)
+    FACTOR_GRAPH_ENABLED = os.getenv("QUENBOT_FACTOR_GRAPH_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    FG_BP_ITER = int(os.getenv("QUENBOT_FG_BP_ITER", "100"))
+    FG_DAMPING = float(os.getenv("QUENBOT_FG_DAMPING", "0.5"))
+    FG_PUBLISH_HZ = float(os.getenv("QUENBOT_FG_PUBLISH_HZ", "0.5"))
+
+    # §11 Qwen Oracle Brain — central orchestration brain
+    ORACLE_BRAIN_ENABLED = os.getenv("QUENBOT_ORACLE_BRAIN_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    ORACLE_BRAIN_SHADOW = os.getenv("QUENBOT_ORACLE_BRAIN_SHADOW", "1").lower() in {"1", "true", "yes", "on"}
+    ORACLE_BRAIN_LEARN_INTERVAL_MIN = int(os.getenv("QUENBOT_ORACLE_BRAIN_LEARN_INTERVAL_MIN", "10"))
+    ORACLE_BRAIN_TEACH_INTERVAL_MIN = int(os.getenv("QUENBOT_ORACLE_BRAIN_TEACH_INTERVAL_MIN", "60"))
+    ORACLE_BRAIN_DAILY_REPORT_HOUR = int(os.getenv("QUENBOT_ORACLE_BRAIN_DAILY_REPORT_HOUR", "3"))
+    ORACLE_BRAIN_DIRECTIVES_PATH = os.getenv("QUENBOT_ORACLE_BRAIN_DIRECTIVES_PATH", "python_agents/directives.json")
+    ORACLE_BRAIN_REASONING_CHROMA_COLLECTION = os.getenv("QUENBOT_ORACLE_BRAIN_REASONING_CHROMA_COLLECTION", "oracle_reasoning")
+    ORACLE_BRAIN_RAG_TOP_K = int(os.getenv("QUENBOT_ORACLE_BRAIN_RAG_TOP_K", "5"))
+    ORACLE_BRAIN_TRUST_SCORE_PATH = os.getenv("QUENBOT_ORACLE_BRAIN_TRUST_SCORE_PATH", "python_agents/.channel_trust_scores.json")
+    ORACLE_BRAIN_MAX_PROMPT_TOKENS = int(os.getenv("QUENBOT_ORACLE_BRAIN_MAX_PROMPT_TOKENS", "8192"))
+    SELF_PLAY_ENABLED = os.getenv("QUENBOT_SELF_PLAY_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+
+    # §12 Runtime Supervisor & watchdog
+    RUNTIME_SUPERVISOR_ENABLED = os.getenv("QUENBOT_RUNTIME_SUPERVISOR_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    RUNTIME_HEALTH_CHECK_INTERVAL_SEC = int(os.getenv("QUENBOT_RUNTIME_HEALTH_CHECK_INTERVAL_SEC", "30"))
+    RUNTIME_MAX_RESTART_ATTEMPTS = int(os.getenv("QUENBOT_RUNTIME_MAX_RESTART_ATTEMPTS", "3"))
+    RUNTIME_STATUS_PATH = os.getenv("QUENBOT_RUNTIME_STATUS_PATH", "python_agents/.runtime_status.json")
+    WATCHDOG_ENABLED = os.getenv("QUENBOT_WATCHDOG_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+    WATCHDOG_HEARTBEAT_PATH = os.getenv("QUENBOT_WATCHDOG_HEARTBEAT_PATH", "/tmp/quenbot_heartbeat")
+    WATCHDOG_TIMEOUT_SEC = int(os.getenv("QUENBOT_WATCHDOG_TIMEOUT_SEC", "120"))

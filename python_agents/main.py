@@ -993,6 +993,52 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.warning("MetricsExporter bootstrap başarısız: %s", e)
 
+        # ── Phase 6: Oracle Stack ─────────────────────────────────
+        # Hepsi DEFAULT-OFF (ORACLE_BUS_ENABLED hariç; o read-only registry).
+        # Flag açılmadan singleton hiç oluşturulmaz; davranışsal hiçbir yol
+        # değişmez. PR1 bu turda §9 (bus) + §1 (BOCPD); §2-§8 sonraki turda.
+        self.oracle_signal_bus = None
+        self._oracle_detectors: list = []
+        try:
+            if getattr(Config, "ORACLE_BUS_ENABLED", True):
+                from oracle_signal_bus import get_oracle_signal_bus
+                self.oracle_signal_bus = get_oracle_signal_bus(event_bus=self.event_bus)
+                logger.info(
+                    "🔮 OracleSignalBus ready (channels=%d)",
+                    len(self.oracle_signal_bus.registered_channels()),
+                )
+        except Exception as e:
+            logger.warning("OracleSignalBus bootstrap başarısız: %s", e)
+
+        # §1 BOCPD — Bayesian Online Changepoint Detection (default OFF)
+        if getattr(Config, "BOCPD_ENABLED", False):
+            try:
+                from bocpd_detector import get_bocpd_detector
+                bocpd = get_bocpd_detector(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    hazard_lambda_sec=Config.BOCPD_HAZARD_LAMBDA_SEC,
+                    min_streams=Config.BOCPD_MIN_STREAMS,
+                    consensus_window_sec=Config.BOCPD_CONSENSUS_WINDOW_SEC,
+                    cp_threshold=Config.BOCPD_CP_THRESHOLD,
+                    run_length_truncation=Config.BOCPD_RUN_LENGTH_TRUNCATION,
+                    publish_hz=Config.BOCPD_PUBLISH_HZ,
+                )
+                await bocpd.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(
+                        bocpd.ORACLE_CHANNEL_NAME, "bocpd_detector",
+                    )
+                self._oracle_detectors.append(("bocpd", bocpd))
+                logger.info("🧭 BOCPD detector online (λ=%.0fs)", Config.BOCPD_HAZARD_LAMBDA_SEC)
+            except Exception as e:
+                logger.warning("BOCPDDetector bootstrap başarısız: %s", e)
+
+        # NOTE: §2-§8 dedektörleri (Hawkes, LOB Thermo, Wasserstein, Path Sig,
+        # Mirror Flow, TDA, Onchain) Phase 6 PR1 ikinci turda bu blokun altına
+        # aynı patternde eklenecek. Tümü kendi flagleri default-OFF olacak.
+
     async def _confluence_publisher_loop(self) -> None:
         """Aktif watchlist için periyodik confluence score publish."""
         if not self.confluence_engine:
