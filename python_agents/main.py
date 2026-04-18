@@ -4390,6 +4390,253 @@ class AgentOrchestrator:
         app.router.add_get("/api/storage/summaries", get_history_summaries)
         app.router.add_get("/api/storage/scan", scan_storage)
 
+        # ─── Mission Control endpoints (additive, read-only) ───
+        async def _refresh_mission_control_externals():
+            """Best-effort push of DB / safety-net / lockdown facts into the
+            aggregator's external signal cache. Never raises."""
+            try:
+                from mission_control_aggregator import (
+                    set_vital_sign,
+                    set_supervisor_heartbeat,
+                )
+            except Exception:
+                return
+            try:
+                if getattr(self, "db", None) is not None:
+                    try:
+                        summary = await self.db.get_dashboard_summary()
+                        if isinstance(summary, dict):
+                            active = summary.get("active_signals")
+                            if active is None:
+                                active = summary.get("signals_active")
+                            if active is not None:
+                                set_vital_sign("active_signals", int(active))
+                            pnl24 = summary.get("ghost_pnl_24h_pct") or summary.get("pnl_24h_pct")
+                            if isinstance(pnl24, (int, float)):
+                                set_vital_sign("ghost_pnl_24h_pct", float(pnl24))
+                            ws_up = summary.get("ws_uptime_pct_24h") or summary.get("ws_uptime_24h")
+                            if isinstance(ws_up, (int, float)):
+                                set_vital_sign("ws_uptime_pct_24h", float(ws_up))
+                    except Exception as e:
+                        logger.debug("mission_control: db summary skip: %s", e)
+            except Exception:
+                pass
+            try:
+                sn = getattr(self, "safety_net", None)
+                if sn is not None:
+                    state = "ok"
+                    if hasattr(sn, "status"):
+                        try:
+                            st = sn.status() if callable(sn.status) else sn.status
+                            if isinstance(st, dict):
+                                if st.get("tripped"):
+                                    state = "tripped"
+                                elif st.get("warning") or st.get("degraded"):
+                                    state = "warning"
+                        except Exception:
+                            pass
+                    set_vital_sign("safety_net_state", state)
+            except Exception:
+                pass
+            try:
+                sup = getattr(self, "runtime_supervisor", None)
+                if sup is not None and hasattr(sup, "status"):
+                    try:
+                        st = sup.status()
+                        ts = float(st.get("last_cycle_ts") or 0.0)
+                        if ts > 0:
+                            set_supervisor_heartbeat("runtime_supervisor", ts)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        async def get_mission_control_snapshot(request):
+            try:
+                from mission_control_aggregator import snapshot
+                await _refresh_mission_control_externals()
+                snap = snapshot(force=False)
+                return web.json_response(snap)
+            except Exception as e:
+                logger.error("mission-control snapshot error: %s", e)
+                return web.json_response({"error": str(e)}, status=500)
+
+        async def stream_mission_control(request):
+            """SSE stream: emits one snapshot per second until client disconnects."""
+            try:
+                from mission_control_aggregator import snapshot
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+            response = web.StreamResponse(
+                status=200,
+                reason="OK",
+                headers={
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+            await response.prepare(request)
+            import json as _json
+            try:
+                while True:
+                    try:
+                        await _refresh_mission_control_externals()
+                        snap = snapshot(force=True)
+                        payload = _json.dumps(snap, default=str, separators=(",", ":"))
+                        await response.write(f"data: {payload}\n\n".encode("utf-8"))
+                    except Exception as e:
+                        logger.debug("mission-control SSE frame err: %s", e)
+                        await response.write(
+                            f"event: error\ndata: {{\"error\": \"{e}\"}}\n\n".encode("utf-8")
+                        )
+                    await asyncio.sleep(1.0)
+            except (asyncio.CancelledError, ConnectionResetError):
+                pass
+            except Exception as e:
+                logger.debug("mission-control SSE loop err: %s", e)
+            return response
+
+        # Qwen autopsy cache: (module_id, int(time/60)) → bundle
+        _mc_autopsy_cache: Dict[tuple, Dict[str, Any]] = {}
+
+        async def get_mission_control_autopsy(request):
+            module_id = request.match_info.get("module_id", "")
+            try:
+                from mission_control_aggregator import autopsy_bundle
+                from module_registry import MODULE_REGISTRY
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+            if module_id not in MODULE_REGISTRY:
+                return web.json_response(
+                    {"error": f"unknown module: {module_id}"}, status=404
+                )
+
+            # Pull recent log lines for this module from the event_bus history
+            # (best-effort; no filesystem reads to avoid IO on dashboard polls).
+            log_tail: list = []
+            try:
+                bus = self.event_bus
+                hist = list(getattr(bus, "_history", []) or [])[-200:]
+                for e in reversed(hist):
+                    if str(e.get("source") or "") == module_id:
+                        log_tail.append(
+                            f"{e.get('timestamp'):.2f} {e.get('type')} {e.get('data_preview')}"
+                        )
+                        if len(log_tail) >= 50:
+                            break
+                log_tail.reverse()
+            except Exception:
+                log_tail = []
+
+            bundle = autopsy_bundle(module_id, log_tail=log_tail)
+
+            # Qwen diagnosis (cached 60s per module)
+            cache_key = (module_id, int(time.time() // 60))
+            cached = _mc_autopsy_cache.get(cache_key)
+            if cached is not None:
+                bundle["qwen_diagnosis"] = cached
+            else:
+                diagnosis = None
+                try:
+                    bridge = self.llm_bridge if hasattr(self, "llm_bridge") else None
+                    if bridge is not None:
+                        available = False
+                        try:
+                            available = bool(await bridge.is_available())
+                        except Exception:
+                            available = False
+                        if available:
+                            spec = MODULE_REGISTRY[module_id]
+                            metric_windows = bundle.get("timeline_5min", {})
+                            deps_summary = "\n".join(
+                                f"- {d['id']} ({d['impact_direction']}, {d['status']})"
+                                for d in bundle.get("dependencies_status", [])
+                            ) or "-"
+                            log_block = "\n".join(log_tail[-20:]) or "-"
+                            prompt = (
+                                f"Hücre: {spec.display_name} ({module_id})\n"
+                                f"Görevi: {spec.description}\n"
+                                f"Mevcut sağlık skoru: {bundle.get('current_health', 0)}/100\n"
+                                f"Durum: {bundle.get('status')}\n\n"
+                                f"Son 5 dakika metrikleri (kısa):\n"
+                                f"{metric_windows}\n\n"
+                                f"Son 20 log satırı:\n{log_block}\n\n"
+                                f"Bağlı hücreler:\n{deps_summary}\n\n"
+                                "Lütfen Türkçe yanıt ver:\n"
+                                "1. Özet (1-2 cümle)\n"
+                                "2. Muhtemel kök neden\n"
+                                "3. Bağlı hücreler etkisi\n"
+                                "4. Önerilen 2-3 aksiyon\n"
+                                "5. Aciliyet: düşük | orta | yüksek | kritik"
+                            )
+                            system_prompt = (
+                                "Sen QuenBot sistem tanı uzmanısın. "
+                                "Yalnızca verilen verilere dayanarak kısa, operatöre dönük Türkçe tanı yaz."
+                            )
+                            res = await bridge.call_llm(
+                                task="mission_control_autopsy",
+                                system=system_prompt,
+                                prompt=prompt,
+                                json_mode=False,
+                                temperature=0.2,
+                            )
+                            if isinstance(res, dict) and res.get("success") and res.get("text"):
+                                diagnosis = {
+                                    "summary_tr": str(res["text"]).strip(),
+                                    "suggested_actions_tr": [],
+                                    "confidence": 0.7,
+                                    "generated_at": time.time(),
+                                }
+                except Exception as e:
+                    logger.debug("mission-control qwen diagnosis skip: %s", e)
+                _mc_autopsy_cache[cache_key] = diagnosis
+                bundle["qwen_diagnosis"] = diagnosis
+                # Prune cache keep last 64 entries
+                if len(_mc_autopsy_cache) > 64:
+                    for k in list(_mc_autopsy_cache.keys())[:-64]:
+                        _mc_autopsy_cache.pop(k, None)
+
+            return web.json_response(bundle)
+
+        async def post_mission_control_restart(request):
+            module_id = request.match_info.get("module_id", "")
+            try:
+                from module_registry import MODULE_REGISTRY
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+            if module_id not in MODULE_REGISTRY:
+                return web.json_response(
+                    {"error": f"unknown module: {module_id}"}, status=404
+                )
+            # Optional admin gate.
+            required = os.environ.get("QUENBOT_ADMIN_TOKEN", "")
+            if required:
+                supplied = request.headers.get("X-Admin-Token") or request.query.get("token") or ""
+                if supplied != required:
+                    return web.json_response({"error": "unauthorized"}, status=401)
+            sup = getattr(self, "runtime_supervisor", None)
+            if sup is None or not hasattr(sup, "_restart_callback") or sup._restart_callback is None:
+                return web.json_response(
+                    {"ok": False, "error": "restart not available"}, status=503
+                )
+            try:
+                await sup._restart_callback(module_id)
+                return web.json_response({
+                    "ok": True,
+                    "module_id": module_id,
+                    "restarted_at": time.time(),
+                })
+            except Exception as e:
+                logger.error("mission-control restart fail %s: %s", module_id, e)
+                return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+        app.router.add_get("/api/mission-control/snapshot", get_mission_control_snapshot)
+        app.router.add_get("/api/mission-control/stream", stream_mission_control)
+        app.router.add_get("/api/mission-control/autopsy/{module_id}", get_mission_control_autopsy)
+        app.router.add_post("/api/mission-control/restart/{module_id}", post_mission_control_restart)
+
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", 3002)
