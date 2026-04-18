@@ -284,3 +284,21 @@ export function useOracleBrainHealth() {
     refreshInterval: 10000,
   });
 }
+
+export interface RuntimeStatusResponse {
+  enabled: boolean;
+  status?: {
+    running: boolean;
+    last_cycle_ts: number;
+    components: string[];
+    stats: Record<string, number>;
+    restart_counts: Record<string, number>;
+  };
+  metrics?: Record<string, number>;
+}
+
+export function useRuntimeStatus() {
+  return useSWR<RuntimeStatusResponse>(
+    `${API}/api/runtime/status`, fetcher, { refreshInterval: 10000 }
+  );
+}

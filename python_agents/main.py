@@ -1241,6 +1241,35 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.warning("QwenOracleBrain bootstrap başarısız: %s", e)
 
+        # §12 Runtime Supervisor (default OFF). Health aggregator + heartbeat
+        # dosyası yazar; dış watchdog.sh'a tüketiciliğini verir.
+        self.runtime_supervisor = None
+        if getattr(Config, "RUNTIME_SUPERVISOR_ENABLED", False):
+            try:
+                from runtime_supervisor import get_runtime_supervisor
+                sup = get_runtime_supervisor(
+                    status_path=Config.RUNTIME_STATUS_PATH,
+                    heartbeat_path=Config.WATCHDOG_HEARTBEAT_PATH if getattr(Config, "WATCHDOG_ENABLED", False) else None,
+                    interval_sec=Config.RUNTIME_HEALTH_CHECK_INTERVAL_SEC,
+                    max_restart_attempts=Config.RUNTIME_MAX_RESTART_ATTEMPTS,
+                )
+                # Register all major components (lambda ensures late-binding)
+                sup.register("feature_store", lambda: getattr(self, "feature_store", None))
+                sup.register("confluence", lambda: getattr(self, "confluence_engine", None))
+                sup.register("decision_router", lambda: getattr(self, "decision_router", None))
+                sup.register("safety_net", lambda: getattr(self, "safety_net", None))
+                sup.register("oracle_signal_bus", lambda: getattr(self, "oracle_signal_bus", None))
+                sup.register("factor_graph", lambda: getattr(self, "factor_graph", None))
+                sup.register("oracle_brain", lambda: getattr(self, "oracle_brain", None))
+                for name, det in list(getattr(self, "_oracle_detectors", []) or []):
+                    sup.register(f"detector_{name}", (lambda d=det: d))
+                await sup.start()
+                self.runtime_supervisor = sup
+                logger.info("🧭 RuntimeSupervisor online (interval=%ds)",
+                            Config.RUNTIME_HEALTH_CHECK_INTERVAL_SEC)
+            except Exception as e:
+                logger.warning("RuntimeSupervisor bootstrap başarısız: %s", e)
+
     async def _confluence_publisher_loop(self) -> None:
         """Aktif watchlist için periyodik confluence score publish."""
         if not self.confluence_engine:
@@ -3756,6 +3785,20 @@ class AgentOrchestrator:
             except Exception as e:
                 return web.json_response({"enabled": True, "error": str(e)}, status=500)
 
+        async def get_runtime_status(request):
+            """§12 Runtime Supervisor status."""
+            sup = getattr(self, "runtime_supervisor", None)
+            if sup is None:
+                return web.json_response({"enabled": False}, status=200)
+            try:
+                return web.json_response({
+                    "enabled": True,
+                    "status": sup.status(),
+                    "metrics": sup.metrics(),
+                })
+            except Exception as e:
+                return web.json_response({"enabled": True, "error": str(e)}, status=500)
+
         app.router.add_get("/api/confluence/{symbol}", get_confluence_symbol)
         app.router.add_get("/api/intel/summary", get_intel_summary)
         app.router.add_get("/api/oracle/summary", get_oracle_summary)
@@ -3766,6 +3809,7 @@ class AgentOrchestrator:
         app.router.add_get("/api/oracle/brain/directives", get_oracle_brain_directives)
         app.router.add_get("/api/oracle/brain/traces", get_oracle_brain_traces)
         app.router.add_get("/api/oracle/brain/health", get_oracle_brain_health)
+        app.router.add_get("/api/runtime/status", get_runtime_status)
 
         # ─── Intel Upgrade (Phase 2) endpoints ───
         async def get_cross_asset_graph(request):
@@ -4172,6 +4216,25 @@ class AgentOrchestrator:
 
 async def main(dry_run: bool = False, exit_after_seconds: Optional[int] = None):
     orchestrator = AgentOrchestrator()
+    # §12 Graceful shutdown: SIGINT/SIGTERM → orchestrator.running = False
+    try:
+        import signal as _signal
+        loop = asyncio.get_running_loop()
+        def _request_shutdown(sig_name: str):
+            try:
+                logger.warning("⚠️  %s received — graceful shutdown baslatiliyor...", sig_name)
+                orchestrator.running = False
+            except Exception:
+                pass
+        for _sig, _name in ((getattr(_signal, "SIGINT", None), "SIGINT"),
+                            (getattr(_signal, "SIGTERM", None), "SIGTERM")):
+            if _sig is not None:
+                try:
+                    loop.add_signal_handler(_sig, _request_shutdown, _name)
+                except (NotImplementedError, RuntimeError):
+                    pass
+    except Exception as e:
+        logger.debug("signal handler setup skip: %s", e)
     if dry_run:
         logger.warning("🧪 DRY-RUN mode: initialize only; no start / no network loops")
         try:

@@ -1,0 +1,29 @@
+[Unit]
+Description=Quenbot Python Agent Orchestrator (Phase 6 Oracle Stack)
+After=network-online.target postgresql.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/quenbot
+# Environment variables: flags default-OFF; operator enables per deployment.
+Environment="QUENBOT_ORACLE_BUS_ENABLED=1"
+# Optional Phase 6 flags (uncomment to enable in production):
+# Environment="QUENBOT_BOCPD_ENABLED=1"
+# Environment="QUENBOT_HAWKES_ENABLED=1"
+# Environment="QUENBOT_FACTOR_GRAPH_ENABLED=1"
+# Environment="QUENBOT_ORACLE_BRAIN_ENABLED=1"
+# Environment="QUENBOT_ORACLE_BRAIN_SHADOW=1"
+# Environment="QUENBOT_RUNTIME_SUPERVISOR_ENABLED=1"
+# Environment="QUENBOT_WATCHDOG_ENABLED=1"
+ExecStart=/opt/quenbot/.venv/bin/python -m python_agents.main
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+# Watchdog: require heartbeat; systemd kills service if missing.
+WatchdogSec=150
+
+[Install]
+WantedBy=multi-user.target

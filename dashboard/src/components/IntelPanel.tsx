@@ -14,6 +14,7 @@ import {
   useCrossAssetNeighbors, useConfluence, useOnlineLearning,
   useOracleSummary, useOracleChannels,
   useOracleFactorGraph, useOracleBrainDirectives, useOracleBrainTraces,
+  useRuntimeStatus,
 } from "@/lib/intel";
 import { useWatchlist } from "@/lib/api";
 import {
@@ -655,6 +656,7 @@ function OracleView({ symbol }: { symbol: string }) {
   const { data: fg } = useOracleFactorGraph(symbol);
   const { data: brain } = useOracleBrainDirectives();
   const { data: traces } = useOracleBrainTraces(10);
+  const { data: runtime } = useRuntimeStatus();
 
   if (sumErr) return <EmptyState title="Oracle API erişilemiyor" description={String(sumErr)} icon={<AlertCircle />} />;
   if (!summary) return <EmptyState title="Yükleniyor..." icon={<Cpu className="animate-pulse" />} />;
@@ -698,6 +700,33 @@ function OracleView({ symbol }: { symbol: string }) {
         <Stat label="Kanal" value={summary.channels.length} icon={<Network size={14} />} />
         <Stat label="Aktif" value={symbol} hint="okunan sembol" icon={<Target size={14} />} />
       </div>
+
+      {/* §12 Runtime supervisor mini-status */}
+      {runtime?.enabled && runtime.status && (
+        <Card className="p-2">
+          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <Badge variant={runtime.status.running ? "bull" as any : "warn" as any}>
+              Supervisor: {runtime.status.running ? "running" : "stopped"}
+            </Badge>
+            <Badge variant="outline">
+              components: {runtime.status.components.length}
+            </Badge>
+            <Badge variant="outline">
+              cycles: {runtime.status.stats?.cycles ?? 0}
+            </Badge>
+            <Badge variant="outline">
+              failures: {runtime.status.stats?.failures ?? 0}
+            </Badge>
+            <Badge variant="outline">
+              restarts: {runtime.status.stats?.restarts_requested ?? 0}
+            </Badge>
+            <span className="ml-auto text-[9px] text-gray-500">
+              last tick {runtime.status.last_cycle_ts ?
+                new Date(runtime.status.last_cycle_ts * 1000).toLocaleTimeString() : "—"}
+            </span>
+          </div>
+        </Card>
+      )}
 
       {/* Channels for current symbol */}
       <Card className="p-3">
