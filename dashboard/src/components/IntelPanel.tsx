@@ -13,6 +13,7 @@ import {
   useIntelSummary, useFastBrain, useDecisionRouter, useCrossAssetGraph,
   useCrossAssetNeighbors, useConfluence, useOnlineLearning,
   useOracleSummary, useOracleChannels,
+  useOracleFactorGraph, useOracleBrainDirectives, useOracleBrainTraces,
 } from "@/lib/intel";
 import { useWatchlist } from "@/lib/api";
 import {
@@ -651,6 +652,9 @@ function OnlineLearningView({ symbol }: { symbol: string }) {
 function OracleView({ symbol }: { symbol: string }) {
   const { data: summary, error: sumErr } = useOracleSummary();
   const { data: channels, error: chErr } = useOracleChannels(symbol);
+  const { data: fg } = useOracleFactorGraph(symbol);
+  const { data: brain } = useOracleBrainDirectives();
+  const { data: traces } = useOracleBrainTraces(10);
 
   if (sumErr) return <EmptyState title="Oracle API erişilemiyor" description={String(sumErr)} icon={<AlertCircle />} />;
   if (!summary) return <EmptyState title="Yükleniyor..." icon={<Cpu className="animate-pulse" />} />;
@@ -727,6 +731,108 @@ function OracleView({ symbol }: { symbol: string }) {
           })}
         </div>
       </Card>
+
+      {/* §10 Factor Graph — IFI gauge */}
+      {fg?.enabled && fg.snapshot && (
+        <Card className="p-3">
+          <CardTitle className="mb-2 flex items-center gap-2 text-[12px]">
+            <Network size={12} /> Factor Graph — IFI ({symbol})
+          </CardTitle>
+          <div className="grid grid-cols-3 gap-2">
+            <Stat
+              label="IFI"
+              value={(fg.snapshot.ifi ?? 0).toFixed(3)}
+              hint="Invisible Footprint Index"
+              tone={fg.snapshot.ifi >= 0.75 ? "bull" : fg.snapshot.ifi >= 0.5 ? "warn" : undefined}
+              icon={<Flame size={14} />}
+            />
+            <Stat
+              label="Yön"
+              value={(fg.snapshot.direction ?? 0).toFixed(2)}
+              hint="-1 short · +1 long"
+              tone={fg.snapshot.direction > 0.2 ? "bull" : fg.snapshot.direction < -0.2 ? "bear" : undefined}
+              icon={<Target size={14} />}
+            />
+            <Stat
+              label="Kanal"
+              value={Object.keys(fg.snapshot.channels || {}).length}
+              hint="fuse input"
+              icon={<Cpu size={14} />}
+            />
+          </div>
+          <div className="mt-2 h-2 overflow-hidden rounded bg-surface-border/40">
+            <div
+              className={cn("h-full transition-all",
+                fg.snapshot.ifi >= 0.75 ? "bg-bear/70" :
+                fg.snapshot.ifi >= 0.5 ? "bg-warn/70" : "bg-accent/60")}
+              style={{ width: `${Math.min(100, (fg.snapshot.ifi ?? 0) * 100)}%` }}
+            />
+          </div>
+        </Card>
+      )}
+
+      {/* §11 Oracle Brain — directives per symbol */}
+      {brain?.enabled && (
+        <Card className="p-3">
+          <CardTitle className="mb-2 flex items-center gap-2 text-[12px]">
+            <Sparkles size={12} /> Oracle Brain Direktifleri
+            {brain.shadow && <Badge variant="outline">shadow</Badge>}
+          </CardTitle>
+          {Object.keys(brain.directives ?? {}).length === 0 && (
+            <div className="text-[10px] text-gray-500">Henüz direktif üretilmedi.</div>
+          )}
+          <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
+            {Object.entries(brain.directives ?? {}).map(([sym, d]) => {
+              const sevVariant =
+                d.severity === "critical" ? "bear" :
+                d.severity === "high" ? "warn" :
+                d.severity === "medium" ? "warn" :
+                d.severity === "low" ? "outline" : "outline";
+              return (
+                <div key={sym} className="rounded-md border border-surface-border bg-surface-card/40 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-[11px] font-semibold">{sym}</div>
+                      <code className="truncate text-[9px] text-gray-500">{d.action}</code>
+                    </div>
+                    <Badge variant={sevVariant as any}>{d.severity}</Badge>
+                  </div>
+                  <div className="mt-1 text-[10px] text-gray-400">{d.rationale}</div>
+                  <div className="mt-1 flex flex-wrap gap-1 text-[9px] text-gray-500">
+                    <Badge variant="outline">conf: {(d.confidence ?? 0).toFixed(2)}</Badge>
+                    <Badge variant="outline">ttl: {d.ttl_sec}s</Badge>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+
+      {/* §11 Oracle Brain — recent traces */}
+      {brain?.enabled && (traces?.traces?.length ?? 0) > 0 && (
+        <Card className="p-3">
+          <CardTitle className="mb-2 flex items-center gap-2 text-[12px]">
+            <LineChartIcon size={12} /> Son Reasoning Trace'ler
+          </CardTitle>
+          <div className="flex flex-col gap-1">
+            {(traces?.traces ?? []).slice(-6).reverse().map((t) => (
+              <div key={t.trace_id} className="rounded-md border border-surface-border bg-surface-card/30 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <code className="text-[10px] text-gray-300">{t.symbol}</code>
+                  <span className="text-[9px] text-gray-500">
+                    {new Date(t.ts * 1000).toLocaleTimeString()}
+                  </span>
+                </div>
+                <div className="mt-1 text-[10px] text-gray-400">
+                  {t.directive?.action} · {t.directive?.severity}
+                  {t.shadow && <span className="ml-1 text-gray-600">· shadow</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {/* Detectors list */}
       <Card className="p-3">
