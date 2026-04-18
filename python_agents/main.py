@@ -1162,6 +1162,85 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.warning("CausalOnChainBridge bootstrap başarısız: %s", e)
 
+        # §10 Factor Graph Fusion — 12 kanal → IFI (default OFF)
+        self.factor_graph = None
+        if getattr(Config, "FACTOR_GRAPH_ENABLED", False):
+            try:
+                from factor_graph_fusion import get_factor_graph
+                fg = get_factor_graph(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    bp_iters=Config.FG_BP_ITER,
+                    damping=Config.FG_DAMPING,
+                    publish_hz=Config.FG_PUBLISH_HZ,
+                )
+                await fg.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(fg.ORACLE_CHANNEL_NAME, "factor_graph_fusion")
+                self.factor_graph = fg
+                # Publisher loop: her publish_hz aralığında aktif watchlist için fuse
+                async def _fg_loop():
+                    interval = 1.0 / max(0.001, float(Config.FG_PUBLISH_HZ))
+                    while True:
+                        try:
+                            symbols = list(getattr(Config, "WATCHLIST", []) or []) or list(Config.TRADING_PAIRS)
+                            for sym in symbols:
+                                try:
+                                    fg.maybe_publish(sym)
+                                except Exception as e:
+                                    logger.debug("fg publish %s skip: %s", sym, e)
+                            await asyncio.sleep(interval)
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as e:
+                            logger.debug("fg loop hiccup: %s", e)
+                            await asyncio.sleep(1.0)
+                asyncio.create_task(_fg_loop())
+                logger.info("🧭 FactorGraphFusion online (iters=%d, damping=%.2f, hz=%.2f)",
+                            Config.FG_BP_ITER, Config.FG_DAMPING, Config.FG_PUBLISH_HZ)
+            except Exception as e:
+                logger.warning("FactorGraphFusion bootstrap başarısız: %s", e)
+
+        # §11 Qwen Oracle Brain — merkezi orkestrasyon (default OFF, shadow)
+        self.oracle_brain = None
+        self.oracle_rag = None
+        if getattr(Config, "ORACLE_BRAIN_ENABLED", False):
+            try:
+                from qwen_oracle_rag import get_oracle_rag
+                from qwen_oracle_brain import get_oracle_brain
+                rag = get_oracle_rag(
+                    collection_name=Config.ORACLE_BRAIN_REASONING_CHROMA_COLLECTION,
+                    top_k=Config.ORACLE_BRAIN_RAG_TOP_K,
+                )
+                self.oracle_rag = rag
+                brain = get_oracle_brain(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    factor_graph=self.factor_graph,
+                    confluence_engine=getattr(self, "confluence_engine", None),
+                    llm_bridge=getattr(self, "agent_llm_bridge", None) or getattr(self, "llm_bridge", None),
+                    rag=rag,
+                    symbols=list(getattr(Config, "WATCHLIST", []) or []) or list(Config.TRADING_PAIRS),
+                    shadow=Config.ORACLE_BRAIN_SHADOW,
+                    learn_interval_sec=Config.ORACLE_BRAIN_LEARN_INTERVAL_MIN * 60.0,
+                    teach_interval_sec=Config.ORACLE_BRAIN_TEACH_INTERVAL_MIN * 60.0,
+                    daily_report_hour=Config.ORACLE_BRAIN_DAILY_REPORT_HOUR,
+                )
+                # safety_net bağla
+                try:
+                    brain._safety_net = getattr(self, "safety_net", None)
+                except Exception:
+                    pass
+                await brain.initialize()
+                await brain.start()
+                self.oracle_brain = brain
+                logger.info("🧭 QwenOracleBrain online (shadow=%s, symbols=%d)",
+                            Config.ORACLE_BRAIN_SHADOW, len(brain.symbols))
+            except Exception as e:
+                logger.warning("QwenOracleBrain bootstrap başarısız: %s", e)
+
     async def _confluence_publisher_loop(self) -> None:
         """Aktif watchlist için periyodik confluence score publish."""
         if not self.confluence_engine:
@@ -3545,6 +3624,32 @@ class AgentOrchestrator:
                     })
                 except Exception as e:
                     payload["detectors"].append({"name": name, "error": str(e)})
+            # §10 + §11 blocks
+            fg = getattr(self, "factor_graph", None)
+            if fg is not None:
+                try:
+                    payload["factor_graph"] = {
+                        "enabled": True,
+                        "health": await fg.health_check(),
+                        "metrics": fg.metrics(),
+                    }
+                except Exception as e:
+                    payload["factor_graph"] = {"enabled": True, "error": str(e)}
+            else:
+                payload["factor_graph"] = {"enabled": False}
+            brain = getattr(self, "oracle_brain", None)
+            if brain is not None:
+                try:
+                    payload["brain"] = {
+                        "enabled": True,
+                        "shadow": brain.shadow,
+                        "health": await brain.health_check(),
+                        "metrics": brain.metrics(),
+                    }
+                except Exception as e:
+                    payload["brain"] = {"enabled": True, "error": str(e)}
+            else:
+                payload["brain"] = {"enabled": False}
             return web.json_response(payload)
 
         async def get_oracle_channels_symbol(request):
@@ -3590,11 +3695,77 @@ class AgentOrchestrator:
                         return web.json_response({"name": name, "error": str(e)}, status=500)
             return web.json_response({"error": f"detector '{dname}' not found"}, status=404)
 
+        async def get_oracle_factor_graph(request):
+            """§10 FactorGraph: sembol IFI + per-channel marginals."""
+            symbol = (request.match_info.get("symbol") or "").upper()
+            fg = getattr(self, "factor_graph", None)
+            if fg is None:
+                return web.json_response({"enabled": False}, status=200)
+            if not symbol:
+                return web.json_response({"enabled": True, "all": fg.all_snapshots()})
+            snap = fg.snapshot(symbol)
+            if snap is None:
+                return web.json_response({"enabled": True, "symbol": symbol, "snapshot": None})
+            return web.json_response({"enabled": True, "symbol": symbol, "snapshot": snap})
+
+        async def get_oracle_brain_directives(request):
+            """§11 Brain: sembol bazlı son direktifler."""
+            brain = getattr(self, "oracle_brain", None)
+            if brain is None:
+                return web.json_response({"enabled": False, "directives": {}}, status=200)
+            try:
+                return web.json_response({
+                    "enabled": True,
+                    "shadow": brain.shadow,
+                    "directives": brain.all_last_directives(),
+                })
+            except Exception as e:
+                return web.json_response({"enabled": True, "error": str(e)}, status=500)
+
+        async def get_oracle_brain_traces(request):
+            """§11 Brain: son reasoning trace'leri."""
+            brain = getattr(self, "oracle_brain", None)
+            if brain is None:
+                return web.json_response({"enabled": False, "traces": []}, status=200)
+            try:
+                limit = int(request.query.get("limit", "50"))
+            except (TypeError, ValueError):
+                limit = 50
+            try:
+                return web.json_response({
+                    "enabled": True,
+                    "shadow": brain.shadow,
+                    "traces": brain.recent_traces(limit=limit),
+                })
+            except Exception as e:
+                return web.json_response({"enabled": True, "error": str(e)}, status=500)
+
+        async def get_oracle_brain_health(request):
+            """§11 Brain: health + metrics."""
+            brain = getattr(self, "oracle_brain", None)
+            if brain is None:
+                return web.json_response({"enabled": False}, status=200)
+            try:
+                h = await brain.health_check()
+                m = brain.metrics()
+                rag = getattr(self, "oracle_rag", None)
+                return web.json_response({
+                    "enabled": True, "health": h, "metrics": m,
+                    "rag": rag.stats() if rag is not None else None,
+                })
+            except Exception as e:
+                return web.json_response({"enabled": True, "error": str(e)}, status=500)
+
         app.router.add_get("/api/confluence/{symbol}", get_confluence_symbol)
         app.router.add_get("/api/intel/summary", get_intel_summary)
         app.router.add_get("/api/oracle/summary", get_oracle_summary)
         app.router.add_get("/api/oracle/channels/{symbol}", get_oracle_channels_symbol)
         app.router.add_get("/api/oracle/detector/{name}", get_oracle_detector_snapshot)
+        app.router.add_get("/api/oracle/factor-graph", get_oracle_factor_graph)
+        app.router.add_get("/api/oracle/factor-graph/{symbol}", get_oracle_factor_graph)
+        app.router.add_get("/api/oracle/brain/directives", get_oracle_brain_directives)
+        app.router.add_get("/api/oracle/brain/traces", get_oracle_brain_traces)
+        app.router.add_get("/api/oracle/brain/health", get_oracle_brain_health)
 
         # ─── Intel Upgrade (Phase 2) endpoints ───
         async def get_cross_asset_graph(request):

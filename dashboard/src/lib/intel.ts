@@ -202,3 +202,85 @@ export function useOracleChannels(symbol: string | null) {
     { refreshInterval: 5000 }
   );
 }
+
+/* ───── PR2: Factor Graph + Oracle Brain ───── */
+
+export interface FactorGraphSnapshot {
+  symbol: string;
+  ts: number;
+  ifi: number;
+  direction: number;
+  channels: Record<string, number>;
+  marginals: Record<string, number>;
+  weights: Record<string, number>;
+}
+
+export interface FactorGraphResponse {
+  enabled: boolean;
+  symbol?: string;
+  snapshot?: FactorGraphSnapshot | null;
+  all?: Record<string, FactorGraphSnapshot | null>;
+}
+
+export interface OracleBrainDirective {
+  directive_id: string;
+  ts: number;
+  symbol: string;
+  action: string;
+  severity: "info" | "low" | "medium" | "high" | "critical";
+  confidence: number;
+  rationale: string;
+  params: Record<string, any>;
+  ttl_sec: number;
+  source: string;
+  shadow: boolean;
+}
+
+export interface BrainDirectivesResponse {
+  enabled: boolean;
+  shadow?: boolean;
+  directives?: Record<string, OracleBrainDirective>;
+}
+
+export interface BrainTracesResponse {
+  enabled: boolean;
+  shadow?: boolean;
+  traces?: Array<{
+    trace_id: string;
+    ts: number;
+    symbol: string;
+    observation?: any;
+    directive?: OracleBrainDirective;
+    prompt?: string;
+    response?: string;
+    shadow: boolean;
+  }>;
+}
+
+export function useOracleFactorGraph(symbol: string | null) {
+  return useSWR<FactorGraphResponse>(
+    symbol ? `${API}/api/oracle/factor-graph/${encodeURIComponent(symbol)}` : null,
+    fetcher,
+    { refreshInterval: 5000 }
+  );
+}
+
+export function useOracleBrainDirectives() {
+  return useSWR<BrainDirectivesResponse>(
+    `${API}/api/oracle/brain/directives`, fetcher,
+    { refreshInterval: 5000 }
+  );
+}
+
+export function useOracleBrainTraces(limit: number = 20) {
+  return useSWR<BrainTracesResponse>(
+    `${API}/api/oracle/brain/traces?limit=${limit}`, fetcher,
+    { refreshInterval: 7000 }
+  );
+}
+
+export function useOracleBrainHealth() {
+  return useSWR<any>(`${API}/api/oracle/brain/health`, fetcher, {
+    refreshInterval: 10000,
+  });
+}
