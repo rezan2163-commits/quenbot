@@ -1404,7 +1404,7 @@ app.get("/api/signals/outcomes", async (_req, res) => {
              ) AS resolved_at
       FROM signals s
       LEFT JOIN LATERAL (
-        SELECT pnl_pct, exit_time FROM simulations
+        SELECT pnl_pct, exit_time, exit_price FROM simulations
         WHERE signal_id = s.id AND status = 'closed'
         ORDER BY exit_time DESC NULLS LAST LIMIT 1
       ) sim ON TRUE
