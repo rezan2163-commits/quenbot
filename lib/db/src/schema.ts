@@ -116,5 +116,11 @@ export const counterfactualObservations = pgTable("counterfactual_observations",
   decisionPath:   varchar("decision_path",   { length: 16 }),
   realizedPnlPct: doublePrecision("realized_pnl_pct"),
   attribution:    jsonb("attribution"),
+  // Aşama 1 — Historical Warmup additive columns (migration 003).
+  // `historical_impact_simulation` holds per-row synthetic Qwen decision
+  // back-test; `warmup_generated` flags rows produced by the bootstrap so
+  // live counterfactual stats can filter them out.
+  historicalImpactSimulation: jsonb("historical_impact_simulation"),
+  warmupGenerated: boolean("warmup_generated").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

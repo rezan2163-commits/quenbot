@@ -239,6 +239,21 @@ class QwenOracleBrain:
         obs = self._collect_observation(symbol)
         self._stats.observations += 1
         directive = self._heuristic_directive(obs)
+
+        # ── Aşama 1: Gatekeeper (flag-gated, additive) ──
+        # We always keep the directive in the internal log/trace so the
+        # dashboard retains full shadow visibility, but when the
+        # gatekeeper rejects we DO NOT publish ORACLE_DIRECTIVE_ISSUED —
+        # rejected decisions are surfaced via DIRECTIVE_REJECTED instead.
+        gate_accepted = True
+        try:
+            from directive_gatekeeper import get_directive_gatekeeper
+            gk = get_directive_gatekeeper(event_bus=self.event_bus)
+            decision = gk.evaluate(directive)
+            gate_accepted = bool(decision.accepted)
+        except Exception as e:
+            logger.debug("gatekeeper skipped: %s", e)
+
         self._directive_log.append(directive)
         self._last_directive_by_symbol[symbol] = directive
         self._stats.directives_emitted += 1
@@ -254,8 +269,8 @@ class QwenOracleBrain:
                 self.rag.add_trace(trace)
             except Exception as e:
                 logger.debug("Brain rag add fail: %s", e)
-        # Emit event (shadow marker)
-        if self.event_bus is not None:
+        # Emit event (shadow marker) — skipped when gatekeeper rejects.
+        if self.event_bus is not None and gate_accepted:
             try:
                 from event_bus import EventType, Event
                 await self.event_bus.publish(

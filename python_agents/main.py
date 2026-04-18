@@ -2402,6 +2402,10 @@ class AgentOrchestrator:
                     self.db.update_heartbeat('orchestrator_feedback', 'running', {
                         'role': 'simulation_feedback_receiver',
                     }),
+                    self.db.update_heartbeat('event_bus', 'running', {
+                        **self.event_bus.get_stats(),
+                        'role': 'central_event_dispatcher',
+                    }),
                 )
 
                 # ─── Enhanced intelligence heartbeats (microstructure, HMM, fingerprint, bandit) ───
@@ -3810,6 +3814,81 @@ class AgentOrchestrator:
         app.router.add_get("/api/oracle/brain/traces", get_oracle_brain_traces)
         app.router.add_get("/api/oracle/brain/health", get_oracle_brain_health)
         app.router.add_get("/api/runtime/status", get_runtime_status)
+
+        # ─── Aşama 1 — Gatekeeper + AutoRollback + Warmup endpoints ───
+        async def get_gatekeeper_stats(request):
+            try:
+                from directive_gatekeeper import get_directive_gatekeeper
+                gk = get_directive_gatekeeper()
+                data = gk.stats()
+                data["recent_rejections"] = gk.load_recent_rejections(limit=10)
+                return web.json_response({"enabled": True, **data})
+            except Exception as e:
+                return web.json_response({"enabled": False, "error": str(e)}, status=200)
+
+        async def get_autorollback_status(request):
+            try:
+                from auto_rollback_monitor import get_auto_rollback_monitor
+                mon = get_auto_rollback_monitor()
+                return web.json_response(mon.status())
+            except Exception as e:
+                return web.json_response({"enabled": False, "error": str(e)}, status=200)
+
+        async def post_autorollback_force(request):
+            try:
+                from auto_rollback_monitor import get_auto_rollback_monitor
+                mon = get_auto_rollback_monitor()
+                try:
+                    body = await request.json()
+                except Exception:
+                    body = {}
+                reason = str(body.get("reason") or "operator force")[:240]
+                state = mon.force_rollback(reason=reason)
+                return web.json_response({
+                    "ok": True, "state": {
+                        "rolled_back": state.rolled_back, "trigger": state.trigger,
+                        "reason": state.reason, "ts": state.ts,
+                    },
+                })
+            except Exception as e:
+                return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+        async def get_warmup_report(request):
+            """Return the most recent warmup report summary (md tail + checkpoint)."""
+            try:
+                from config import Config
+                from pathlib import Path as _P
+                import json as _json, os as _os
+                checkpoint_path = _P(Config.WARMUP_CHECKPOINT_PATH)
+                report_dir = _P(Config.WARMUP_REPORT_DIR)
+                payload: Dict[str, Any] = {"enabled": True}
+                if checkpoint_path.exists():
+                    try:
+                        payload["checkpoint"] = _json.loads(checkpoint_path.read_text(encoding="utf-8") or "{}")
+                    except Exception:
+                        payload["checkpoint"] = None
+                latest = None
+                if report_dir.exists():
+                    reports = sorted(report_dir.glob("warmup_report_*.md"))
+                    if reports:
+                        latest = reports[-1]
+                        payload["latest_report_path"] = str(latest)
+                        try:
+                            payload["latest_report_excerpt"] = latest.read_text(encoding="utf-8")[:6000]
+                        except Exception:
+                            payload["latest_report_excerpt"] = None
+                trust_path = _P(Config.WARMUP_TRUST_SCORES_PATH)
+                payload["trust_file_exists"] = trust_path.exists()
+                baseline_path = _P(Config.SAFETY_NET_BASELINE_PATH)
+                payload["baseline_file_exists"] = baseline_path.exists()
+                return web.json_response(payload)
+            except Exception as e:
+                return web.json_response({"enabled": False, "error": str(e)}, status=200)
+
+        app.router.add_get("/api/oracle/gatekeeper/stats", get_gatekeeper_stats)
+        app.router.add_get("/api/oracle/autorollback/status", get_autorollback_status)
+        app.router.add_post("/api/oracle/autorollback/force", post_autorollback_force)
+        app.router.add_get("/api/oracle/warmup/report", get_warmup_report)
 
         # ─── Intel Upgrade (Phase 2) endpoints ───
         async def get_cross_asset_graph(request):
