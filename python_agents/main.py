@@ -1035,9 +1035,132 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.warning("BOCPDDetector bootstrap başarısız: %s", e)
 
-        # NOTE: §2-§8 dedektörleri (Hawkes, LOB Thermo, Wasserstein, Path Sig,
-        # Mirror Flow, TDA, Onchain) Phase 6 PR1 ikinci turda bu blokun altına
-        # aynı patternde eklenecek. Tümü kendi flagleri default-OFF olacak.
+        # §2 Hawkes Kernel Fitter (default OFF)
+        if getattr(Config, "HAWKES_ENABLED", False):
+            try:
+                from hawkes_kernel_fitter import get_hawkes_fitter
+                det = get_hawkes_fitter(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    publish_hz=Config.HAWKES_PUBLISH_HZ,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "hawkes_kernel_fitter")
+                self._oracle_detectors.append(("hawkes", det))
+                logger.info("🧭 Hawkes detector online")
+            except Exception as e:
+                logger.warning("HawkesKernelFitter bootstrap başarısız: %s", e)
+
+        # §3 LOB Thermodynamics (default OFF)
+        if getattr(Config, "LOB_THERMO_ENABLED", False):
+            try:
+                from lob_thermodynamics import get_lob_thermodynamics
+                det = get_lob_thermodynamics(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    publish_hz=Config.LOB_THERMO_PUBLISH_HZ,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "lob_thermodynamics")
+                self._oracle_detectors.append(("lob_thermo", det))
+                logger.info("🧭 LOB Thermodynamics detector online")
+            except Exception as e:
+                logger.warning("LOBThermodynamics bootstrap başarısız: %s", e)
+
+        # §4 Wasserstein Drift (default OFF)
+        if getattr(Config, "WASSERSTEIN_ENABLED", False):
+            try:
+                from wasserstein_drift import get_wasserstein_drift
+                det = get_wasserstein_drift(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    publish_hz=Config.WASSERSTEIN_PUBLISH_HZ,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "wasserstein_drift")
+                self._oracle_detectors.append(("wasserstein", det))
+                logger.info("🧭 Wasserstein detector online")
+            except Exception as e:
+                logger.warning("WassersteinDrift bootstrap başarısız: %s", e)
+
+        # §5 Path Signature Engine (default OFF)
+        if getattr(Config, "PATH_SIGNATURE_ENABLED", False):
+            try:
+                from path_signature_engine import get_path_signature
+                det = get_path_signature(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    publish_hz=Config.PATH_SIG_PUBLISH_HZ,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "path_signature_engine")
+                self._oracle_detectors.append(("path_signature", det))
+                logger.info("🧭 Path Signature detector online")
+            except Exception as e:
+                logger.warning("PathSignatureEngine bootstrap başarısız: %s", e)
+
+        # §6 Mirror Flow Analyzer (default OFF)
+        if getattr(Config, "MIRROR_FLOW_ENABLED", False):
+            try:
+                from mirror_flow_analyzer import get_mirror_flow
+                det = get_mirror_flow(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "mirror_flow_analyzer")
+                self._oracle_detectors.append(("mirror_flow", det))
+                logger.info("🧭 Mirror Flow detector online")
+            except Exception as e:
+                logger.warning("MirrorFlowAnalyzer bootstrap başarısız: %s", e)
+
+        # §7 Topological LOB (default OFF)
+        if getattr(Config, "TDA_ENABLED", False):
+            try:
+                from topological_lob_analyzer import get_topology
+                det = get_topology(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "topological_lob_analyzer")
+                self._oracle_detectors.append(("topology", det))
+                logger.info("🧭 Topological LOB detector online")
+            except Exception as e:
+                logger.warning("TopologicalLOBAnalyzer bootstrap başarısız: %s", e)
+
+        # §8 Causal On-Chain Bridge (default OFF)
+        if getattr(Config, "ONCHAIN_ENABLED", False):
+            try:
+                from onchain_client import get_onchain_client
+                from causal_onchain_bridge import get_causal_onchain
+                oc = get_onchain_client()
+                await oc.start()
+                det = get_causal_onchain(
+                    event_bus=self.event_bus,
+                    feature_store=self.feature_store,
+                    signal_bus=self.oracle_signal_bus,
+                    onchain_client=oc,
+                )
+                await det.initialize()
+                if self.oracle_signal_bus is not None:
+                    self.oracle_signal_bus.register_channel(det.ORACLE_CHANNEL_NAME, "causal_onchain_bridge")
+                self._oracle_detectors.append(("ccm", det))
+                logger.info("🧭 Causal On-Chain detector online")
+            except Exception as e:
+                logger.warning("CausalOnChainBridge bootstrap başarısız: %s", e)
 
     async def _confluence_publisher_loop(self) -> None:
         """Aktif watchlist için periyodik confluence score publish."""
