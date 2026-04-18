@@ -134,6 +134,7 @@ function OverviewView({ onNavigate }: { onNavigate: (k: PhaseKey) => void }) {
 
   const enabled = modules.filter(m => m.data?.enabled).length;
   const healthy = modules.filter(m => m.data?.enabled && m.data?.health?.healthy !== false).length;
+  const dormant = enabled - healthy;
 
   return (
     <div className="flex flex-col gap-3">
@@ -141,8 +142,10 @@ function OverviewView({ onNavigate }: { onNavigate: (k: PhaseKey) => void }) {
       <div className="grid grid-cols-2 gap-2">
         <Stat label="Aktif Modül" value={`${enabled}/${modules.length}`}
               icon={<Activity size={14} />} tone={enabled >= 4 ? "bull" : "warn"} />
-        <Stat label="Sağlıklı" value={`${healthy}/${enabled || 1}`}
-              icon={<CheckCircle2 size={14} />} tone="bull" />
+        <Stat label={dormant > 0 ? `Sağlıklı (${dormant} dormant)` : "Sağlıklı"}
+              value={`${healthy}/${enabled || 1}`}
+              icon={<CheckCircle2 size={14} />}
+              tone={dormant === 0 ? "bull" : "warn"} />
         <Stat label="Faz" value="1→5" hint="Tüm fazlar deploy edildi"
               icon={<Flame size={14} />} tone="bull" />
         <Stat label="Shadow Log"
@@ -463,10 +466,39 @@ function ConfluenceView({ symbol }: { symbol: string }) {
   const { data } = useConfluence(symbol);
   if (!data) return <EmptyState title="Yükleniyor..." />;
 
-  const contribs = (data.top_contributors as Array<[string, number]>) ||
-                   (data.contributors ? Object.entries(data.contributors) as Array<[string, number]> : []);
-  const sorted = contribs.slice().sort((a, b) => Math.abs((b[1] as number)) - Math.abs((a[1] as number)));
-  const maxAbs = Math.max(0.01, ...sorted.map(([, v]) => Math.abs(v as number)));
+  // Backend `top_contributors` Contribution dict listesi gönderir:
+  //   [{feature, z, weight, log_odds}, ...]
+  // Eski fallback'ler `contributors` (obje) veya tuple listesi olabilir.
+  // Her iki şekli de normalize ederek patlamayı önle.
+  const raw = data.top_contributors ?? data.contributors ?? [];
+  const normalized: Array<[string, number]> = [];
+  try {
+    if (Array.isArray(raw)) {
+      for (const item of raw) {
+        if (Array.isArray(item) && item.length >= 2) {
+          // tuple: [name, value]
+          normalized.push([String(item[0]), Number(item[1]) || 0]);
+        } else if (item && typeof item === "object") {
+          // Contribution dict
+          const obj = item as Record<string, unknown>;
+          const name = String(obj.feature ?? obj.name ?? obj.symbol ?? "");
+          const val = Number(
+            obj.log_odds ?? obj.contribution ?? obj.value ?? obj.weight ?? 0,
+          );
+          if (name) normalized.push([name, Number.isFinite(val) ? val : 0]);
+        }
+      }
+    } else if (raw && typeof raw === "object") {
+      // {feature_name: value}
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        normalized.push([String(k), Number(v) || 0]);
+      }
+    }
+  } catch {
+    // normalize başarısız — boş gösterim
+  }
+  const sorted = normalized.slice().sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+  const maxAbs = Math.max(0.01, ...sorted.map(([, v]) => Math.abs(v)));
   const score = Number(data.confluence_score ?? 0);
 
   return (
@@ -498,7 +530,7 @@ function ConfluenceView({ symbol }: { symbol: string }) {
           ) : (
             <div className="flex flex-col gap-2">
               {sorted.slice(0, 12).map(([name, val]) => {
-                const n = Number(val);
+                const n = Number(val) || 0;
                 return (
                   <HBar key={name} label={name} value={Math.abs(n)} max={maxAbs}
                         tone={n >= 0 ? "bull" : "bear"}
@@ -515,6 +547,7 @@ function ConfluenceView({ symbol }: { symbol: string }) {
 
 function OnlineLearningView({ symbol }: { symbol: string }) {
   const { data } = useOnlineLearning(symbol);
+  const { data: summary } = useIntelSummary();
   if (!data) return <EmptyState title="Yükleniyor..." />;
   if (!data.enabled) {
     return (
@@ -534,8 +567,17 @@ function OnlineLearningView({ symbol }: { symbol: string }) {
   }
   const r = data.rolling;
   if (!r || r.samples === 0) {
+    // Gerçek kök sebebini tespit et: FastBrain dormant mı? Router log boş mu?
+    const fbDormant = summary?.fast_brain?.health?.model_loaded === false
+                   || summary?.fast_brain?.health?.message?.toString().toLowerCase().includes("dormant");
+    const routerLogRows = Number(summary?.decision_router?.health?.log_rows ?? 0);
+    const reason = fbDormant
+      ? "FastBrain modeli henüz yüklenmedi (dormant). Router karar üretmiyor → evaluator örnek bulamıyor."
+      : routerLogRows === 0
+        ? "Decision Router shadow log'u boş. Router ilk kararını üretince değerlendirme başlar."
+        : "Horizon süresi (60dk) henüz dolmadı. Olgun kararlar otomatik skorlanır.";
     return <EmptyState title="Henüz değerlendirilmiş örnek yok"
-                       description="Horizon süresi (60dk) geçmiş kararlar otomatik skorlanır" />;
+                       description={reason} />;
   }
 
   const fastHit = r.fast_brain?.directional_hit_rate ?? null;
