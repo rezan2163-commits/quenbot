@@ -3890,6 +3890,55 @@ class AgentOrchestrator:
         app.router.add_post("/api/oracle/autorollback/force", post_autorollback_force)
         app.router.add_get("/api/oracle/warmup/report", get_warmup_report)
 
+        # ─── Aşama 2 — Directive Impact endpoints ───
+        async def get_impact_recent(request):
+            try:
+                from directive_impact_tracker import get_directive_impact_tracker
+                tracker = get_directive_impact_tracker()
+                limit = int(request.rel_url.query.get("limit", "50"))
+                return web.json_response({"items": tracker.recent(n=limit)})
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=200)
+
+        async def get_impact_by_type(request):
+            try:
+                from directive_impact_tracker import get_directive_impact_tracker
+                tracker = get_directive_impact_tracker()
+                return web.json_response({"by_type": tracker.aggregate_by_type()})
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=200)
+
+        async def get_impact_synthetic_vs_live(request):
+            try:
+                from directive_impact_tracker import get_directive_impact_tracker
+                tracker = get_directive_impact_tracker()
+                by_type = tracker.aggregate_by_type()
+                rows = [
+                    {
+                        "directive_type": t,
+                        "live_mean": v["live_mean"],
+                        "live_count": v["live_count"],
+                        "synthetic_mean": v["synthetic_mean"],
+                        "synthetic_count": v["synthetic_count"],
+                        "delta": v["live_mean"] - v["synthetic_mean"],
+                    }
+                    for t, v in by_type.items()
+                ]
+                return web.json_response({
+                    "rows": rows,
+                    "summary": {
+                        "rolling_24h_live": tracker.rolling_mean_impact(24, synthetic=False),
+                        "rolling_24h_synthetic": tracker.rolling_mean_impact(24, synthetic=True),
+                        "synthetic_baseline": tracker.synthetic_baseline(),
+                    },
+                })
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=200)
+
+        app.router.add_get("/api/oracle/impact/recent", get_impact_recent)
+        app.router.add_get("/api/oracle/impact/by-type", get_impact_by_type)
+        app.router.add_get("/api/oracle/impact/synthetic-vs-live", get_impact_synthetic_vs_live)
+
         # ─── Intel Upgrade (Phase 2) endpoints ───
         async def get_cross_asset_graph(request):
             """Tüm cross-asset lead/lag grafiği (JSON)."""

@@ -2254,6 +2254,27 @@ app.get("/api/oracle/warmup/report", async (_req, res) => {
     res.status(r.status).json(await r.json());
   } catch { res.status(502).json({ enabled: false, error: "warmup report unavailable" }); }
 });
+
+// Aşama 2 — Directive Impact proxies
+app.get("/api/oracle/impact/recent", async (req, res) => {
+  try {
+    const q = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/impact/recent${q}`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ error: "impact unavailable" }); }
+});
+app.get("/api/oracle/impact/by-type", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/impact/by-type`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ error: "impact unavailable" }); }
+});
+app.get("/api/oracle/impact/synthetic-vs-live", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/impact/synthetic-vs-live`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ error: "impact unavailable" }); }
+});
 app.get("/api/runtime/status", async (_req, res) => {
   try {
     const r = await fetch(`${DIRECTIVE_API}/api/runtime/status`);

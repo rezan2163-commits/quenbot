@@ -124,3 +124,27 @@ export const counterfactualObservations = pgTable("counterfactual_observations",
   warmupGenerated: boolean("warmup_generated").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ─── Aşama 2 — Oracle Directives Impact Feedback (additive only) ───
+// Mirrors the oracle_directives table that is created in the Python
+// migrations under python_agents/migrations/002_oracle_tables.sql.
+// Migration 004 adds impact_score + measurement + synthetic tagging.
+export const oracleDirectives = pgTable("oracle_directives", {
+  directiveId: text("directive_id").primaryKey(),
+  ts: doublePrecision("ts").notNull(),
+  symbol: text("symbol").notNull(),
+  action: text("action").notNull(),
+  severity: text("severity").notNull(),
+  confidence: doublePrecision("confidence").default(0),
+  rationale: text("rationale"),
+  paramsJson: text("params_json"),
+  ttlSec: integer("ttl_sec").default(300),
+  source: text("source").default("qwen_oracle_brain"),
+  shadow: boolean("shadow").default(true),
+  // Aşama 2 — Impact Feedback Loop additive columns (migration 004).
+  impactScore: doublePrecision("impact_score"),
+  impactMeasuredAt: timestamp("impact_measured_at", { withTimezone: true }),
+  synthetic: boolean("synthetic").notNull().default(false),
+  sourceTag: varchar("source_tag", { length: 64 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});

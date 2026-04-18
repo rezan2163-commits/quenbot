@@ -50,10 +50,14 @@ TRIGGER_SAFETY_NET = "safety_net_trip"
 TRIGGER_META_CONF = "meta_confidence_streak"
 TRIGGER_UNHEALTHY = "runtime_unhealthy"
 TRIGGER_MANUAL = "operator_sentinel"
+# Aşama 2 — new triggers
+TRIGGER_CASCADE = "authority_cascade"
+TRIGGER_IMPACT_REGRESSION = "impact_regression"
 
 ALL_TRIGGERS = (
     TRIGGER_REJECTION, TRIGGER_ACCURACY, TRIGGER_SAFETY_NET,
     TRIGGER_META_CONF, TRIGGER_UNHEALTHY, TRIGGER_MANUAL,
+    TRIGGER_CASCADE, TRIGGER_IMPACT_REGRESSION,
 )
 
 
@@ -88,6 +92,12 @@ class AutoRollbackMonitor:
         shadow_forced_path: str = "python_agents/.oracle_shadow_forced.json",
         forensic_dir: str = "python_agents/.auto_rollback",
         check_interval_sec: int = 15,
+        # Aşama 2 — new triggers (flag-gated, additive).
+        cascade_detection: bool = False,
+        max_agent_override_pct: float = 0.30,
+        impact_tracker: Any = None,
+        impact_mean_min: float = -0.15,
+        impact_window_h: int = 24,
     ) -> None:
         self.enabled = bool(enabled)
         self._gatekeeper = gatekeeper
@@ -108,6 +118,13 @@ class AutoRollbackMonitor:
         self.shadow_forced_path = Path(shadow_forced_path)
         self.forensic_dir = Path(forensic_dir)
         self.check_interval_sec = max(1, int(check_interval_sec))
+
+        # Aşama 2 — cascade + impact regression
+        self.cascade_detection = bool(cascade_detection)
+        self.max_agent_override_pct = float(max_agent_override_pct)
+        self._impact_tracker = impact_tracker
+        self.impact_mean_min = float(impact_mean_min)
+        self.impact_window_h = int(impact_window_h)
 
         # Rolling telemetry.
         self._meta_conf_streak_count = 0
@@ -286,6 +303,40 @@ class AutoRollbackMonitor:
                     )
             else:
                 self._unhealthy_since = None
+
+        # Aşama 2 — 7. Authority cascade (Qwen-dominant decisions > N% in 1h)
+        if self.cascade_detection:
+            try:
+                brain = self._oracle_brain
+                pct = None
+                if brain is not None and hasattr(brain, "authority_override_pct_1h"):
+                    pct = float(brain.authority_override_pct_1h())
+                if pct is not None:
+                    metrics["authority_override_pct"] = pct
+                    if pct > self.max_agent_override_pct:
+                        return (
+                            TRIGGER_CASCADE,
+                            f"authority override pct {pct:.2f} > {self.max_agent_override_pct:.2f} in 1h",
+                            metrics,
+                        )
+            except Exception:
+                pass
+
+        # Aşama 2 — 8. Impact regression (rolling N-hour mean impact < threshold)
+        tracker = self._impact_tracker
+        if tracker is not None:
+            try:
+                mean_impact = tracker.rolling_mean_impact(hours=self.impact_window_h)
+                if mean_impact is not None:
+                    metrics["impact_mean"] = float(mean_impact)
+                    if float(mean_impact) < self.impact_mean_min:
+                        return (
+                            TRIGGER_IMPACT_REGRESSION,
+                            f"impact mean {mean_impact:.3f} < {self.impact_mean_min:.3f} over {self.impact_window_h}h",
+                            metrics,
+                        )
+            except Exception:
+                pass
 
         return (None, None, metrics)
 
@@ -519,6 +570,10 @@ def get_auto_rollback_monitor(**kwargs: Any) -> AutoRollbackMonitor:
                 "shadow_forced_path": Config.AUTO_ROLLBACK_SHADOW_FORCED_PATH,
                 "forensic_dir": Config.AUTO_ROLLBACK_FORENSIC_DIR,
                 "check_interval_sec": Config.AUTO_ROLLBACK_CHECK_INTERVAL_SEC,
+                "cascade_detection": getattr(Config, "AUTO_ROLLBACK_CASCADE_DETECTION", False),
+                "max_agent_override_pct": getattr(Config, "AUTO_ROLLBACK_MAX_AGENT_OVERRIDE_PCT", 0.30),
+                "impact_mean_min": getattr(Config, "AUTO_ROLLBACK_IMPACT_MEAN_MIN", -0.15),
+                "impact_window_h": getattr(Config, "AUTO_ROLLBACK_IMPACT_WINDOW_H", 24),
                 "config_obj": Config,
             }
         except Exception:
@@ -531,6 +586,10 @@ def get_auto_rollback_monitor(**kwargs: Any) -> AutoRollbackMonitor:
             v = kwargs.get(key)
             if v is not None and getattr(_instance, f"_{key}", None) is None:
                 setattr(_instance, f"_{key}", v)
+        # Impact tracker can be wired late too.
+        it = kwargs.get("impact_tracker")
+        if it is not None and getattr(_instance, "_impact_tracker", None) is None:
+            _instance._impact_tracker = it
     return _instance
 
 

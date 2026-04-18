@@ -279,6 +279,15 @@ class QwenOracleBrain:
                 )
             except Exception as e:
                 logger.debug("Brain event skip: %s", e)
+
+        # Aşama 2 — register live (accepted) directive for impact tracking.
+        if gate_accepted:
+            try:
+                from directive_impact_tracker import get_directive_impact_tracker
+                tracker = get_directive_impact_tracker(event_bus=self.event_bus)
+                await tracker.register_directive(directive)
+            except Exception as e:
+                logger.debug("Brain impact register skip: %s", e)
         if directive.severity in ("high", "critical") and not self.shadow:
             logger.warning("🧭 ORACLE DIRECTIVE [%s] %s %s: %s",
                            directive.severity.upper(), symbol, directive.action, directive.rationale)
@@ -315,8 +324,37 @@ class QwenOracleBrain:
             for d in recent:
                 summary["by_action"][d.action] = summary["by_action"].get(d.action, 0) + 1
                 summary["by_severity"][d.severity] = summary["by_severity"].get(d.severity, 0) + 1
+
+            # Aşama 2 — inject impact feedback (last N live + N synthetic).
+            impact_live: list = []
+            impact_syn: list = []
+            try:
+                from directive_impact_tracker import get_directive_impact_tracker
+                from config import Config
+                tracker = get_directive_impact_tracker()
+                n_live = int(getattr(Config, "ORACLE_PROMPT_IMPACT_LIVE_N", 20))
+                n_syn = int(getattr(Config, "ORACLE_PROMPT_IMPACT_SYNTHETIC_N", 20))
+                impact_live = tracker.recent(n=n_live, synthetic=False)
+                impact_syn = tracker.recent(n=n_syn, synthetic=True)
+            except Exception as _e:
+                logger.debug("brain prompt impact inject skip: %s", _e)
+
+            def _fmt_impacts(rows: list) -> str:
+                if not rows:
+                    return "(henüz veri yok)"
+                return "\n".join(
+                    f"- {r['directive_type']} {r['symbol']} impact={r['impact_score']:+.3f}"
+                    for r in rows
+                )
+
             prompt = (
                 "Oracle Brain son 30 dk özet:\n" + json.dumps(summary, ensure_ascii=False) +
+                "\n\nÖnceki direktiflerinin GERÇEK etkisi (son 20 canlı):\n" + _fmt_impacts(impact_live) +
+                "\n\nGeçmişten TAHMİNİ etki (son 20 tarihsel simülasyon):\n" + _fmt_impacts(impact_syn) +
+                "\n\nKural:\n"
+                "- Bir direktif tipinin live impact < 0 ise → O tipten KAÇIN.\n"
+                "- Synthetic impact güvenilir ama değişkenlik fazla → %60 ağırlık live'a, %40 synthetic'e ver.\n"
+                "- Doğrudan ters feedback'i olan direktif tipini tekrar denemeden önce conformal_lower > 0.6 beklemen gerekir.\n"
                 "\nKısa Türkçe bir değerlendirme yap (3-5 satır)."
             )
             self._stats.llm_calls += 1
@@ -365,6 +403,23 @@ class QwenOracleBrain:
 
     def recent_traces(self, limit: int = 50) -> List[Dict[str, Any]]:
         return [t.to_dict() for t in list(self._trace_log)[-int(limit):]]
+
+    def authority_override_pct_1h(self) -> float:
+        """Aşama 2 cascade guard — fraction of the last hour's directives
+        whose severity in {high, critical} AND shadow == False. Returns
+        a float ∈ [0, 1]. In shadow mode always returns 0 by design."""
+        try:
+            cutoff = time.time() - 3600.0
+            recent = [d for d in list(self._directive_log) if float(getattr(d, "ts", 0.0)) >= cutoff]
+            if not recent:
+                return 0.0
+            dominant = [
+                d for d in recent
+                if getattr(d, "severity", "") in ("high", "critical") and not self.shadow
+            ]
+            return len(dominant) / len(recent)
+        except Exception:
+            return 0.0
 
     def set_symbols(self, symbols: List[str]) -> None:
         self.symbols = list(symbols or [])
