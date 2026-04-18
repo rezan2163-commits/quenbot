@@ -236,6 +236,13 @@ class QwenOracleBrain:
     async def _tick_symbol(self, symbol: str) -> None:
         if self._safety_tripped():
             return
+        # Aşama 3 — emergency lockdown short-circuit (no observation, no directive).
+        try:
+            from emergency_lockdown import is_engaged as _emergency_engaged
+            if _emergency_engaged():
+                return
+        except Exception:
+            pass
         obs = self._collect_observation(symbol)
         self._stats.observations += 1
         directive = self._heuristic_directive(obs)
@@ -355,6 +362,7 @@ class QwenOracleBrain:
                 "- Bir direktif tipinin live impact < 0 ise → O tipten KAÇIN.\n"
                 "- Synthetic impact güvenilir ama değişkenlik fazla → %60 ağırlık live'a, %40 synthetic'e ver.\n"
                 "- Doğrudan ters feedback'i olan direktif tipini tekrar denemeden önce conformal_lower > 0.6 beklemen gerekir.\n"
+                + self._self_audit_prompt_block() +
                 "\nKısa Türkçe bir değerlendirme yap (3-5 satır)."
             )
             self._stats.llm_calls += 1
@@ -403,6 +411,27 @@ class QwenOracleBrain:
 
     def recent_traces(self, limit: int = 50) -> List[Dict[str, Any]]:
         return [t.to_dict() for t in list(self._trace_log)[-int(limit):]]
+
+    def _self_audit_prompt_block(self) -> str:
+        """Aşama 3 — read latest self-audit JSON sidecar and return a Turkish
+        prompt fragment, or an empty string if absent / stale."""
+        try:
+            from config import Config
+            import json as _json
+            from pathlib import Path
+            p = Path(getattr(Config, "QWEN_SELF_AUDIT_LATEST_PATH", "python_agents/.self_audit_latest.json"))
+            if not p.exists():
+                return ""
+            obj = _json.loads(p.read_text(encoding="utf-8"))
+            rate = obj.get("disagreement_rate")
+            if rate is None:
+                return ""
+            return (
+                f"\n- Son öz-denetim sonucun: %{float(rate)*100:.1f} direktifin geriye dönük reddedildi.\n"
+                f"- Bu yüksekse — mevcut kararlarında temkinli ol, eski hatalarını tekrar etme.\n"
+            )
+        except Exception:
+            return ""
 
     def authority_override_pct_1h(self) -> float:
         """Aşama 2 cascade guard — fraction of the last hour's directives

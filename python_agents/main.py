@@ -3939,6 +3939,66 @@ class AgentOrchestrator:
         app.router.add_get("/api/oracle/impact/by-type", get_impact_by_type)
         app.router.add_get("/api/oracle/impact/synthetic-vs-live", get_impact_synthetic_vs_live)
 
+        # ─── Aşama 3 — Free Roam endpoints ───
+        async def get_asama3_status(request):
+            try:
+                from weekly_ack_watchdog import get_weekly_ack_watchdog
+                from emergency_lockdown import get_emergency_lockdown
+                from config import Config
+                wd = get_weekly_ack_watchdog().status()
+                lock = get_emergency_lockdown().status()
+                # Latest self-audit
+                from pathlib import Path
+                import json as _json
+                sa_path = Path(getattr(Config, "QWEN_SELF_AUDIT_LATEST_PATH", "python_agents/.self_audit_latest.json"))
+                self_audit: dict = {}
+                if sa_path.exists():
+                    try:
+                        obj = _json.loads(sa_path.read_text(encoding="utf-8"))
+                        self_audit = {
+                            "month_label": obj.get("month_label"),
+                            "disagreement_rate": obj.get("disagreement_rate"),
+                            "sample_size": obj.get("sample_size"),
+                            "alert_emitted": obj.get("alert_emitted"),
+                            "threshold": obj.get("threshold"),
+                        }
+                    except Exception as _e:
+                        self_audit = {"error": str(_e)}
+                return web.json_response({
+                    "phase": "asama_3" if not wd.get("degraded") else "asama_2_degraded",
+                    "weekly_ack": wd,
+                    "emergency_lockdown": lock,
+                    "self_audit": self_audit,
+                    "config": {
+                        "max_directives_per_hour": getattr(Config, "ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR", None),
+                        "allowlist": list(getattr(Config, "ORACLE_BRAIN_DIRECTIVE_ALLOWLIST", []) or []),
+                        "blocklist_hard": list(getattr(Config, "ORACLE_BRAIN_DIRECTIVE_BLOCKLIST_HARD", []) or []),
+                    },
+                })
+            except Exception as e:
+                return web.json_response({"error": str(e), "phase": "unknown"}, status=200)
+
+        async def post_emergency_lockdown(request):
+            try:
+                from emergency_lockdown import get_emergency_lockdown
+                from config import Config
+                token_hdr = request.headers.get("X-Emergency-Token", "")
+                expected = getattr(Config, "EMERGENCY_TOKEN", "") or ""
+                if not expected:
+                    return web.json_response({"ok": False, "error": "EMERGENCY_TOKEN not configured"}, status=503)
+                if token_hdr != expected:
+                    return web.json_response({"ok": False, "error": "invalid token"}, status=401)
+                body = await request.json() if request.can_read_body else {}
+                reason = str(body.get("reason") or "manual halt")[:512]
+                lock = get_emergency_lockdown()
+                out = lock.engage(reason=reason, source="api", extra={"ip": request.remote})
+                return web.json_response({"ok": True, "state": out})
+            except Exception as e:
+                return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+        app.router.add_get("/api/oracle/asama3/status", get_asama3_status)
+        app.router.add_post("/api/oracle/emergency-lockdown", post_emergency_lockdown)
+
         # ─── Intel Upgrade (Phase 2) endpoints ───
         async def get_cross_asset_graph(request):
             """Tüm cross-asset lead/lag grafiği (JSON)."""

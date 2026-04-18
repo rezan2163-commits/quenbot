@@ -149,6 +149,17 @@ class EventType(str, Enum):
     DIRECTIVE_IMPACT_MEASURED = "directive.impact_measured"
     SAFETY_NET_DIRECTIVE_REGRESSION = "safety_net.directive_regression"
 
+    # ── Aşama 3 — Free Roam: weekly review, ack watchdog, lockdown, self-audit ──
+    EMERGENCY_LOCKDOWN = "system.emergency_lockdown"
+    EMERGENCY_LOCKDOWN_RELEASED = "system.emergency_lockdown_released"
+    WEEKLY_ACK_MISSING = "operator.weekly_ack_missing"
+    WEEKLY_ACK_RECEIVED = "operator.weekly_ack_received"
+    SYSTEM_AUTO_DEGRADED = "system.auto_degraded"
+    SYSTEM_AUTO_RESTORED = "system.auto_restored"
+    QWEN_MODEL_EVOLUTION_ALERT = "oracle.qwen_model_evolution_alert"
+    WEEKLY_REVIEW_GENERATED = "oracle.weekly_review_generated"
+    SELF_AUDIT_COMPLETED = "oracle.self_audit_completed"
+
 
 @dataclass
 class Event:

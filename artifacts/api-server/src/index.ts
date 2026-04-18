@@ -2275,6 +2275,25 @@ app.get("/api/oracle/impact/synthetic-vs-live", async (_req, res) => {
     res.status(r.status).json(await r.json());
   } catch { res.status(502).json({ error: "impact unavailable" }); }
 });
+
+// Aşama 3 — Free Roam proxies
+app.get("/api/oracle/asama3/status", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/asama3/status`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ error: "asama3 status unavailable" }); }
+});
+app.post("/api/oracle/emergency-lockdown", async (req, res) => {
+  try {
+    const token = req.headers["x-emergency-token"] || "";
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/emergency-lockdown`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Emergency-Token": String(token) },
+      body: JSON.stringify(req.body ?? {}),
+    });
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ ok: false, error: "lockdown unavailable" }); }
+});
 app.get("/api/runtime/status", async (_req, res) => {
   try {
     const r = await fetch(`${DIRECTIVE_API}/api/runtime/status`);

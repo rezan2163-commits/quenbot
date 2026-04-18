@@ -328,20 +328,21 @@ class Config:
     DIRECTIVE_GATEKEEPER_ENABLED = os.getenv("QUENBOT_DIRECTIVE_GATEKEEPER_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
     # Aşama 2 default: 0.65 (was 0.80 in Aşama 1). Operator can flip back via env.
     ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN = float(os.getenv("QUENBOT_ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN", "0.65"))
-    # Aşama 2 default: 10 (was 3).
-    ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR = int(os.getenv("QUENBOT_ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR", "10"))
+    # Aşama 3 default: 30 (was 10 in A2). Effectively natural pace, not a throttle.
+    ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR = int(os.getenv("QUENBOT_ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR", "30"))
     ORACLE_BRAIN_DIRECTIVE_ALLOWLIST = [
         s.strip() for s in os.getenv(
             "QUENBOT_ORACLE_BRAIN_DIRECTIVE_ALLOWLIST",
-            # Aşama 2 default: expanded from 3 to 6 types.
+            # Aşama 3 default: 6 A2 types + CHANGE_STRATEGY (Qwen reweights Strategist mix ±25% per cycle).
             "ADJUST_CONFIDENCE_THRESHOLD,ADJUST_POSITION_SIZE_MULT,PAUSE_SYMBOL,"
-            "RESUME_SYMBOL,CHANGE_STRATEGY_WEIGHT,ADJUST_TP_SL_RATIO",
+            "RESUME_SYMBOL,CHANGE_STRATEGY_WEIGHT,ADJUST_TP_SL_RATIO,CHANGE_STRATEGY",
         ).split(",") if s.strip()
     ]
     # Permanently blocked regardless of allowlist — cannot be overridden.
-    # Aşama 2 also permanently blocks DISABLE_SAFETY_NET.
+    # Aşama 3: CHANGE_STRATEGY removed (now allowed); OVERRIDE_VETO, FORCE_TRADE,
+    # DISABLE_SAFETY_NET remain permanently blocked.
     ORACLE_BRAIN_DIRECTIVE_BLOCKLIST_HARD = [
-        "CHANGE_STRATEGY", "OVERRIDE_VETO", "FORCE_TRADE", "DISABLE_SAFETY_NET",
+        "OVERRIDE_VETO", "FORCE_TRADE", "DISABLE_SAFETY_NET",
     ]
     DIRECTIVE_REJECTED_LOG_PATH = os.getenv("QUENBOT_DIRECTIVE_REJECTED_LOG", "python_agents/.directive_rejected.jsonl")
 
@@ -392,3 +393,35 @@ class Config:
     SAFETY_NET_IMPACT_REGRESSION_SIGMA = float(os.getenv("QUENBOT_SAFETY_NET_IMPACT_REGRESSION_SIGMA", "2.0"))
     SAFETY_NET_IMPACT_REGRESSION_DURATION_SEC = int(os.getenv("QUENBOT_SAFETY_NET_IMPACT_REGRESSION_DURATION_SEC", "10800"))  # 3h
     SAFETY_NET_IMPACT_BASELINE_PATH = os.getenv("QUENBOT_SAFETY_NET_IMPACT_BASELINE_PATH", "python_agents/.impact_baseline.json")
+
+    # ─────────────────────────────────────────────────────────────
+    # Aşama 3 — Free Roam: weekly review, ack watchdog, lockdown, self-audit.
+    # All additive; disabled state byte-identical to pre-Aşama-3.
+    # ─────────────────────────────────────────────────────────────
+    # Weekly strategic review
+    WEEKLY_REVIEW_ENABLED = os.getenv("QUENBOT_WEEKLY_REVIEW_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    WEEKLY_REVIEW_REPORT_DIR = os.getenv("QUENBOT_WEEKLY_REVIEW_REPORT_DIR", "python_agents/reports")
+    WEEKLY_REVIEW_TZ = os.getenv("QUENBOT_WEEKLY_REVIEW_TZ", "Europe/Istanbul")
+
+    # Weekly acknowledgement
+    WEEKLY_ACK_DIR = os.getenv("QUENBOT_WEEKLY_ACK_DIR", "python_agents/.weekly_ack")
+    WEEKLY_ACK_GRACE_HOURS = int(os.getenv("QUENBOT_WEEKLY_ACK_GRACE_HOURS", "168"))  # 7 days
+    WEEKLY_ACK_WATCHDOG_ENABLED = os.getenv("QUENBOT_WEEKLY_ACK_WATCHDOG_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    WEEKLY_ACK_WATCHDOG_INTERVAL_SEC = int(os.getenv("QUENBOT_WEEKLY_ACK_WATCHDOG_INTERVAL_SEC", "3600"))
+
+    # Emergency lockdown
+    EMERGENCY_TOKEN = os.getenv("EMERGENCY_TOKEN", "")
+    EMERGENCY_SENTINEL_PATH = os.getenv("QUENBOT_EMERGENCY_SENTINEL_PATH", "/tmp/quenbot_emergency")
+    EMERGENCY_STATE_DIR = os.getenv("QUENBOT_EMERGENCY_STATE_DIR", "python_agents/.emergency")
+    EMERGENCY_SENTINEL_POLL_SEC = int(os.getenv("QUENBOT_EMERGENCY_SENTINEL_POLL_SEC", "5"))
+
+    # Monthly self-audit (meta-cognition)
+    QWEN_SELF_AUDIT_ENABLED = os.getenv("QUENBOT_QWEN_SELF_AUDIT_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    QWEN_SELF_AUDIT_SAMPLE_SIZE = int(os.getenv("QUENBOT_QWEN_SELF_AUDIT_SAMPLE_SIZE", "100"))
+    QWEN_SELF_AUDIT_LOOKBACK_DAYS = int(os.getenv("QUENBOT_QWEN_SELF_AUDIT_LOOKBACK_DAYS", "30"))
+    QWEN_SELF_AUDIT_DISAGREEMENT_ALERT = float(os.getenv("QUENBOT_QWEN_SELF_AUDIT_DISAGREEMENT_ALERT", "0.40"))
+    QWEN_SELF_AUDIT_REPORT_DIR = os.getenv("QUENBOT_QWEN_SELF_AUDIT_REPORT_DIR", "python_agents/reports")
+    QWEN_SELF_AUDIT_LATEST_PATH = os.getenv("QUENBOT_QWEN_SELF_AUDIT_LATEST_PATH", "python_agents/.self_audit_latest.json")
+
+    # CHANGE_STRATEGY weight reweighting bound (±25%)
+    ORACLE_CHANGE_STRATEGY_MAX_DELTA = float(os.getenv("QUENBOT_ORACLE_CHANGE_STRATEGY_MAX_DELTA", "0.25"))
