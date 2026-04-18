@@ -3489,10 +3489,112 @@ class AgentOrchestrator:
                     out[name] = {"enabled": True, "health": h, "metrics": m}
                 except Exception as e:
                     out[name] = {"enabled": True, "error": str(e)}
+            # ─── Phase 6: Oracle Stack (additive) ─────────────────
+            try:
+                bus = getattr(self, "oracle_signal_bus", None)
+                detectors = list(getattr(self, "_oracle_detectors", []) or [])
+                oracle_block: Dict[str, Any] = {
+                    "enabled": bus is not None,
+                    "detectors_active": len(detectors),
+                    "channels_registered": (
+                        len(bus.registered_channels()) if bus is not None and hasattr(bus, "registered_channels") else 0
+                    ),
+                    "modules": {},
+                }
+                for name, det in detectors:
+                    try:
+                        h = await det.health_check() if hasattr(det, "health_check") else {}
+                        m = det.metrics() if hasattr(det, "metrics") else {}
+                        oracle_block["modules"][name] = {
+                            "enabled": True,
+                            "channel": getattr(det, "ORACLE_CHANNEL_NAME", None),
+                            "health": h,
+                            "metrics": m,
+                        }
+                    except Exception as e:
+                        oracle_block["modules"][name] = {"enabled": True, "error": str(e)}
+                out["oracle"] = oracle_block
+            except Exception as e:
+                out["oracle"] = {"enabled": False, "error": str(e)}
             return web.json_response(out)
+
+        # ─── Phase 6: Oracle Stack endpoints ───
+        async def get_oracle_summary(request):
+            """Oracle dedektör + signal bus özeti."""
+            bus = getattr(self, "oracle_signal_bus", None)
+            detectors = list(getattr(self, "_oracle_detectors", []) or [])
+            payload: Dict[str, Any] = {
+                "enabled": bus is not None,
+                "detectors": [],
+                "channels": [],
+            }
+            if bus is not None and hasattr(bus, "registered_channels"):
+                try:
+                    payload["channels"] = list(bus.registered_channels())
+                except Exception as e:
+                    payload["channels_error"] = str(e)
+            for name, det in detectors:
+                try:
+                    h = await det.health_check() if hasattr(det, "health_check") else {}
+                    m = det.metrics() if hasattr(det, "metrics") else {}
+                    payload["detectors"].append({
+                        "name": name,
+                        "channel": getattr(det, "ORACLE_CHANNEL_NAME", None),
+                        "health": h,
+                        "metrics": m,
+                    })
+                except Exception as e:
+                    payload["detectors"].append({"name": name, "error": str(e)})
+            return web.json_response(payload)
+
+        async def get_oracle_channels_symbol(request):
+            """Bir sembol için tüm oracle kanal değerleri."""
+            symbol = (request.match_info.get("symbol") or "").upper()
+            if not symbol:
+                return web.json_response({"error": "symbol required"}, status=400)
+            bus = getattr(self, "oracle_signal_bus", None)
+            detectors = list(getattr(self, "_oracle_detectors", []) or [])
+            channels: Dict[str, Any] = {}
+            if bus is not None and hasattr(bus, "all_snapshots"):
+                try:
+                    snap = bus.all_snapshots()
+                    if isinstance(snap, dict):
+                        sym_block = snap.get(symbol) or {}
+                        if isinstance(sym_block, dict):
+                            channels.update(sym_block)
+                except Exception as e:
+                    channels["__bus_error__"] = str(e)
+            # Fallback: query detectors directly for their channel value
+            for name, det in detectors:
+                ch = getattr(det, "ORACLE_CHANNEL_NAME", None)
+                if ch and ch not in channels:
+                    try:
+                        v = det.oracle_channel_value(symbol) if hasattr(det, "oracle_channel_value") else None
+                        if v is not None:
+                            channels[ch] = {"value": v, "source": name}
+                    except Exception:
+                        pass
+            return web.json_response({"symbol": symbol, "channels": channels})
+
+        async def get_oracle_detector_snapshot(request):
+            """Bir dedektörün tüm sembol snapshot'ları."""
+            dname = (request.match_info.get("name") or "").lower()
+            if not dname:
+                return web.json_response({"error": "name required"}, status=400)
+            for name, det in list(getattr(self, "_oracle_detectors", []) or []):
+                if name == dname:
+                    try:
+                        snaps = det.all_snapshots() if hasattr(det, "all_snapshots") else {}
+                        return web.json_response({"name": name, "snapshots": snaps})
+                    except Exception as e:
+                        return web.json_response({"name": name, "error": str(e)}, status=500)
+            return web.json_response({"error": f"detector '{dname}' not found"}, status=404)
 
         app.router.add_get("/api/confluence/{symbol}", get_confluence_symbol)
         app.router.add_get("/api/intel/summary", get_intel_summary)
+        app.router.add_get("/api/oracle/summary", get_oracle_summary)
+        app.router.add_get("/api/oracle/channels/{symbol}", get_oracle_channels_symbol)
+        app.router.add_get("/api/oracle/detector/{name}", get_oracle_detector_snapshot)
 
         # ─── Intel Upgrade (Phase 2) endpoints ───
         async def get_cross_asset_graph(request):

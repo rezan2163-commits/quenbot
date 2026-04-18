@@ -26,6 +26,13 @@ export interface IntelSummary {
   decision_router?: { enabled: boolean; health?: any; metrics?: any; error?: string };
   online_learning?: { enabled: boolean; health?: any; metrics?: any; error?: string };
   metrics_exporter?: { enabled: boolean; health?: any; metrics?: any; error?: string };
+  oracle?: {
+    enabled: boolean;
+    detectors_active?: number;
+    channels_registered?: number;
+    modules?: Record<string, { enabled: boolean; channel?: string | null; health?: any; metrics?: any; error?: string }>;
+    error?: string;
+  };
 }
 
 export interface ConfluenceSnapshot {
@@ -158,4 +165,40 @@ export function useOnlineLearning(symbol?: string | null) {
     ? `${API}/api/online-learning/stats?symbol=${encodeURIComponent(symbol)}`
     : `${API}/api/online-learning/stats`;
   return useSWR<OnlineLearningStats>(key, fetcher, { refreshInterval: 15000 });
+}
+
+/* ───── Phase 6: Oracle Stack ───── */
+
+export interface OracleDetector {
+  name: string;
+  channel?: string | null;
+  health?: any;
+  metrics?: Record<string, any>;
+  error?: string;
+}
+
+export interface OracleSummary {
+  enabled: boolean;
+  detectors: OracleDetector[];
+  channels: string[];
+  channels_error?: string;
+}
+
+export interface OracleChannelsResponse {
+  symbol: string;
+  channels: Record<string, { value?: number; source?: string; ts?: number; extra?: any } | any>;
+}
+
+export function useOracleSummary() {
+  return useSWR<OracleSummary>(`${API}/api/oracle/summary`, fetcher, {
+    refreshInterval: 5000,
+  });
+}
+
+export function useOracleChannels(symbol: string | null) {
+  return useSWR<OracleChannelsResponse>(
+    symbol ? `${API}/api/oracle/channels/${encodeURIComponent(symbol)}` : null,
+    fetcher,
+    { refreshInterval: 5000 }
+  );
 }
