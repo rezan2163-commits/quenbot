@@ -480,7 +480,7 @@ function ConfluenceView({ symbol }: { symbol: string }) {
           normalized.push([String(item[0]), Number(item[1]) || 0]);
         } else if (item && typeof item === "object") {
           // Contribution dict
-          const obj = item as Record<string, unknown>;
+          const obj = item as unknown as Record<string, unknown>;
           const name = String(obj.feature ?? obj.name ?? obj.symbol ?? "");
           const val = Number(
             obj.log_odds ?? obj.contribution ?? obj.value ?? obj.weight ?? 0,
