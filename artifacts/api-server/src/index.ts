@@ -1342,11 +1342,28 @@ app.get("/api/signals/outcomes", async (_req, res) => {
   try {
     const rows = await sql`
       SELECT s.id, s.symbol, s.signal_type,
-             COALESCE(s.metadata->>'direction', 'long') AS direction,
+             LOWER(COALESCE(
+               NULLIF(s.metadata->>'direction', ''),
+               NULLIF(s.metadata->>'position_bias', ''),
+               NULLIF(s.metadata->'mamis_context'->>'direction', ''),
+               CASE
+                 WHEN POSITION('short' IN LOWER(COALESCE(s.signal_type, ''))) > 0 THEN 'short'
+                 WHEN POSITION('long'  IN LOWER(COALESCE(s.signal_type, ''))) > 0 THEN 'long'
+                 WHEN POSITION('sell'  IN LOWER(COALESCE(s.signal_type, ''))) > 0 THEN 'short'
+                 WHEN POSITION('buy'   IN LOWER(COALESCE(s.signal_type, ''))) > 0 THEN 'long'
+                 ELSE 'long'
+               END
+             )) AS direction,
              s.confidence::double precision AS confidence,
              s.price::double precision AS entry_price,
              COALESCE((s.metadata->>'target_price')::double precision, 0) AS target_price,
              COALESCE((s.metadata->>'target_pct')::double precision, 0) AS target_pct,
+             COALESCE(
+               (s.metadata->>'exit_price')::double precision,
+               (s.metadata->>'close_price')::double precision,
+               (s.metadata->>'actual_price')::double precision,
+               sim.exit_price::double precision
+             ) AS exit_price,
              s.status,
              s.timestamp AS signal_time,
              s.metadata,

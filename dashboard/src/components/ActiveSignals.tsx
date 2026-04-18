@@ -38,6 +38,30 @@ function normalizeTargetPct(value: unknown) {
   return n > 0.5 ? n / 100 : n;
 }
 
+function resolveDirection(o: any): "long" | "short" {
+  const meta = o?.metadata || {};
+  const candidates: string[] = [
+    o?.direction,
+    meta.direction,
+    meta.position_bias,
+    meta?.mamis_context?.direction,
+    o?.side,
+    o?.signal_type,
+    meta.signal_type,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x).toLowerCase());
+  for (const c of candidates) {
+    if (c === "short" || c === "sell" || c.includes("short") || c.includes("sell") || c.includes("bear")) return "short";
+    if (c === "long" || c === "buy" || c.includes("long") || c.includes("buy") || c.includes("bull")) return "long";
+  }
+  // Last-ditch: if target_price < entry_price it's a short bias.
+  const entry = toNumber(o?.entry_price ?? meta.entry_price ?? o?.price, 0);
+  const target = toNumber(o?.target_price ?? meta.target_price, 0);
+  if (entry > 0 && target > 0 && target < entry) return "short";
+  return "long";
+}
+
 function resolveTargetPct(signal: Signal | any) {
   const meta = signal.metadata || {};
   const direct = normalizeTargetPct(signal.target_pct ?? meta.target_pct ?? meta.predicted_magnitude);
@@ -63,20 +87,17 @@ function resolvePrimaryTarget(signal: Signal | any) {
   return { entry, targetPrice, eta, pct: resolveTargetPct(signal), selected };
 }
 
-function classifyOutcome(o: any): { kind: "win" | "loss" | "neutral"; change: number; hitHorizon?: any; resolvedAt: number } {
+function classifyOutcome(o: any): { kind: "win" | "loss" | "neutral"; change: number; hitHorizon?: any; resolvedAt: number; direction: "long" | "short"; exitPrice: number } {
   const meta = o?.metadata || {};
   const entry = toNumber(o?.entry_price ?? meta.entry_price ?? o?.price, 0);
   const exit = toNumber(
     o?.exit_price ?? meta.exit_price ?? o?.close_price ?? meta.close_price ?? o?.actual_price ?? meta.actual_price,
     0,
   );
-  const dirRaw = String(o?.direction ?? meta.direction ?? meta.position_bias ?? o?.side ?? "").toLowerCase();
-  const isShort = dirRaw === "short" || dirRaw === "sell";
+  const direction = resolveDirection(o);
+  const isShort = direction === "short";
 
   // Real close time — backend provides it as `resolved_at` at the row root.
-  // Fall back through metadata and horizon evaluation timestamps BEFORE
-  // defaulting to signal_time (entry time) so the card never shows
-  // "giriş == kapanış".
   const hzns = Array.isArray(meta.target_horizons) ? meta.target_horizons : [];
   const hzClose = hzns
     .map((h: any) => toTimestampMs(h?.closed_at || h?.evaluated_at))
@@ -88,41 +109,42 @@ function classifyOutcome(o: any): { kind: "win" | "loss" | "neutral"; change: nu
   const candidates = [rootResolved, metaResolved, horizonCloseTs].filter((t) => t > 0 && t > signalTs);
   const resolvedAt = candidates.length ? candidates[0] : (rootResolved || metaResolved || horizonCloseTs || signalTs);
 
+  // PRIMARY: real price comparison with correct direction.
   if (entry > 0 && exit > 0) {
     const raw = (exit - entry) / entry;
     const change = (isShort ? -raw : raw) * 100;
-    if (change > 0) return { kind: "win", change, resolvedAt };
-    if (change < 0) return { kind: "loss", change, resolvedAt };
-    return { kind: "neutral", change, resolvedAt };
+    if (change > 0) return { kind: "win", change, resolvedAt, direction, exitPrice: exit };
+    if (change < 0) return { kind: "loss", change, resolvedAt, direction, exitPrice: exit };
+    return { kind: "neutral", change, resolvedAt, direction, exitPrice: exit };
   }
 
-  // Fallback #1: backend-computed `resolved_kind` + `actual_change_pct` columns.
+  // Fallback #1: backend-computed resolved_kind + actual_change_pct
   const kindFromBackend = String(o?.resolved_kind ?? "").toLowerCase();
   const backendPct = toNumber(o?.actual_change_pct, 0) * 100;
-  if (kindFromBackend === "win") return { kind: "win", change: backendPct, resolvedAt };
-  if (kindFromBackend === "loss") return { kind: "loss", change: backendPct, resolvedAt };
+  if (kindFromBackend === "win") return { kind: "win", change: Math.abs(backendPct) || Math.abs(toNumber(meta.target_pct, 0) * 100), resolvedAt, direction, exitPrice: exit };
+  if (kindFromBackend === "loss") return { kind: "loss", change: -Math.abs(backendPct), resolvedAt, direction, exitPrice: exit };
 
-  // Fallback #2: explicit status field
+  // Fallback #2: explicit status
   const status = String(o?.status ?? meta.status ?? "").toLowerCase();
   if (status.includes("target_hit") || status.includes("target_reached") || meta.was_correct === true || meta.target_hit === true) {
-    return { kind: "win", change: toNumber(o?.target_pct ?? meta.target_pct, 0) * 100, resolvedAt };
+    return { kind: "win", change: toNumber(o?.target_pct ?? meta.target_pct, 0) * 100, resolvedAt, direction, exitPrice: exit };
   }
   if (
     status.includes("stop_loss") || status.includes("stopped") || status.includes("expired") ||
     status.includes("target_missed") || status.includes("failed") ||
     meta.was_correct === false || meta.close_reason === "stop_loss"
   ) {
-    return { kind: "loss", change: -Math.abs(toNumber(meta.target_pct, 0)) * 100, resolvedAt };
+    return { kind: "loss", change: -Math.abs(toNumber(meta.target_pct, 0)) * 100, resolvedAt, direction, exitPrice: exit };
   }
 
-  // Fallback #3: legacy target_horizons metadata
+  // Fallback #3: horizons
   const hit = hzns.find((h: any) => h?.status === "hit");
   const allMissed = hzns.length > 0 && hzns.every((h: any) => ["missed", "expired"].includes(String(h?.status)));
   const primary = hit || hzns[0];
   const change = toNumber(primary?.actual_change_pct, 0) * 100;
-  if (hit) return { kind: "win", change, hitHorizon: hit, resolvedAt };
-  if (allMissed) return { kind: "loss", change, resolvedAt };
-  return { kind: "neutral", change, resolvedAt };
+  if (hit) return { kind: "win", change, hitHorizon: hit, resolvedAt, direction, exitPrice: exit };
+  if (allMissed) return { kind: "loss", change, resolvedAt, direction, exitPrice: exit };
+  return { kind: "neutral", change, resolvedAt, direction, exitPrice: exit };
 }
 
 function TabPill({
@@ -454,7 +476,7 @@ function OutcomeList({ items, kind }: { items: any[]; kind: "win" | "loss" }) {
 }
 
 function OutcomeCard({ o, kind }: { o: any; kind: "win" | "loss" }) {
-  const isLong = ["long", "buy"].includes((o.direction || "").toLowerCase());
+  const isLong = o._outcome.direction === "long";
   const meta = (o.metadata || {}) as any;
   const { entry, targetPrice, eta } = resolvePrimaryTarget(o);
   const signalAt = parseQuenbotDate(o.signal_time || o.timestamp);
@@ -463,7 +485,7 @@ function OutcomeCard({ o, kind }: { o: any; kind: "win" | "loss" }) {
   const change = o._outcome.change;
   const horizons: any[] = Array.isArray(meta.target_horizons) ? meta.target_horizons : [];
   const hitH = o._outcome.hitHorizon;
-  const hitPrice = toNumber(hitH?.actual_price, 0);
+  const exitPrice = toNumber(o._outcome.exitPrice, 0) || toNumber(hitH?.actual_price, 0);
 
   const cardTone = kind === "win"
     ? "border-emerald-400/30 bg-gradient-to-br from-emerald-500/12 via-surface-card/50 to-transparent"
@@ -508,7 +530,7 @@ function OutcomeCard({ o, kind }: { o: any; kind: "win" | "loss" }) {
 
       <div className="grid grid-cols-3 gap-1">
         <PriceCell label="Giriş" value={`$${formatPrice(entry)}`} />
-        <PriceCell label={kind === "win" ? "Ulaştı" : "Kapanış"} value={`$${formatPrice(hitPrice || 0)}`} muted />
+        <PriceCell label={kind === "win" ? "Ulaştı" : "Kapanış"} value={`$${formatPrice(exitPrice || 0)}`} muted />
         <PriceCell label="Hedef" value={`$${formatPrice(targetPrice)}`} icon={<Target size={8} />} />
       </div>
 
