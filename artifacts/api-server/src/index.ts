@@ -2926,6 +2926,70 @@ app.get("/api/analytics/equity-curve", async (_req, res) => {
   }
 });
 
+/* ═══ Mission Control Proxy (forwards to Python aiohttp on 3002) ═══ */
+app.get("/api/mission-control/snapshot", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/mission-control/snapshot`);
+    res.status(r.status).json(await r.json());
+  } catch {
+    res.status(502).json({ error: "mission-control snapshot unavailable" });
+  }
+});
+app.get("/api/mission-control/autopsy/:module_id", async (req, res) => {
+  try {
+    const r = await fetch(
+      `${DIRECTIVE_API}/api/mission-control/autopsy/${encodeURIComponent(req.params.module_id)}`
+    );
+    res.status(r.status).json(await r.json());
+  } catch {
+    res.status(502).json({ error: "autopsy unavailable" });
+  }
+});
+app.post("/api/mission-control/restart/:module_id", async (req, res) => {
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const adminToken = req.header("x-admin-token");
+    if (adminToken) headers["X-Admin-Token"] = adminToken;
+    const r = await fetch(
+      `${DIRECTIVE_API}/api/mission-control/restart/${encodeURIComponent(req.params.module_id)}`,
+      { method: "POST", headers }
+    );
+    res.status(r.status).json(await r.json());
+  } catch {
+    res.status(502).json({ ok: false, error: "restart proxy unavailable" });
+  }
+});
+// SSE pass-through — stream upstream body directly to the client.
+app.get("/api/mission-control/stream", async (_req, res) => {
+  try {
+    const upstream = await fetch(`${DIRECTIVE_API}/api/mission-control/stream`);
+    if (!upstream.ok || !upstream.body) {
+      res.status(upstream.status || 502).end();
+      return;
+    }
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    const reader = (upstream.body as any).getReader();
+    const decoder = new TextDecoder();
+    const pump = async (): Promise<void> => {
+      const { done, value } = await reader.read();
+      if (done) {
+        res.end();
+        return;
+      }
+      res.write(decoder.decode(value, { stream: true }));
+      return pump();
+    };
+    pump().catch(() => {
+      try { res.end(); } catch { /* noop */ }
+    });
+  } catch {
+    res.status(502).end();
+  }
+});
+
 app.listen(port, async () => {
   await connectDatabase();
   await createTables();

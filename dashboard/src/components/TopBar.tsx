@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import { mutate } from "swr";
+import Link from "next/link";
 import { addWatchlistCoin, useDashboardSummary, useTopMovers, useLivePrices } from "@/lib/api";
-import { TrendingUp, TrendingDown, BarChart3, Target, Activity } from "lucide-react";
+import { TrendingUp, TrendingDown, BarChart3, Target, Activity, Compass } from "lucide-react";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -100,6 +101,15 @@ export default function TopBar() {
 
       {/* Top movers divider */}
       <div className="hidden h-6 w-px bg-surface-border flex-shrink-0 lg:block" />
+
+      <Link
+        href="/mission-control"
+        className="inline-flex items-center gap-1 rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-[11px] font-semibold text-accent hover:bg-accent/20"
+        title="Mission Control"
+      >
+        <Compass size={12} />
+        Mission Control
+      </Link>
 
       {/* Top movers */}
       <div className="grid w-full grid-cols-2 gap-2 sm:grid-cols-3 lg:min-w-[320px] lg:w-auto xl:grid-cols-3">
