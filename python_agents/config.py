@@ -320,3 +320,39 @@ class Config:
     WATCHDOG_ENABLED = os.getenv("QUENBOT_WATCHDOG_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
     WATCHDOG_HEARTBEAT_PATH = os.getenv("QUENBOT_WATCHDOG_HEARTBEAT_PATH", "/tmp/quenbot_heartbeat")
     WATCHDOG_TIMEOUT_SEC = int(os.getenv("QUENBOT_WATCHDOG_TIMEOUT_SEC", "120"))
+
+    # ─────────────────────────────────────────────────────────────
+    # Aşama 1 — Directive Gatekeeper + Auto-Rollback + Historical Warmup
+    # Hepsi additive; disabled state byte-identical to pre-Aşama-1.
+    # ─────────────────────────────────────────────────────────────
+    DIRECTIVE_GATEKEEPER_ENABLED = os.getenv("QUENBOT_DIRECTIVE_GATEKEEPER_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN = float(os.getenv("QUENBOT_ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN", "0.80"))
+    ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR = int(os.getenv("QUENBOT_ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR", "3"))
+    ORACLE_BRAIN_DIRECTIVE_ALLOWLIST = [
+        s.strip() for s in os.getenv(
+            "QUENBOT_ORACLE_BRAIN_DIRECTIVE_ALLOWLIST",
+            "ADJUST_CONFIDENCE_THRESHOLD,ADJUST_POSITION_SIZE_MULT,PAUSE_SYMBOL",
+        ).split(",") if s.strip()
+    ]
+    # Permanently blocked regardless of allowlist — cannot be overridden.
+    ORACLE_BRAIN_DIRECTIVE_BLOCKLIST_HARD = ["CHANGE_STRATEGY", "OVERRIDE_VETO", "FORCE_TRADE"]
+    DIRECTIVE_REJECTED_LOG_PATH = os.getenv("QUENBOT_DIRECTIVE_REJECTED_LOG", "python_agents/.directive_rejected.jsonl")
+
+    AUTO_ROLLBACK_ENABLED = os.getenv("QUENBOT_AUTO_ROLLBACK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    AUTO_ROLLBACK_REJECTION_RATE_THRESHOLD = float(os.getenv("QUENBOT_AUTO_ROLLBACK_REJECTION_RATE", "0.60"))
+    AUTO_ROLLBACK_REJECTION_WINDOW_MIN = int(os.getenv("QUENBOT_AUTO_ROLLBACK_REJECTION_WINDOW_MIN", "30"))
+    AUTO_ROLLBACK_ACCURACY_THRESHOLD = float(os.getenv("QUENBOT_AUTO_ROLLBACK_ACCURACY_MIN", "0.45"))
+    AUTO_ROLLBACK_ACCURACY_WINDOW = int(os.getenv("QUENBOT_AUTO_ROLLBACK_ACCURACY_WINDOW", "50"))
+    AUTO_ROLLBACK_META_CONF_MIN = float(os.getenv("QUENBOT_AUTO_ROLLBACK_META_CONF_MIN", "0.40"))
+    AUTO_ROLLBACK_META_CONF_STREAK = int(os.getenv("QUENBOT_AUTO_ROLLBACK_META_CONF_STREAK", "10"))
+    AUTO_ROLLBACK_UNHEALTHY_GRACE_SEC = int(os.getenv("QUENBOT_AUTO_ROLLBACK_UNHEALTHY_GRACE_SEC", "300"))
+    AUTO_ROLLBACK_FORCE_SENTINEL = os.getenv("QUENBOT_AUTO_ROLLBACK_FORCE_SENTINEL", "/tmp/quenbot_force_shadow")
+    AUTO_ROLLBACK_SHADOW_FORCED_PATH = os.getenv("QUENBOT_AUTO_ROLLBACK_SHADOW_FORCED_PATH", "python_agents/.oracle_shadow_forced.json")
+    AUTO_ROLLBACK_FORENSIC_DIR = os.getenv("QUENBOT_AUTO_ROLLBACK_FORENSIC_DIR", "python_agents/.auto_rollback")
+    AUTO_ROLLBACK_CHECK_INTERVAL_SEC = int(os.getenv("QUENBOT_AUTO_ROLLBACK_CHECK_INTERVAL_SEC", "15"))
+
+    # Historical warmup
+    WARMUP_TRUST_SCORES_PATH = os.getenv("QUENBOT_WARMUP_TRUST_PATH", "python_agents/.channel_trust_scores.json")
+    WARMUP_RAG_SOURCE_TAG = "historical_warmup"
+    WARMUP_CHECKPOINT_PATH = os.getenv("QUENBOT_WARMUP_CHECKPOINT_PATH", "python_agents/.warmup_checkpoint.json")
+    WARMUP_REPORT_DIR = os.getenv("QUENBOT_WARMUP_REPORT_DIR", "python_agents/.warmup_reports")

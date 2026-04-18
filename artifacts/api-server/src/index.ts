@@ -886,7 +886,7 @@ app.get("/api/analytics/volume-by-exchange", async (req, res) => {
       GROUP BY exchange, market_type
       ORDER BY total_volume DESC
     `;
-    res.json(rows.map(normalizeSignalRow).filter(isVisibleSignalHistory));
+    res.json(rows);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -916,7 +916,7 @@ app.get("/api/analytics/trade-timeline", async (req, res) => {
       GROUP BY minute
       ORDER BY minute ASC
     `;
-    res.json(rows.map(normalizeSignalRow).filter(isVisibleSignalHistory));
+    res.json(rows);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -1341,26 +1341,56 @@ app.get("/api/brain/barrier-stats", async (_req, res) => {
 app.get("/api/signals/outcomes", async (_req, res) => {
   try {
     const rows = await sql`
-      SELECT id, symbol, signal_type,
-             COALESCE(metadata->>'direction', 'long') AS direction,
-             confidence::double precision AS confidence,
-             price::double precision AS entry_price,
-             COALESCE((metadata->>'target_price')::double precision, 0) AS target_price,
-             COALESCE((metadata->>'target_pct')::double precision, 0) AS target_pct,
-             status,
-             timestamp AS signal_time,
-             metadata
-      FROM signals
-      WHERE timestamp > NOW() - INTERVAL '48 hours'
-        AND COALESCE(metadata->>'source', metadata->>'signal_provider', 'unknown') IN ('strategist','pattern_matcher')
-        AND (status IN ('closed', 'expired', 'failed')
-             OR (metadata->'target_horizons' IS NOT NULL
-                 AND NOT EXISTS (
-                   SELECT 1 FROM jsonb_array_elements(metadata->'target_horizons') h
-                   WHERE COALESCE(h->>'status', 'active') = 'active'
-                 )))
-      ORDER BY timestamp DESC
-      LIMIT 100
+      SELECT s.id, s.symbol, s.signal_type,
+             COALESCE(s.metadata->>'direction', 'long') AS direction,
+             s.confidence::double precision AS confidence,
+             s.price::double precision AS entry_price,
+             COALESCE((s.metadata->>'target_price')::double precision, 0) AS target_price,
+             COALESCE((s.metadata->>'target_pct')::double precision, 0) AS target_pct,
+             s.status,
+             s.timestamp AS signal_time,
+             s.metadata,
+             CASE
+               WHEN s.status = 'target_hit' THEN 'win'
+               WHEN s.status IN ('target_missed','expired','failed') THEN 'loss'
+               WHEN s.status = 'closed' AND COALESCE(sim.pnl_pct, 0) > 0 THEN 'win'
+               WHEN s.status = 'closed' AND COALESCE(sim.pnl_pct, 0) <= 0 THEN 'loss'
+               WHEN s.metadata->'target_horizons' IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(s.metadata->'target_horizons') h
+                                WHERE h->>'status' = 'hit') THEN 'win'
+               WHEN s.metadata->'target_horizons' IS NOT NULL
+                    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(s.metadata->'target_horizons') h
+                                    WHERE COALESCE(h->>'status','active') = 'active') THEN 'loss'
+               ELSE 'neutral'
+             END AS resolved_kind,
+             COALESCE(
+               sim.pnl_pct::double precision / 100.0,
+               (SELECT (h->>'actual_change_pct')::double precision
+                FROM jsonb_array_elements(s.metadata->'target_horizons') h
+                WHERE h->>'status' = 'hit' LIMIT 1),
+               CASE WHEN s.status = 'target_hit'
+                 THEN COALESCE((s.metadata->>'target_pct')::double precision, 0.02)
+                 ELSE 0 END
+             ) AS actual_change_pct,
+             COALESCE(sim.exit_time, s.timestamp) AS resolved_at
+      FROM signals s
+      LEFT JOIN LATERAL (
+        SELECT pnl_pct, exit_time FROM simulations
+        WHERE signal_id = s.id AND status = 'closed'
+        ORDER BY exit_time DESC NULLS LAST LIMIT 1
+      ) sim ON TRUE
+      WHERE s.timestamp > NOW() - INTERVAL '7 days'
+        AND COALESCE(s.metadata->>'source', s.metadata->>'signal_provider', 'unknown') IN ('strategist','pattern_matcher')
+        AND (
+          s.status IN ('target_hit','target_missed','closed','expired','failed')
+          OR (s.metadata->'target_horizons' IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM jsonb_array_elements(s.metadata->'target_horizons') h
+                WHERE COALESCE(h->>'status', 'active') = 'active'
+              ))
+        )
+      ORDER BY COALESCE(sim.exit_time, s.timestamp) DESC
+      LIMIT 200
     `;
     res.json(rows);
   } catch (error) {
@@ -1556,11 +1586,24 @@ app.get("/api/trades/history/:symbol", async (req, res) => {
 
 app.get("/api/signals/history", async (req, res) => {
   try {
-    const status = req.query.status as string | undefined;
+    const rawStatus = (req.query.status as string | undefined)?.toLowerCase();
+    // UI uses generic labels; map to DB status sets.
+    const MEANINGFUL_STATUSES = ['processed','target_hit','target_missed','expired','closed'];
+    const statusMap: Record<string, string[]> = {
+      active: ['processed'],
+      open: ['processed'],
+      closed: ['target_hit','target_missed','closed'],
+      expired: ['expired'],
+      target_hit: ['target_hit'],
+      target_missed: ['target_missed'],
+    };
+    const statusList: string[] = rawStatus
+      ? (statusMap[rawStatus] ?? [rawStatus])
+      : MEANINGFUL_STATUSES;
     const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
     const limit = Math.min(200, Number(req.query.limit || 100));
     let rows;
-    if (status && symbol) {
+    if (symbol) {
       rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
         COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
         COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
@@ -1574,43 +1617,8 @@ app.get("/api/signals/history", async (req, res) => {
         ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
         FROM signals
-        WHERE status = ${status}
+        WHERE status = ANY(${statusList})
           AND symbol = ${symbol}
-          AND NOT ((status = 'failed' OR status LIKE 'risk_%') AND timestamp < NOW() - INTERVAL '24 hours')
-        ORDER BY timestamp DESC LIMIT ${limit}`;
-    } else if (status) {
-      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
-        COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
-        COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
-        COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
-        COALESCE(NULLIF((metadata->>'target_price')::double precision, 0), price::double precision) AS target_price,
-        GREATEST(
-          CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
-            THEN COALESCE((metadata->>'target_pct')::double precision, 0.02) / 100.0
-            ELSE COALESCE((metadata->>'target_pct')::double precision, 0.02)
-          END, 0.02
-        ) AS target_pct,
-        COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
-        FROM signals
-        WHERE status = ${status}
-          AND NOT ((status = 'failed' OR status LIKE 'risk_%') AND timestamp < NOW() - INTERVAL '24 hours')
-        ORDER BY timestamp DESC LIMIT ${limit}`;
-    } else if (symbol) {
-      rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
-        COALESCE(metadata->>'signal_time', timestamp::text) AS signal_time,
-        COALESCE((metadata->>'entry_price')::double precision, price::double precision) AS entry_price,
-        COALESCE((metadata->>'current_price_at_signal')::double precision, price::double precision) AS current_price_at_signal,
-        COALESCE(NULLIF((metadata->>'target_price')::double precision, 0), price::double precision) AS target_price,
-        GREATEST(
-          CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
-            THEN COALESCE((metadata->>'target_pct')::double precision, 0.02) / 100.0
-            ELSE COALESCE((metadata->>'target_pct')::double precision, 0.02)
-          END, 0.02
-        ) AS target_pct,
-        COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
-        FROM signals
-        WHERE symbol = ${symbol}
-          AND NOT ((status = 'failed' OR status LIKE 'risk_%') AND timestamp < NOW() - INTERVAL '24 hours')
         ORDER BY timestamp DESC LIMIT ${limit}`;
     } else {
       rows = await sql`SELECT *, confidence::double precision AS confidence, price::double precision AS price,
@@ -1626,10 +1634,10 @@ app.get("/api/signals/history", async (req, res) => {
         ) AS target_pct,
         COALESCE((metadata->>'estimated_duration_to_target_minutes')::int, 60) AS estimated_duration_to_target_minutes
         FROM signals
-        WHERE NOT ((status = 'failed' OR status LIKE 'risk_%') AND timestamp < NOW() - INTERVAL '24 hours')
+        WHERE status = ANY(${statusList})
         ORDER BY timestamp DESC LIMIT ${limit}`;
     }
-    res.json(rows.map(normalizeSignalRow).filter(isVisibleSignalHistory));
+    res.json(rows.map(normalizeSignalRow));
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -1879,6 +1887,74 @@ app.get("/api/signature-matches", async (req, res) => {
         LIMIT ${limit}
       `;
     }
+
+    // Fallback: primary feed `pattern_match_results` — UI kullanabilsin diye mapliyoruz.
+    if (!rows || rows.length === 0) {
+      const fallback = symbol
+        ? await sql`
+            SELECT p.id, p.symbol, p.timeframe,
+                   COALESCE(p.predicted_direction, p.matched_direction) AS direction,
+                   p.similarity::double precision AS similarity,
+                   NULL::double precision AS dtw_score,
+                   NULL::double precision AS fft_score,
+                   NULL::double precision AS cosine_score,
+                   NULL::double precision AS poly_score,
+                   p.matched_signature_id,
+                   p.brain_decision AS match_label,
+                   NULL::text AS pattern_name,
+                   NULL::timestamp AS historical_timestamp,
+                   NULL::double precision AS historical_price,
+                   NULL::double precision AS historical_end_price,
+                   NULL::double precision AS historical_volume_ratio,
+                   COALESCE(
+                     NULLIF(p.brain_reasoning, ''),
+                     CONCAT('→ ', p.predicted_direction, ' ', ROUND((p.predicted_magnitude * 100)::numeric, 2), '% · conf ', ROUND((p.confidence * 100)::numeric, 0), '%')
+                   ) AS context_string,
+                   COALESCE(
+                     (SELECT price::double precision FROM trades t WHERE t.symbol = p.symbol ORDER BY t.timestamp DESC LIMIT 1),
+                     0
+                   ) AS current_price,
+                   p.created_at
+            FROM pattern_match_results p
+            WHERE p.symbol = ${symbol}
+              AND p.similarity >= ${minSimilarity}
+              AND p.created_at >= ${cutoff}
+            ORDER BY p.similarity DESC, p.created_at DESC
+            LIMIT ${limit}
+          `
+        : await sql`
+            SELECT p.id, p.symbol, p.timeframe,
+                   COALESCE(p.predicted_direction, p.matched_direction) AS direction,
+                   p.similarity::double precision AS similarity,
+                   NULL::double precision AS dtw_score,
+                   NULL::double precision AS fft_score,
+                   NULL::double precision AS cosine_score,
+                   NULL::double precision AS poly_score,
+                   p.matched_signature_id,
+                   p.brain_decision AS match_label,
+                   NULL::text AS pattern_name,
+                   NULL::timestamp AS historical_timestamp,
+                   NULL::double precision AS historical_price,
+                   NULL::double precision AS historical_end_price,
+                   NULL::double precision AS historical_volume_ratio,
+                   COALESCE(
+                     NULLIF(p.brain_reasoning, ''),
+                     CONCAT('→ ', p.predicted_direction, ' ', ROUND((p.predicted_magnitude * 100)::numeric, 2), '% · conf ', ROUND((p.confidence * 100)::numeric, 0), '%')
+                   ) AS context_string,
+                   COALESCE(
+                     (SELECT price::double precision FROM trades t WHERE t.symbol = p.symbol ORDER BY t.timestamp DESC LIMIT 1),
+                     0
+                   ) AS current_price,
+                   p.created_at
+            FROM pattern_match_results p
+            WHERE p.similarity >= ${minSimilarity}
+              AND p.created_at >= ${cutoff}
+            ORDER BY p.similarity DESC, p.created_at DESC
+            LIMIT ${limit}
+          `;
+      rows = fallback;
+    }
+
     res.json(rows);
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -2096,6 +2172,93 @@ app.get("/api/online-learning/stats", async (req, res) => {
     const r = await fetch(`${DIRECTIVE_API}/api/online-learning/stats${qs}`);
     res.json(await r.json());
   } catch { res.json({ enabled: false, error: "online_learning unavailable" }); }
+});
+
+/* ═══ Phase 6: Oracle Stack + Brain + Runtime Proxy ═══ */
+app.get("/api/oracle/summary", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/summary`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ enabled: false, error: "oracle summary unavailable" }); }
+});
+app.get("/api/oracle/channels/:symbol", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/channels/${encodeURIComponent(req.params.symbol)}`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ error: "oracle channels unavailable" }); }
+});
+app.get("/api/oracle/detector/:name", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/detector/${encodeURIComponent(req.params.name)}`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ error: "oracle detector unavailable" }); }
+});
+app.get("/api/oracle/factor-graph", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/factor-graph`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ enabled: false, error: "factor-graph unavailable" }); }
+});
+app.get("/api/oracle/factor-graph/:symbol", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/factor-graph/${encodeURIComponent(req.params.symbol)}`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ enabled: false, error: "factor-graph unavailable" }); }
+});
+app.get("/api/oracle/brain/directives", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/brain/directives`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ enabled: false, error: "brain directives unavailable" }); }
+});
+app.get("/api/oracle/brain/traces", async (req, res) => {
+  try {
+    const qs = req.query.limit ? `?limit=${encodeURIComponent(String(req.query.limit))}` : "";
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/brain/traces${qs}`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ enabled: false, error: "brain traces unavailable" }); }
+});
+app.get("/api/oracle/brain/health", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/brain/health`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ enabled: false, error: "brain health unavailable" }); }
+});
+
+/* ─── Aşama 1: Gatekeeper + AutoRollback + Warmup proxies ─── */
+app.get("/api/oracle/gatekeeper/stats", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/gatekeeper/stats`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ enabled: false, error: "gatekeeper unavailable" }); }
+});
+app.get("/api/oracle/autorollback/status", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/autorollback/status`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ enabled: false, error: "autorollback unavailable" }); }
+});
+app.post("/api/oracle/autorollback/force", async (req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/autorollback/force`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req.body ?? {}),
+    });
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ ok: false, error: "autorollback unavailable" }); }
+});
+app.get("/api/oracle/warmup/report", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/oracle/warmup/report`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ enabled: false, error: "warmup report unavailable" }); }
+});
+app.get("/api/runtime/status", async (_req, res) => {
+  try {
+    const r = await fetch(`${DIRECTIVE_API}/api/runtime/status`);
+    res.status(r.status).json(await r.json());
+  } catch { res.status(502).json({ enabled: false, error: "runtime unavailable" }); }
 });
 
 /* ═══ DATA AUDIT / VALIDATION ═══ */
@@ -2345,7 +2508,20 @@ app.get("/api/agents/flow", async (_req, res) => {
 // Cache the integration overview response to smooth out slow underlying queries.
 let _integrationOverviewCache: { data: any; updatedAt: number } | null = null;
 let _integrationOverviewInFlight: Promise<any> | null = null;
-const INTEGRATION_OVERVIEW_TTL_MS = 8000;
+const INTEGRATION_OVERVIEW_TTL_MS = 15000;
+
+function _withDbTimeout<T>(promise: Promise<T>, ms: number, label: string, fallback: T): Promise<T> {
+  return Promise.race<T>([
+    promise.catch((e) => {
+      console.warn(`[integration] ${label} query failed:`, String(e));
+      return fallback;
+    }),
+    new Promise<T>((resolve) => setTimeout(() => {
+      console.warn(`[integration] ${label} query exceeded ${ms}ms, using fallback`);
+      resolve(fallback);
+    }, ms)),
+  ]);
+}
 
 async function _computeIntegrationOverview(): Promise<any> {
   const [heartbeats, recentSignals, sourcePerformance, learningStats, stateHistory, resourceHb, systemSummary, directives, efomOverview] = await Promise.all([
@@ -2359,7 +2535,7 @@ async function _computeIntegrationOverview(): Promise<any> {
         FROM agent_heartbeat
         ORDER BY agent_name
       `,
-      sql`
+      _withDbTimeout(sql`
         SELECT
           id,
           symbol,
@@ -2375,8 +2551,8 @@ async function _computeIntegrationOverview(): Promise<any> {
         WHERE timestamp >= NOW() - INTERVAL '24 hours'
         ORDER BY timestamp DESC
         LIMIT 24
-      `,
-      sql`
+      ` as unknown as Promise<any[]>, 3500, "recent_signals", [] as any[]),
+      _withDbTimeout(sql`
         SELECT
           COALESCE(s.metadata->>'source', s.metadata->>'signal_provider', 'unknown') AS source,
           COALESCE(s.metadata->>'source_model', 'unknown') AS source_model,
@@ -2393,33 +2569,7 @@ async function _computeIntegrationOverview(): Promise<any> {
         GROUP BY 1, 2
         ORDER BY total_signals DESC, avg_pnl_pct DESC
         LIMIT 12
-      `,
-      Promise.race([
-        (async () => {
-          try {
-            return await sql.begin(async (tx) => {
-              await tx`SET LOCAL statement_timeout = 3000`;
-              return await tx`
-                SELECT
-                  exchange,
-                  market_type,
-                  MAX(timestamp) AS last_trade_at,
-                  COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '5 minutes')::int AS trades_5m,
-                  COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '1 hour')::int AS trades_1h,
-                  EXTRACT(EPOCH FROM (NOW() - MAX(timestamp)))::double precision AS age_seconds
-                FROM trades
-                WHERE timestamp >= NOW() - INTERVAL '1 hour'
-                GROUP BY exchange, market_type
-                ORDER BY exchange, market_type
-              `;
-            });
-          } catch (e) {
-            console.warn("[integration] trades flow query skipped:", String(e));
-            return [] as any[];
-          }
-        })(),
-        new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 4000)),
-      ]) as Promise<any[]>,
+      ` as unknown as Promise<any[]>, 6000, "source_performance", [] as any[]),
       sql`
         SELECT
           COUNT(*)::int AS total,
@@ -2676,6 +2826,25 @@ app.get("/api/integration/overview", async (_req, res) => {
   if (_integrationOverviewCache && now - _integrationOverviewCache.updatedAt < INTEGRATION_OVERVIEW_TTL_MS) {
     return res.json(_integrationOverviewCache.data);
   }
+  // Stale-while-revalidate: if we have any previous data, return it immediately
+  // and refresh in the background so the dashboard never sees a slow/error response.
+  if (_integrationOverviewCache) {
+    if (!_integrationOverviewInFlight) {
+      _integrationOverviewInFlight = _computeIntegrationOverview()
+        .then((data) => {
+          _integrationOverviewCache = { data, updatedAt: Date.now() };
+          return data;
+        })
+        .catch((e) => {
+          console.warn("[integration] background refresh failed:", String(e));
+          return _integrationOverviewCache?.data;
+        })
+        .finally(() => {
+          _integrationOverviewInFlight = null;
+        });
+    }
+    return res.json(_integrationOverviewCache.data);
+  }
   if (!_integrationOverviewInFlight) {
     _integrationOverviewInFlight = _computeIntegrationOverview()
       .then((data) => {
@@ -2690,8 +2859,9 @@ app.get("/api/integration/overview", async (_req, res) => {
     const data = await _integrationOverviewInFlight;
     res.json(data);
   } catch (error) {
-    if (_integrationOverviewCache) {
-      return res.json(_integrationOverviewCache.data);
+    const cached = _integrationOverviewCache as { data: any; updatedAt: number } | null;
+    if (cached) {
+      return res.json(cached.data);
     }
     res.status(500).json({ error: String(error) });
   }
