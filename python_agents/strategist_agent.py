@@ -55,8 +55,7 @@ TIMEFRAME_WINDOWS = {
 }
 
 TARGET_HORIZONS = [
-    ('15m', 15, 1.0),
-    ('1h', 60, 1.3),
+    ('1h', 60, 1.0),
     ('4h', 240, 1.8),
     ('24h', 1440, 2.5),
 ]
@@ -245,9 +244,7 @@ class StrategistAgent:
 
         for label, eta_minutes, multiplier in TARGET_HORIZONS:
             if eta_minutes > 60:
-                # 15m and 1h are ALWAYS emitted so every signal card has a
-                # one-hour close/learning resolution. Longer horizons remain
-                # strength-gated.
+                # 1h her zaman var; 4h/24h sinyalleri strength'e gore eklenir.
                 required_strength = {
                     240: 0.40,
                     1440: 0.50,
@@ -266,8 +263,8 @@ class StrategistAgent:
             })
 
         return horizons or [{
-            'label': '15m',
-            'eta_minutes': 15,
+            'label': '1h',
+            'eta_minutes': 60,
             'target_pct': float(base_target),
             'target_price': float(entry_price * (1.0 + base_target) if direction == 'long' else entry_price * (1.0 - base_target)),
             'strength': round(strength, 4),
@@ -370,14 +367,14 @@ class StrategistAgent:
                 confidence=confidence,
                 data_density=density,
             )
-        selected_horizon = min(target_horizons, key=lambda item: int(item.get('eta_minutes', 15) or 15)) if target_horizons else None
+        selected_horizon = min(target_horizons, key=lambda item: int(item.get('eta_minutes', 60) or 60)) if target_horizons else None
         effective_eta = int((selected_horizon or {}).get('eta_minutes', eta_minutes) or eta_minutes)
         target_price = float((selected_horizon or {}).get('target_price') or (safe_entry * (1.0 + safe_target_pct) if direction == 'long' else safe_entry * (1.0 - safe_target_pct)))
         safe_target_pct = float((selected_horizon or {}).get('target_pct') or safe_target_pct)
-        # ETA: volatilite yoğun ise daha hızlı, sakin ise daha uzun sürer.
-        # density ∈ [0,1] — yüksekse hedef ~15 dk, düşükse 60 dk'ya doğru kayar.
-        dynamic_eta = int(max(15, min(60, round(15 + (1.0 - float(density or 0.4)) * 45))))
-        estimated_eta = max(effective_eta, dynamic_eta) if effective_eta <= 60 else effective_eta
+        # ETA: 1s-24s bandi zorunlu. Kisa vade (dakikalar) devre disi.
+        dynamic_eta = int(max(60, min(240, round(60 + (1.0 - float(density or 0.4)) * 180))))
+        estimated_eta = max(effective_eta, dynamic_eta)
+        estimated_eta = int(max(60, min(1440, estimated_eta)))
         ts = datetime.utcnow()
         # Ensure each horizon has initial 'active' status
         for h in target_horizons:
@@ -394,9 +391,9 @@ class StrategistAgent:
             'entry_price': safe_entry,
             'current_price_at_signal': safe_entry,
             'target_price': float(target_price),
-            'estimated_duration_to_target_minutes': int(max(15, estimated_eta)),
+            'estimated_duration_to_target_minutes': int(max(60, min(1440, estimated_eta))),
             'target_horizons': target_horizons,
-            'selected_horizon': (selected_horizon or {}).get('label', '15m'),
+            'selected_horizon': (selected_horizon or {}).get('label', '1h'),
             'data_density': density,
             'quality_score': round(self._signal_quality_score(confidence, safe_target_pct), 4),
             'strategy_approved': True,

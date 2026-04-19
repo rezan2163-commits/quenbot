@@ -175,9 +175,12 @@ class AgentOrchestrator:
     ) -> dict:
         meta = dict(metadata or {})
         quality = float(meta.get("quality_score", self._signal_quality_score(confidence, target_pct)) or 0.0)
+        eta_minutes = int(meta.get("estimated_duration_to_target_minutes", 60) or 60)
+        horizon_ok = 60 <= eta_minutes <= 1440
         eligible = (
             approved
             and self._normalize_target_pct(target_pct) >= 0.02
+            and horizon_ok
             and float(confidence) >= self._target_card_min_conf
             and quality >= self._target_card_min_quality
         )
@@ -1520,18 +1523,18 @@ class AgentOrchestrator:
                     data_density = min(max(float(match_data.get('data_density', match_data.get('match_count', 1) / 5.0) or 0.4), 0.0), 1.0)
                     horizon_strength = min(max(conf * 0.7 + data_density * 0.3, 0.0), 1.0)
                     target_horizons = [{
-                        'label': '15m',
-                        'eta_minutes': 15,
+                        'label': '1h',
+                        'eta_minutes': 60,
                         'target_pct': round(target_pct, 6),
                         'target_price': round(current_price * (1.0 + target_pct if trade_direction == 'long' else 1.0 - target_pct), 8),
                         'strength': round(horizon_strength, 4),
                     }]
                     for label, eta_minutes, multiplier, required_strength in [
-                        ('1h', 60, 1.2, 0.0),  # 1h ALWAYS emitted for consistent 1-hour learning
-                        ('2h', 120, 1.45, 0.45),
-                        ('4h', 240, 1.8, 0.58),
-                        ('8h', 480, 2.1, 0.72),
-                        ('12h', 720, 2.35, 0.82),
+                        ('2h', 120, 1.35, 0.42),
+                        ('4h', 240, 1.7, 0.54),
+                        ('8h', 480, 2.0, 0.68),
+                        ('12h', 720, 2.2, 0.78),
+                        ('24h', 1440, 2.45, 0.88),
                     ]:
                         if horizon_strength < required_strength:
                             continue

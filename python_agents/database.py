@@ -118,9 +118,13 @@ def _is_target_card_candidate(signal: Dict[str, Any]) -> bool:
         metadata.get('target_pct', metadata.get('predicted_magnitude', 0.0))
     )
     quality = float(metadata.get('quality_score', _signal_quality_score(confidence, target_pct)) or 0.0)
+    eta_minutes = int(metadata.get('estimated_duration_to_target_minutes', 60) or 60)
     explicit_candidate = str(metadata.get('dashboard_candidate', '')).lower() == 'true' or bool(metadata.get('dashboard_candidate') is True)
 
     if target_pct < 0.02:
+        return False
+
+    if eta_minutes < 60 or eta_minutes > 1440:
         return False
 
     if source not in {'strategist', 'pattern_matcher'}:
@@ -841,6 +845,7 @@ class Database:
         target_pct = max(normalized_target_pct, 0.02)
         target_price = entry_price * (1.0 + target_pct) if direction == 'long' else entry_price * (1.0 - target_pct)
         eta_minutes = int(metadata.get('estimated_duration_to_target_minutes', 60) or 60)
+        eta_minutes = max(60, min(1440, eta_minutes))
 
         metadata.setdefault('position_bias', direction)
         metadata['target_pct'] = target_pct
@@ -848,7 +853,24 @@ class Database:
         metadata['entry_price'] = float(metadata.get('entry_price', entry_price) or entry_price)
         metadata['current_price_at_signal'] = float(metadata.get('current_price_at_signal', entry_price) or entry_price)
         metadata['target_price'] = float(metadata.get('target_price', target_price) or target_price)
-        metadata['estimated_duration_to_target_minutes'] = max(1, eta_minutes)
+        metadata['estimated_duration_to_target_minutes'] = eta_minutes
+
+        target_horizons = metadata.get('target_horizons')
+        if isinstance(target_horizons, list):
+            sanitized_horizons = []
+            for horizon in target_horizons:
+                if not isinstance(horizon, dict):
+                    continue
+                horizon_eta = int(horizon.get('eta_minutes', 60) or 60)
+                if horizon_eta < 60 or horizon_eta > 1440:
+                    continue
+                sanitized_horizons.append({
+                    **horizon,
+                    'eta_minutes': horizon_eta,
+                    'target_pct': max(_normalize_signal_target_pct(horizon.get('target_pct', target_pct)), 0.02),
+                })
+            if sanitized_horizons:
+                metadata['target_horizons'] = sanitized_horizons
         metadata.setdefault('market_type', market_type)
         metadata.setdefault('exchange', 'mixed')
         signal_source = _infer_signal_source(signal_data.get('signal_type', ''), metadata)

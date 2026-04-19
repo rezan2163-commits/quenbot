@@ -71,6 +71,20 @@ function resolveSignalTargetPct(signal: any) {
   return 0;
 }
 
+function resolveSignalEtaMinutes(signal: any) {
+  const metadata = signal.metadata || {};
+  const direct = toFiniteNumber(metadata.estimated_duration_to_target_minutes ?? signal.estimated_duration_to_target_minutes, Number.NaN);
+  if (Number.isFinite(direct)) return Math.round(direct);
+  const horizons = Array.isArray(metadata.target_horizons) ? metadata.target_horizons : [];
+  if (horizons.length) {
+    const mins = horizons
+      .map((item: any) => Math.round(toFiniteNumber(item?.eta_minutes, Number.NaN)))
+      .filter((v: number) => Number.isFinite(v));
+    if (mins.length) return Math.min(...mins);
+  }
+  return 60;
+}
+
 const INTEGRATION_STRATEGIC_SOURCES = new Set(["strategist", "pattern_matcher"]);
 
 function isIntegrationStrategicSource(source: unknown): boolean {
@@ -99,9 +113,11 @@ function isActionableTargetCard(signal: any) {
   const targetPct = resolveSignalTargetPct(signal);
   const quality = resolveSignalQuality(signal);
   const source = resolveSignalSource(signal);
+  const etaMinutes = resolveSignalEtaMinutes(signal);
   const explicitCandidate = String(signal.metadata?.dashboard_candidate || "").toLowerCase() === 'true';
 
   if (targetPct < 0.02) return false;
+  if (etaMinutes < 60 || etaMinutes > 1440) return false;
 
   if (!['strategist', 'pattern_matcher'].includes(source)) return false;
 
