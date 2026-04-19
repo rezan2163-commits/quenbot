@@ -139,6 +139,9 @@ module.exports = {
         // Online Learning ve Prometheus metrics exporter (dashboard
         // IntelPanel "8/8 modul aktif" gostergesi icin).
         QUENBOT_FAST_BRAIN_ENABLED: process.env.QUENBOT_FAST_BRAIN_ENABLED || "1",
+        // Canli path'te OFI/MH warming-up olsa bile Fast Brain'in
+        // confluence-tabanli shadow prediction uretmesine izin ver.
+        QUENBOT_FAST_BRAIN_MIN_FEATURES: process.env.QUENBOT_FAST_BRAIN_MIN_FEATURES || "2",
         QUENBOT_DECISION_ROUTER_ENABLED: process.env.QUENBOT_DECISION_ROUTER_ENABLED || "1",
         QUENBOT_ONLINE_LEARNING_ENABLED: process.env.QUENBOT_ONLINE_LEARNING_ENABLED || "1",
         QUENBOT_METRICS_ENABLED: process.env.QUENBOT_METRICS_ENABLED || "1",
