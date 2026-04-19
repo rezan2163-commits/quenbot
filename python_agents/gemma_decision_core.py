@@ -437,6 +437,8 @@ class GemmaDecisionCore:
     MAX_DECISION_HISTORY = 100
     # SuperGemma'yı aşırı yüklememek için rate limit (saniye)
     MIN_DECISION_INTERVAL = float(os.getenv("QUENBOT_DECISION_MIN_INTERVAL", "0.5"))
+    # Aynı sembol için LLM çağrısı cooldown (saniye) — tekrar eden sembol spike'larını kıs
+    SYMBOL_LLM_COOLDOWN = float(os.getenv("QUENBOT_SYMBOL_LLM_COOLDOWN_SECONDS", "60.0"))
     # Similarity trigger — sadece ≥%60 eşleşmede SuperGemma çağrılır
     SIMILARITY_TRIGGER_THRESHOLD = 0.60
     # SuperGemma bağlanamazsa fallback kurallar
@@ -456,6 +458,7 @@ class GemmaDecisionCore:
         self._decision_lock = asyncio.Lock()
         self._decision_history: List[GemmaDecision] = []
         self._last_decision_time: float = 0
+        self._last_decision_per_symbol: Dict[str, float] = {}  # per-symbol LLM cooldown
         self._stats = {
             'total_requests': 0,
             'total_approved': 0,
@@ -493,6 +496,24 @@ class GemmaDecisionCore:
         if elapsed < self.MIN_DECISION_INTERVAL:
             await asyncio.sleep(self.MIN_DECISION_INTERVAL - elapsed)
 
+        # ─── Per-symbol LLM cooldown: aynı sembol için tekrarlayan çağrılar → fallback ───
+        now_sym = time.monotonic()
+        last_sym = self._last_decision_per_symbol.get(symbol, 0.0)
+        if now_sym - last_sym < self.SYMBOL_LLM_COOLDOWN:
+            decision = self._fallback_evaluate(symbol, timeframe, context)
+            decision.reasoning = f"{decision.reasoning} | Sembol LLM cooldown ({self.SYMBOL_LLM_COOLDOWN:.0f}s) — fast fallback"
+            self._stats['fallback_calls'] += 1
+            self._stats['total_latency_ms'] += int((time.monotonic() - t0) * 1000)
+            counted = self._stats['gemma_calls'] + self._stats['fallback_calls']
+            if counted > 0:
+                self._stats['avg_latency_ms'] = self._stats['total_latency_ms'] / counted
+            if decision.approved:
+                self._stats['total_approved'] += 1
+            else:
+                self._stats['total_rejected'] += 1
+            decision.latency_ms = int((time.monotonic() - t0) * 1000)
+            return decision
+
         # ─── Context toplama ───
         context = self._build_context(pattern_data, scout_data, strategist_data)
 
@@ -516,6 +537,7 @@ class GemmaDecisionCore:
         else:
             async with self._decision_lock:
                 try:
+                    self._last_decision_per_symbol[symbol] = time.monotonic()
                     decision = await self._gemma_evaluate(symbol, timeframe, context)
                     self._stats['gemma_calls'] += 1
                 except Exception as e:

@@ -137,6 +137,9 @@ class AgentOrchestrator:
         self._last_pattern_signal_window: dict[str, int] = {}
         self._last_pattern_eval_at: dict[str, float] = {}
         self._pattern_eval_semaphore = asyncio.Semaphore(1)
+        # MAMIS veto per-symbol cooldown — aynı sembol için tekrarlayan veto spam'ini önle
+        self._mamis_veto_cooldown_seconds = float(os.getenv("QUENBOT_MAMIS_VETO_COOLDOWN_SECONDS", "5.0"))
+        self._mamis_last_veto_at: dict[str, float] = {}
         # Günlük sinyal limiti - her coin için günde max 4 sinyal
         self._max_daily_signals_per_symbol = int(os.getenv("QUENBOT_MAX_DAILY_SIGNALS_PER_SYMBOL", "4"))
         self._daily_signal_timestamps: dict[str, list[float]] = {}  # {symbol: [timestamp1, timestamp2, ...]}
@@ -1680,9 +1683,14 @@ class AgentOrchestrator:
         target_pct = max(0.02, min(0.50, estimated_volatility * 6.0 + 0.02))
         mamis_target_candidate = self._is_mamis_target_candidate(confidence, target_pct, estimated_volatility)
         if not mamis_target_candidate:
-            logger.info(
-                f"🚫 MAMIS veto: {symbol} conf={confidence:.2f} vol={estimated_volatility:.4f} target={target_pct:.4f}"
-            )
+            # Per-symbol cooldown: aynı sembolü cooldown süresi geçmeden tekrar loglama
+            now_mono = time.monotonic()
+            last_veto = self._mamis_last_veto_at.get(symbol, 0.0)
+            if now_mono - last_veto >= self._mamis_veto_cooldown_seconds:
+                self._mamis_last_veto_at[symbol] = now_mono
+                logger.info(
+                    f"🚫 MAMIS veto: {symbol} conf={confidence:.2f} vol={estimated_volatility:.4f} target={target_pct:.4f}"
+                )
             return
 
         logger.info(

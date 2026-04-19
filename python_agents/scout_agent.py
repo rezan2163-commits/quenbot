@@ -3,6 +3,7 @@ from asyncio import QueueEmpty
 import json
 import logging
 import os
+import time
 import contextlib
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
@@ -70,6 +71,9 @@ class ScoutAgent:
         self.trade_ingest_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=max(5000, Config.SCOUT_TRADE_QUEUE_SIZE))
         self._trade_ingest_workers: List[asyncio.Task] = []
         self._trade_queue_drops = 0
+        # Per-symbol flood protection: queue >80% dolu ve aynı sembol var → skip
+        self._trade_queue_symbol_last_at: Dict[str, float] = {}
+        self._trade_queue_symbol_cooldown = float(os.getenv("QUENBOT_TRADE_QUEUE_SYMBOL_COOLDOWN_MS", "200")) / 1000.0
         self._last_trade_timeout_log_at: Optional[datetime] = None
 
     async def initialize(self):
@@ -129,8 +133,19 @@ class ScoutAgent:
                 logger.debug(f"Scout trade ingest worker {worker_index} error: {e}")
 
     def _queue_trade(self, trade_data: Dict[str, Any]):
+        symbol = str(trade_data.get('symbol', '') or '').upper()
+        queue_size = self.trade_ingest_queue.maxsize
+        # Per-symbol flood gate: queue >80% dolu ve bu sembolün son eklenmesi çok yakınsa, skip
+        if queue_size > 0 and self.trade_ingest_queue.qsize() >= int(queue_size * 0.80):
+            now_f = time.monotonic()
+            last_sym = self._trade_queue_symbol_last_at.get(symbol, 0.0)
+            if now_f - last_sym < self._trade_queue_symbol_cooldown:
+                self._trade_queue_drops += 1
+                return
         try:
             self.trade_ingest_queue.put_nowait(trade_data)
+            if symbol:
+                self._trade_queue_symbol_last_at[symbol] = time.monotonic()
         except asyncio.QueueFull:
             self._trade_queue_drops += 1
             try:
