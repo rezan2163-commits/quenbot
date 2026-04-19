@@ -13,6 +13,8 @@ export default function WatchlistManager() {
   const { data: watchlist, mutate: mutateWatchlist } = useWatchlist();
   const [showAdd, setShowAdd] = useState(false);
   const [symbolInput, setSymbolInput] = useState("");
+  const [exchange, setExchange] = useState<"binance" | "bybit" | "both">("binance");
+  const [marketType, setMarketType] = useState<"spot" | "futures" | "both">("spot");
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; msg: string } | null>(null);
@@ -80,9 +82,9 @@ export default function WatchlistManager() {
     setAdding(true);
     setFeedback(null);
     try {
-      await addWatchlistCoin(normalized, { exchange: "both", market_type: "both" });
+      await addWatchlistCoin(normalized, { exchange, market_type: marketType });
       await Promise.all([mutateWatchlist(), mutate(API + "/api/live/prices")]);
-      setFeedback({ type: "success", msg: normalized + " takibe eklendi" });
+      setFeedback({ type: "success", msg: normalized + ` [${exchange.toUpperCase()}-${marketType.toUpperCase()}] takibe eklendi` });
       setSymbolInput("");
       setTimeout(() => setFeedback(null), 3000);
     } catch (err: any) {
@@ -130,7 +132,8 @@ export default function WatchlistManager() {
       </div>
 
       {showAdd && (
-        <div className="px-3 py-2 border-b border-surface-border bg-surface/50">
+        <div className="px-3 py-2 border-b border-surface-border bg-surface/50 space-y-2">
+          {/* Symbol Input */}
           <div className="flex items-center gap-2">
             <input
               value={symbolInput}
@@ -152,7 +155,53 @@ export default function WatchlistManager() {
               {adding ? "..." : "Ekle"}
             </button>
           </div>
-          <p className="mt-1 text-[10px] text-gray-500">Spot + Futures & Binance + Bybit akisina eklenir.</p>
+
+          {/* Exchange & Market Type Selection */}
+          <div className="grid grid-cols-2 gap-2">
+            {/* Borsa Seçimi */}
+            <div>
+              <label className="block text-[9px] font-semibold text-gray-400 mb-1">Borsa</label>
+              <div className="flex gap-1">
+                {(["binance", "bybit", "both"] as const).map((ex) => (
+                  <button
+                    key={ex}
+                    onClick={() => setExchange(ex)}
+                    className={`flex-1 rounded px-2 py-1.5 text-[10px] font-medium transition-colors ${
+                      exchange === ex
+                        ? "bg-accent text-white border border-accent"
+                        : "border border-surface-border text-gray-400 hover:text-gray-200 hover:border-accent/50"
+                    }`}
+                  >
+                    {ex.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Opsiyon Seçimi */}
+            <div>
+              <label className="block text-[9px] font-semibold text-gray-400 mb-1">Opsiyon</label>
+              <div className="flex gap-1">
+                {(["spot", "futures", "both"] as const).map((mt) => (
+                  <button
+                    key={mt}
+                    onClick={() => setMarketType(mt)}
+                    className={`flex-1 rounded px-2 py-1.5 text-[10px] font-medium transition-colors ${
+                      marketType === mt
+                        ? "bg-accent text-white border border-accent"
+                        : "border border-surface-border text-gray-400 hover:text-gray-200 hover:border-accent/50"
+                    }`}
+                  >
+                    {mt.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <p className="text-[9px] text-gray-500">
+            Seçilen: <span className="text-accent font-semibold">{exchange.toUpperCase()}</span> │ <span className="text-accent font-semibold">{marketType.toUpperCase()}</span>
+          </p>
         </div>
       )}
 
