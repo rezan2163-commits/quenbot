@@ -8,7 +8,7 @@ import { Plus, TrendingUp, TrendingDown, Wifi, WifiOff, Trash2, Check, RefreshCw
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
 export default function WatchlistManager() {
-  const { data: prices, error: priceErr } = useLivePrices();
+  const { data: prices, error: priceErr, isLoading: pricesLoading } = useLivePrices();
   const { data: movers } = useTopMovers();
   const { data: watchlist, mutate: mutateWatchlist } = useWatchlist();
   const [showAdd, setShowAdd] = useState(false);
@@ -84,7 +84,7 @@ export default function WatchlistManager() {
     try {
       await addWatchlistCoin(normalized, { exchange, market_type: marketType });
       await Promise.all([mutateWatchlist(), mutate(API + "/api/live/prices")]);
-      setFeedback({ type: "success", msg: normalized + ` [${exchange.toUpperCase()}-${marketType.toUpperCase()}] takibe eklendi` });
+      setFeedback({ type: "success", msg: `${normalized} [${exchange.toUpperCase()}-${marketType.toUpperCase()}] takibe eklendi` });
       setSymbolInput("");
       setTimeout(() => setFeedback(null), 3000);
     } catch (err: any) {
