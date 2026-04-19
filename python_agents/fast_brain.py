@@ -155,6 +155,7 @@ class FastBrainEngine:
         self._booster = None
         self._calibration = _Calibration()
         self._enabled = False
+        self._model_feature_order: Tuple[str, ...] = self.feature_order
         self._model_loaded_ts: float = 0.0
         self._total_predictions = 0
         self._total_errors = 0
@@ -173,6 +174,21 @@ class FastBrainEngine:
                 logger.info("FastBrain: model dosyası yok (%s) — motor dormant", self.model_path)
                 return
             self._booster = lgb.Booster(model_file=self.model_path)
+            try:
+                feature_names = tuple(
+                    str(name) for name in (self._booster.feature_name() or [])
+                    if str(name) in self.feature_order
+                )
+                if feature_names:
+                    self._model_feature_order = feature_names
+                if self._model_feature_order != self.feature_order:
+                    logger.info(
+                        "FastBrain runtime feature order model ile hizalandi: %d -> %d",
+                        len(self.feature_order),
+                        len(self._model_feature_order),
+                    )
+            except Exception as e:
+                logger.warning("FastBrain feature order okunamadı: %s", e)
             self._enabled = True
             self._model_loaded_ts = time.time()
             logger.info("🧠 FastBrain modeli yüklendi: %s (features=%d)",
@@ -311,20 +327,22 @@ class FastBrainEngine:
             return None
         t0 = time.perf_counter()
         try:
+            active_feature_order = self._model_feature_order or self.feature_order
             if features is None:
-                features, missing = self.collect_features(symbol)
+                features, _ = self.collect_features(symbol)
             else:
-                missing = [n for n in self.feature_order if n not in features]
+                features = dict(features)
 
-            used = sum(1 for n in self.feature_order if n in features)
+            missing = [n for n in active_feature_order if n not in features]
+            used = sum(1 for n in active_feature_order if n in features)
             if used < self.min_features:
                 return None
 
             if _HAS_NUMPY:
-                vec = np.array([[features.get(n, 0.0) for n in self.feature_order]],
+                vec = np.array([[features.get(n, 0.0) for n in active_feature_order]],
                                dtype=np.float32)
             else:
-                vec = [[features.get(n, 0.0) for n in self.feature_order]]
+                vec = [[features.get(n, 0.0) for n in active_feature_order]]
 
             raw = float(self._booster.predict(vec, num_iteration=self._booster.best_iteration)[0])
             prob = self._calibration.apply(raw)
@@ -384,6 +402,7 @@ class FastBrainEngine:
             "model_loaded_ts": self._model_loaded_ts,
             "calibration": self._calibration.method,
             "feature_order_size": len(self.feature_order),
+            "model_feature_order_size": len(self._model_feature_order),
             "total_predictions": self._total_predictions,
             "total_errors": self._total_errors,
             "tracked_symbols": len(self._last_prediction),
