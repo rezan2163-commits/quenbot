@@ -193,10 +193,16 @@ class ScoutAgent:
             user_wl = await self.db.get_user_watchlist()
             user_symbols = [str(w.get('symbol', '')).upper() for w in (user_wl or []) if w.get('symbol')]
             
-            # Sadece user watchlist'teki coinleri izle
-            self._active_watchlist = sorted(set(user_symbols)) if user_symbols else []
+            # Watchlist sınırlandırması: Kalite > Nicelik — yüksek hacimli semboller önce
+            # QUENBOT_SCOUT_MAX_WATCHLIST=8 (varsayılan) → queue_depth 40k → ~1k, latency 34s → ~2s
+            max_watchlist = int(os.getenv("QUENBOT_SCOUT_MAX_WATCHLIST", "8"))
+            priority_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOTUSDT', 'AVAXUSDT', 'LINKUSDT']
+            user_set = set(user_symbols)
+            filtered = [s for s in priority_symbols if s in user_set]  # Priority semboller (high volume)
+            filtered += [s for s in sorted(user_symbols) if s not in filtered]  # Geri kalanlar
+            self._active_watchlist = filtered[:max_watchlist]
             
-            logger.info(f"📋 Active watchlist: {len(self._active_watchlist)} coins -> {self._active_watchlist[:10]}{'...' if len(self._active_watchlist) > 10 else ''}")
+            logger.info(f"📋 Active watchlist: {len(self._active_watchlist)} coins (max {max_watchlist}) -> {self._active_watchlist}{'...' if len(self._active_watchlist) > max_watchlist else ''}")
         except Exception as e:
             logger.error(f"Watchlist refresh error: {e}")
             # Hata durumunda mevcut listeyi koru
