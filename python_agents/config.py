@@ -1,8 +1,19 @@
 import os
+from pathlib import Path
 from typing import Dict, Any
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_CONFIG_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _CONFIG_DIR.parent
+
+
+def _resolve_repo_path(raw_path: str) -> str:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return str(path)
+    return str((_REPO_ROOT / path).resolve())
 
 class Config:
     # Database
@@ -189,8 +200,12 @@ class Config:
 
     # Phase 3
     FAST_BRAIN_ENABLED = os.getenv("QUENBOT_FAST_BRAIN_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
-    FAST_BRAIN_MODEL_PATH = os.getenv("QUENBOT_FAST_BRAIN_MODEL_PATH", "python_agents/.models/fast_brain_latest.lgb")
-    FAST_BRAIN_CALIBRATION_PATH = os.getenv("QUENBOT_FAST_BRAIN_CALIB_PATH", "python_agents/.models/fast_brain_latest.calib.json")
+    FAST_BRAIN_MODEL_PATH = _resolve_repo_path(
+        os.getenv("QUENBOT_FAST_BRAIN_MODEL_PATH", "python_agents/.models/fast_brain_latest.lgb")
+    )
+    FAST_BRAIN_CALIBRATION_PATH = _resolve_repo_path(
+        os.getenv("QUENBOT_FAST_BRAIN_CALIB_PATH", "python_agents/.models/fast_brain_latest.calib.json")
+    )
     FAST_BRAIN_T_HIGH = float(os.getenv("QUENBOT_FAST_BRAIN_T_HIGH", "0.65"))
     FAST_BRAIN_T_LOW = float(os.getenv("QUENBOT_FAST_BRAIN_T_LOW", "0.45"))
     FAST_BRAIN_MIN_FEATURES = int(os.getenv("QUENBOT_FAST_BRAIN_MIN_FEATURES", "4"))
