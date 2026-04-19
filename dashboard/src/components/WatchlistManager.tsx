@@ -55,13 +55,20 @@ export default function WatchlistManager() {
 
   const watchedSymbols = new Set(watchlistItems.map((w) => String(w?.symbol || "").toUpperCase()).filter(Boolean));
 
-  const moverMap = new Map(moverList.map((m) => [String(m?.symbol || ""), m]).filter(([s]) => !!s));
+  const moverEntries = moverList
+    .map((m): [string, (typeof moverList)[number]] | null => {
+      const symbol = String(m?.symbol || "").toUpperCase();
+      if (!symbol) return null;
+      return [symbol, m];
+    })
+    .filter((entry): entry is [string, (typeof moverList)[number]] => entry !== null);
+  const moverMap = new Map<string, (typeof moverList)[number]>(moverEntries);
 
   const symbolMap = new Map<string, { symbol: string; price: number; price_text: string; change_pct: number; exchange: string; market_type: string; ts: string }>();
   priceList.forEach((p) => {
     const symbol = String(p?.symbol || "").toUpperCase();
     if (!symbol) return;
-    const existing = symbolMap.get(p.symbol);
+    const existing = symbolMap.get(symbol);
     if (!existing || new Date(p.timestamp) > new Date(existing.ts)) {
       const mover = moverMap.get(symbol);
       symbolMap.set(symbol, {
