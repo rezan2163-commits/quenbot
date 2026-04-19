@@ -225,7 +225,7 @@ class AuditorAgent:
         """Write a correction note based on RCA analysis for Strategist to apply."""
         try:
             failure_type = rca_result['failure_type']
-            confidence = rca_result.get('confidence', 0)
+            confidence = float(rca_result.get('confidence', 0) or 0)
             meta = simulation.get('metadata', {})
             if isinstance(meta, str):
                 import json

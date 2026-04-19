@@ -89,10 +89,29 @@ class StrategistAgent:
         self._mamis_fusions = 0
         self._historical_lookback_hours = max(24, int(os.getenv("QUENBOT_HISTORICAL_LOOKBACK_HOURS", str(Config.HISTORICAL_LOOKBACK_HOURS))))
         self._signature_limit = max(200, int(os.getenv("QUENBOT_SIGNATURE_CACHE_LIMIT", str(Config.SIGNATURE_CACHE_LIMIT))))
+        self._db_query_timeout_seconds = float(os.getenv("QUENBOT_STRATEGIST_DB_QUERY_TIMEOUT_SECONDS", "8"))
+        self._db_timeout_symbol_cooldown_seconds = float(os.getenv("QUENBOT_STRATEGIST_DB_TIMEOUT_COOLDOWN_SECONDS", "120"))
+        self._db_timeout_symbol_until: Dict[str, float] = {}
 
     async def initialize(self):
         logger.info("Initializing Strategist Agent...")
         self._event_bus.subscribe(EventType.MICROSTRUCTURE_SIGNAL, self._on_mamis_signal)
+
+    def _symbol_timeout_key(self, symbol: str, market_type: str) -> str:
+        return f"{symbol.upper()}:{market_type}"
+
+    def _is_symbol_temporarily_blocked(self, symbol: str, market_type: str) -> bool:
+        key = self._symbol_timeout_key(symbol, market_type)
+        until = self._db_timeout_symbol_until.get(key, 0.0)
+        now = time.time()
+        if until <= now:
+            self._db_timeout_symbol_until.pop(key, None)
+            return False
+        return True
+
+    def _mark_symbol_timeout(self, symbol: str, market_type: str) -> None:
+        key = self._symbol_timeout_key(symbol, market_type)
+        self._db_timeout_symbol_until[key] = time.time() + self._db_timeout_symbol_cooldown_seconds
 
     async def _on_mamis_signal(self, event: Event):
         signal = event.data or {}
@@ -711,7 +730,15 @@ class StrategistAgent:
             for market_type in Config.MARKET_TYPES:
                 for symbol in watchlist:
                     try:
-                        trades = await self.db.get_recent_trades(symbol, limit=100, market_type=market_type)
+                        if self._is_symbol_temporarily_blocked(symbol, market_type):
+                            continue
+
+                        trades = await self.db.get_recent_trades(
+                            symbol,
+                            limit=100,
+                            market_type=market_type,
+                            timeout_seconds=self._db_query_timeout_seconds,
+                        )
                         if len(trades) < 10:
                             continue
 
@@ -881,6 +908,10 @@ class StrategistAgent:
                                             f"chg={price_change_pct*100:.2f}% rsi={rsi_val:.0f} trend={trend_dir}"
                                         )
 
+                    except TimeoutError:
+                        self._mark_symbol_timeout(symbol, market_type)
+                        logger.warning(f"Strategist DB timeout: {symbol} ({market_type}) - cooldown applied")
+                        continue
                     except Exception as e:
                         logger.exception(f"Error processing {symbol} ({market_type}): {e}")
                         continue
@@ -903,8 +934,16 @@ class StrategistAgent:
             for market_type in Config.MARKET_TYPES:
                 for symbol in watchlist:
                     try:
+                        if self._is_symbol_temporarily_blocked(symbol, market_type):
+                            continue
+
                         # Get recent trades to build current vector
-                        trades = await self.db.get_recent_trades(symbol, limit=100, market_type=market_type)
+                        trades = await self.db.get_recent_trades(
+                            symbol,
+                            limit=100,
+                            market_type=market_type,
+                            timeout_seconds=self._db_query_timeout_seconds,
+                        )
                         if len(trades) < 20:
                             continue
 
@@ -976,6 +1015,10 @@ class StrategistAgent:
                                 )
                                 break  # 1 match per symbol per cycle
 
+                    except TimeoutError:
+                        self._mark_symbol_timeout(symbol, market_type)
+                        logger.warning(f"Signature matching DB timeout: {symbol} ({market_type}) - cooldown applied")
+                        continue
                     except Exception as e:
                         logger.error(f"Signature matching error {symbol} ({market_type}): {e}")
                         continue

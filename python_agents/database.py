@@ -596,6 +596,7 @@ class Database:
 
             # Create indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_timestamp ON trades(symbol, timestamp)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_market_timestamp ON trades(symbol, market_type, timestamp DESC)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp_exchange_market ON trades(timestamp DESC, exchange, market_type)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_price_movements_symbol_time ON price_movements(symbol, start_time)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_status_timestamp ON signals(status, timestamp)")
@@ -734,7 +735,13 @@ class Database:
             """, trade_data['exchange'], trade_data.get('market_type', 'spot'), trade_data['symbol'],
                 trade_data['price'], trade_data['quantity'], trade_data['timestamp'], trade_data['side'], trade_data['trade_id'])
 
-    async def get_recent_trades(self, symbol: str, limit: int = 1000, market_type: str = None) -> List[Dict[str, Any]]:
+    async def get_recent_trades(
+        self,
+        symbol: str,
+        limit: int = 1000,
+        market_type: str = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         """Get recent trades for a symbol and optional market type"""
         async with self.pool.acquire() as conn:
             if market_type:
@@ -743,14 +750,14 @@ class Database:
                     WHERE symbol = $1 AND market_type = $2
                     ORDER BY timestamp DESC
                     LIMIT $3
-                """, symbol, market_type, limit)
+                """, symbol, market_type, limit, timeout=timeout_seconds)
             else:
                 rows = await conn.fetch("""
                     SELECT * FROM trades
                     WHERE symbol = $1
                     ORDER BY timestamp DESC
                     LIMIT $2
-                """, symbol, limit)
+                """, symbol, limit, timeout=timeout_seconds)
 
             return [dict(row) for row in rows]
 
