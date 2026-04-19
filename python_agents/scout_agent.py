@@ -74,6 +74,11 @@ class ScoutAgent:
         # Per-symbol flood protection: queue >80% dolu ve aynı sembol var → skip
         self._trade_queue_symbol_last_at: Dict[str, float] = {}
         self._trade_queue_symbol_cooldown = float(os.getenv("QUENBOT_TRADE_QUEUE_SYMBOL_COOLDOWN_MS", "200")) / 1000.0
+        # CPU/RAM koruması: REST 4xx alan sembolleri geçici olarak sustur (tekrar deneme + log azaltma)
+        self._rest_invalid_until: Dict[str, datetime] = {}
+        self._rest_warning_last_at: Dict[str, datetime] = {}
+        self._rest_invalid_cooldown_seconds = max(60, int(os.getenv("QUENBOT_REST_INVALID_SYMBOL_COOLDOWN_SECONDS", "1800")))
+        self._rest_warning_interval_seconds = max(30, int(os.getenv("QUENBOT_REST_WARNING_INTERVAL_SECONDS", "300")))
         self._last_trade_timeout_log_at: Optional[datetime] = None
 
     async def initialize(self):
@@ -191,23 +196,46 @@ class ScoutAgent:
         """Kullanıcı watchlist'ini DB'den yükle - sadece user_watchlist tablosu kullanılır"""
         try:
             user_wl = await self.db.get_user_watchlist()
-            user_symbols = list(set([str(w.get('symbol', '')).upper() for w in (user_wl or []) if w.get('symbol')]))  # Deduplicate
-            
-            # Watchlist sınırlandırması: Kalite > Nicelik — yüksek hacimli semboller önce
-            # QUENBOT_SCOUT_MAX_WATCHLIST=8 (varsayılan) → queue_depth 40k → ~1k, latency 34s → ~2s
-            max_watchlist = int(os.getenv("QUENBOT_SCOUT_MAX_WATCHLIST", "8"))
-            priority_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOTUSDT', 'AVAXUSDT', 'LINKUSDT']
-            user_set = set(user_symbols)
-            filtered = [s for s in priority_symbols if s in user_set]  # Priority semboller (high volume)
-            filtered += [s for s in sorted(user_symbols) if s not in filtered]  # Geri kalanlar
-            self._active_watchlist = filtered[:max_watchlist]
-            
-            logger.info(f"📋 Active watchlist: {len(self._active_watchlist)} coins (max {max_watchlist}) -> {self._active_watchlist}{'...' if len(self._active_watchlist) > max_watchlist else ''}")
+            user_symbols = sorted(set([str(w.get('symbol', '')).upper() for w in (user_wl or []) if w.get('symbol')]))
+
+            # Kullanıcı talebi: kaldırılan sembolleri geri getir — watchlist limiti yok.
+            self._active_watchlist = user_symbols
+
+            logger.info(
+                f"📋 Active watchlist: {len(self._active_watchlist)} coins -> "
+                f"{self._active_watchlist[:10]}{'...' if len(self._active_watchlist) > 10 else ''}"
+            )
         except Exception as e:
             logger.error(f"Watchlist refresh error: {e}")
             # Hata durumunda mevcut listeyi koru
             if not self._active_watchlist:
                 self._active_watchlist = []
+
+    def _rest_symbol_key(self, exchange: str, market_type: str, symbol: str) -> str:
+        return f"{exchange}:{market_type}:{symbol}"
+
+    def _rest_symbol_is_temporarily_blocked(self, exchange: str, market_type: str, symbol: str) -> bool:
+        key = self._rest_symbol_key(exchange, market_type, symbol)
+        until = self._rest_invalid_until.get(key)
+        if not until:
+            return False
+        if datetime.utcnow() >= until:
+            self._rest_invalid_until.pop(key, None)
+            return False
+        return True
+
+    def _mark_rest_symbol_invalid(self, exchange: str, market_type: str, symbol: str):
+        key = self._rest_symbol_key(exchange, market_type, symbol)
+        self._rest_invalid_until[key] = datetime.utcnow() + timedelta(seconds=self._rest_invalid_cooldown_seconds)
+
+    def _should_log_rest_warning(self, exchange: str, market_type: str, symbol: str) -> bool:
+        key = self._rest_symbol_key(exchange, market_type, symbol)
+        now = datetime.utcnow()
+        last = self._rest_warning_last_at.get(key)
+        if last and (now - last).total_seconds() < self._rest_warning_interval_seconds:
+            return False
+        self._rest_warning_last_at[key] = now
+        return True
 
     def get_watchlist(self) -> List[str]:
         return self._active_watchlist if self._active_watchlist else []
@@ -419,6 +447,9 @@ class ScoutAgent:
     async def _fetch_binance_rest(self, market_type: str, symbol: str):
         """Fetch recent trades from Binance REST API."""
         try:
+            if self._rest_symbol_is_temporarily_blocked('binance', market_type, symbol):
+                return
+
             endpoint = f"{Config.BINANCE_REST_API}/api/v3/trades"
             params = {"symbol": symbol, "limit": Config.get_agent_config('scout').get('rest_fetch_limit', 100)}
             
@@ -447,13 +478,19 @@ class ScoutAgent:
                     
                     logger.debug(f"Fetched {len(trades)} trades from Binance {market_type}: {symbol}")
                 else:
-                    logger.warning(f"Binance REST API error for {symbol} ({market_type}): status {resp.status}")
+                    if resp.status in {400, 404}:
+                        self._mark_rest_symbol_invalid('binance', market_type, symbol)
+                    if self._should_log_rest_warning('binance', market_type, symbol):
+                        logger.warning(f"Binance REST API error for {symbol} ({market_type}): status {resp.status}")
                     
         except Exception as e:
             logger.debug(f"Binance REST fetch error for {symbol} ({market_type}): {e}")
 
     async def _fetch_bybit_rest(self, market_type: str, symbol: str):
         """Fetch recent trades from Bybit REST API (V5 format)."""
+        if self._rest_symbol_is_temporarily_blocked('bybit', market_type, symbol):
+            return
+
         cooldown_key = f"{market_type}:{symbol}"
         now = datetime.utcnow()
         last_fetch = self._last_bybit_rest_fetch_at.get(cooldown_key)
@@ -473,7 +510,10 @@ class ScoutAgent:
                 endpoint = f"{base_url}/v5/market/recent-trade"
                 async with self.http_session.get(endpoint, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
-                        logger.warning(f"Bybit REST API error for {symbol} ({market_type}) via {base_url}: status {resp.status}")
+                        if resp.status in {400, 404}:
+                            self._mark_rest_symbol_invalid('bybit', market_type, symbol)
+                        if self._should_log_rest_warning('bybit', market_type, symbol):
+                            logger.warning(f"Bybit REST API error for {symbol} ({market_type}) via {base_url}: status {resp.status}")
                         continue
 
                     data = await resp.json()
