@@ -191,7 +191,7 @@ class ScoutAgent:
         """Kullanıcı watchlist'ini DB'den yükle - sadece user_watchlist tablosu kullanılır"""
         try:
             user_wl = await self.db.get_user_watchlist()
-            user_symbols = [str(w.get('symbol', '')).upper() for w in (user_wl or []) if w.get('symbol')]
+            user_symbols = list(set([str(w.get('symbol', '')).upper() for w in (user_wl or []) if w.get('symbol')]))  # Deduplicate
             
             # Watchlist sınırlandırması: Kalite > Nicelik — yüksek hacimli semboller önce
             # QUENBOT_SCOUT_MAX_WATCHLIST=8 (varsayılan) → queue_depth 40k → ~1k, latency 34s → ~2s
