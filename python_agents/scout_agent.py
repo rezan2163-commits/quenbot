@@ -79,6 +79,9 @@ class ScoutAgent:
         self._rest_warning_last_at: Dict[str, datetime] = {}
         self._rest_invalid_cooldown_seconds = max(60, int(os.getenv("QUENBOT_REST_INVALID_SYMBOL_COOLDOWN_SECONDS", "1800")))
         self._rest_warning_interval_seconds = max(30, int(os.getenv("QUENBOT_REST_WARNING_INTERVAL_SECONDS", "300")))
+        self._rest_fetch_limit_hard_cap = max(5, int(os.getenv("QUENBOT_REST_FETCH_LIMIT_HARD_CAP", "20")))
+        self._queue_stale_trade_drop_seconds = max(10, int(os.getenv("QUENBOT_QUEUE_STALE_TRADE_DROP_SECONDS", "90")))
+        self._publish_trade_update_max_age_seconds = max(3, int(os.getenv("QUENBOT_PUBLISH_TRADE_MAX_AGE_SECONDS", "20")))
         self._last_trade_timeout_log_at: Optional[datetime] = None
 
     async def initialize(self):
@@ -140,8 +143,18 @@ class ScoutAgent:
     def _queue_trade(self, trade_data: Dict[str, Any]):
         symbol = str(trade_data.get('symbol', '') or '').upper()
         queue_size = self.trade_ingest_queue.maxsize
+        trade_ts = trade_data.get('timestamp')
+        queue_depth = self.trade_ingest_queue.qsize()
+
+        # Queue baskısı altında çok eski trade'leri eliyoruz; gerçek zamanlı akışı korur.
+        if isinstance(trade_ts, datetime) and queue_size > 0 and queue_depth >= int(queue_size * 0.50):
+            age_s = (datetime.utcnow() - trade_ts).total_seconds()
+            if age_s > self._queue_stale_trade_drop_seconds:
+                self._trade_queue_drops += 1
+                return
+
         # Per-symbol flood gate: queue >80% dolu ve bu sembolün son eklenmesi çok yakınsa, skip
-        if queue_size > 0 and self.trade_ingest_queue.qsize() >= int(queue_size * 0.80):
+        if queue_size > 0 and queue_depth >= int(queue_size * 0.80):
             now_f = time.monotonic()
             last_sym = self._trade_queue_symbol_last_at.get(symbol, 0.0)
             if now_f - last_sym < self._trade_queue_symbol_cooldown:
@@ -190,7 +203,12 @@ class ScoutAgent:
 
         if inserted_id:
             self.trade_counter += 1
-            await self._publish_trade_update(trade_data)
+            trade_ts = trade_data.get('timestamp')
+            if isinstance(trade_ts, datetime):
+                if (datetime.utcnow() - trade_ts).total_seconds() <= self._publish_trade_update_max_age_seconds:
+                    await self._publish_trade_update(trade_data)
+            else:
+                await self._publish_trade_update(trade_data)
 
     async def _refresh_watchlist(self):
         """Kullanıcı watchlist'ini DB'den yükle - sadece user_watchlist tablosu kullanılır"""
@@ -430,12 +448,21 @@ class ScoutAgent:
                 # Slow safety net for all exchanges. Fast Bybit recovery runs in a dedicated loop.
                 active_symbols = self.get_watchlist()
                 tasks = []
+
+                # Binance REST de sadece stale durumunda devreye girsin; aksi durumda WS ana kaynak.
+                binance_spot_stale = self._exchange_is_stale('binance', 'spot')
+                binance_futures_stale = self._exchange_is_stale('binance', 'futures')
+                bybit_spot_stale = self._exchange_is_stale('bybit', 'spot')
+                bybit_futures_stale = self._exchange_is_stale('bybit', 'futures')
+
                 for symbol in active_symbols:
-                    tasks.append(self._fetch_binance_rest('spot', symbol))
-                    tasks.append(self._fetch_binance_rest('futures', symbol))
-                    if self._exchange_is_stale('bybit', 'spot'):
+                    if binance_spot_stale:
+                        tasks.append(self._fetch_binance_rest('spot', symbol))
+                    if binance_futures_stale:
+                        tasks.append(self._fetch_binance_rest('futures', symbol))
+                    if bybit_spot_stale:
                         tasks.append(self._fetch_bybit_rest('spot', symbol))
-                    if self._exchange_is_stale('bybit', 'futures'):
+                    if bybit_futures_stale:
                         tasks.append(self._fetch_bybit_rest('futures', symbol))
                 
                 await asyncio.gather(*tasks, return_exceptions=True)
@@ -451,7 +478,8 @@ class ScoutAgent:
                 return
 
             endpoint = f"{Config.BINANCE_REST_API}/api/v3/trades"
-            params = {"symbol": symbol, "limit": Config.get_agent_config('scout').get('rest_fetch_limit', 100)}
+            base_limit = int(Config.get_agent_config('scout').get('rest_fetch_limit', 100) or 100)
+            params = {"symbol": symbol, "limit": min(base_limit, self._rest_fetch_limit_hard_cap)}
             
             async with self.http_session.get(endpoint, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
@@ -474,6 +502,7 @@ class ScoutAgent:
                         }
                         
                         self.price_cache[symbol] = price
+                        self._exchange_last_trade_at[f"binance:{market_type}"] = timestamp
                         self._queue_trade(trade_data)
                     
                     logger.debug(f"Fetched {len(trades)} trades from Binance {market_type}: {symbol}")
@@ -499,10 +528,11 @@ class ScoutAgent:
         self._last_bybit_rest_fetch_at[cooldown_key] = now
 
         category = "spot" if market_type == "spot" else "linear"
+        base_limit = int(Config.get_agent_config('scout').get('rest_fetch_limit', 100) or 100)
         params = {
             "category": category,
             "symbol": symbol,
-            "limit": Config.get_agent_config('scout').get('rest_fetch_limit', 100)
+            "limit": min(base_limit, self._rest_fetch_limit_hard_cap)
         }
 
         for base_url in Config.get_bybit_rest_candidates():
@@ -592,6 +622,7 @@ class ScoutAgent:
                 }
 
                 self.price_cache[symbol] = price
+                self._exchange_last_trade_at[f"binance:{market_type}"] = timestamp
                 self._queue_trade(trade_data)
             except (ValueError, KeyError) as e:
                 logger.warning(f"Failed to parse Binance trade data: {e}")
