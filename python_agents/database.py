@@ -615,7 +615,11 @@ class Database:
 
             # Create indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_timestamp ON trades(symbol, timestamp)")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_market_timestamp ON trades(symbol, market_type, timestamp DESC)")
+            try:
+                # Non-blocking startup: if lock contention causes timeout, skip and continue.
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_market_timestamp ON trades(symbol, market_type, timestamp DESC)")
+            except Exception as e:
+                logger.warning(f"Skipping idx_trades_symbol_market_timestamp creation this cycle: {e!r}")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp_exchange_market ON trades(timestamp DESC, exchange, market_type)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_price_movements_symbol_time ON price_movements(symbol, start_time)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_status_timestamp ON signals(status, timestamp)")
