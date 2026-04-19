@@ -1,3 +1,4 @@
+import asyncio
 import asyncpg
 import json
 import logging
@@ -257,18 +258,36 @@ class Database:
 
     async def connect(self):
         """Initialize database connection pool"""
-        try:
-            self.pool = await asyncpg.create_pool(
-                Config.DATABASE_URL,
-                min_size=8,
-                max_size=40,
-                command_timeout=60
-            )
-            await self.create_tables()
-            logger.info("Database connected successfully")
-        except Exception as e:
-            logger.error(f"Database connection failed: {e}")
-            raise
+        attempts = max(1, int(os.getenv('QUENBOT_DB_CONNECT_ATTEMPTS', '6')))
+        base_delay = max(0.5, float(os.getenv('QUENBOT_DB_CONNECT_BASE_DELAY_SECONDS', '1.0')))
+        last_error = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                self.pool = await asyncpg.create_pool(
+                    Config.DATABASE_URL,
+                    min_size=8,
+                    max_size=40,
+                    command_timeout=60
+                )
+                await self.create_tables()
+                logger.info("Database connected successfully")
+                return
+            except Exception as e:
+                last_error = e
+                delay = min(base_delay * (2 ** (attempt - 1)), 12.0)
+                logger.warning(
+                    "Database connect attempt %s/%s failed: %r (retry in %.1fs)",
+                    attempt,
+                    attempts,
+                    e,
+                    delay,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(delay)
+
+        logger.error("Database connection failed after %s attempts: %r", attempts, last_error)
+        raise last_error
 
     async def disconnect(self):
         """Close database connection pool"""
