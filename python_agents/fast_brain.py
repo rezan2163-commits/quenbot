@@ -77,6 +77,7 @@ class FastBrainPrediction:
     confidence: float        # |p - 0.5| * 2 ∈ [0,1]
     features_used: int
     missing_features: List[str] = field(default_factory=list)
+    mode: str = "model"
     ts: float = 0.0
     latency_ms: float = 0.0
 
@@ -89,6 +90,7 @@ class FastBrainPrediction:
             "confidence": round(self.confidence, 4),
             "features_used": self.features_used,
             "missing_features": self.missing_features,
+            "mode": self.mode,
             "ts": self.ts,
             "latency_ms": round(self.latency_ms, 3),
         }
@@ -142,6 +144,7 @@ class FastBrainEngine:
         t_high: float = 0.65,
         t_low: float = 0.45,
         min_features: int = 4,
+        allow_confluence_fallback: bool = True,
         event_bus=None,
     ) -> None:
         self.model_path = model_path
@@ -150,6 +153,7 @@ class FastBrainEngine:
         self.t_high = float(t_high)
         self.t_low = float(t_low)
         self.min_features = int(min_features)
+        self.allow_confluence_fallback = bool(allow_confluence_fallback)
         self.event_bus = event_bus
 
         self._booster = None
@@ -159,6 +163,7 @@ class FastBrainEngine:
         self._model_loaded_ts: float = 0.0
         self._total_predictions = 0
         self._total_errors = 0
+        self._fallback_predictions = 0
         self._last_prediction: Dict[str, FastBrainPrediction] = {}
 
         if not _HAS_LGB:
@@ -336,7 +341,7 @@ class FastBrainEngine:
             missing = [n for n in active_feature_order if n not in features]
             used = sum(1 for n in active_feature_order if n in features)
             if used < self.min_features:
-                return None
+                return self._fallback_prediction(symbol, features, missing)
 
             if _HAS_NUMPY:
                 vec = np.array([[features.get(n, 0.0) for n in active_feature_order]],
@@ -364,6 +369,7 @@ class FastBrainEngine:
                 confidence=conf,
                 features_used=used,
                 missing_features=missing,
+                mode="model",
                 ts=time.time(),
                 latency_ms=(time.perf_counter() - t0) * 1000.0,
             )
@@ -373,6 +379,56 @@ class FastBrainEngine:
         except Exception as e:
             self._total_errors += 1
             logger.debug("FastBrain predict %s hata: %s", symbol, e)
+            return self._fallback_prediction(symbol, features or {}, [])
+
+    def _fallback_prediction(
+        self,
+        symbol: str,
+        features: Dict[str, float],
+        missing_features: List[str],
+    ) -> Optional[FastBrainPrediction]:
+        """Model feature coverage yetersizse confluence tabanli konservatif tahmin."""
+        if not self.allow_confluence_fallback:
+            return None
+        score_raw = features.get("confluence_score")
+        lo_raw = features.get("confluence_log_odds")
+        if score_raw is None and lo_raw is None:
+            return None
+        try:
+            if score_raw is not None:
+                prob = float(score_raw)
+            else:
+                prob = _sigmoid(float(lo_raw))
+            prob = max(0.0, min(1.0, prob))
+            # Fallback tahmin, stratejiye sert override tasimamak icin konservatif kalir.
+            prob = max(0.42, min(0.58, prob))
+
+            lo = float(lo_raw) if lo_raw is not None else (prob - 0.5) * 4.0
+            if lo > 0.05:
+                direction = "up"
+            elif lo < -0.05:
+                direction = "down"
+            else:
+                direction = "neutral"
+
+            conf = min(0.30, abs(prob - 0.5) * 2.0)
+            pred = FastBrainPrediction(
+                symbol=symbol,
+                probability=prob,
+                direction=direction,
+                raw_score=lo,
+                confidence=conf,
+                features_used=sum(1 for k in ("confluence_score", "confluence_log_odds") if k in features),
+                missing_features=missing_features,
+                mode="fallback_confluence",
+                ts=time.time(),
+                latency_ms=0.0,
+            )
+            self._total_predictions += 1
+            self._fallback_predictions += 1
+            self._last_prediction[symbol] = pred
+            return pred
+        except Exception:
             return None
 
     async def publish_prediction(self, pred: FastBrainPrediction) -> None:
@@ -405,6 +461,7 @@ class FastBrainEngine:
             "model_feature_order_size": len(self._model_feature_order),
             "total_predictions": self._total_predictions,
             "total_errors": self._total_errors,
+            "fallback_predictions": self._fallback_predictions,
             "tracked_symbols": len(self._last_prediction),
             "t_high": self.t_high,
             "t_low": self.t_low,
@@ -415,6 +472,7 @@ class FastBrainEngine:
         return {
             "fast_brain_predictions_total": self._total_predictions,
             "fast_brain_errors_total": self._total_errors,
+            "fast_brain_fallback_predictions_total": self._fallback_predictions,
             "fast_brain_tracked_symbols": len(self._last_prediction),
             "fast_brain_enabled": 1 if self._enabled else 0,
         }

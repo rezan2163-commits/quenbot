@@ -25,6 +25,9 @@ export default function WatchlistManager() {
   };
 
   const connected = !priceErr && !!prices;
+  const priceList = Array.isArray(prices) ? prices : [];
+  const moverList = Array.isArray(movers) ? movers : [];
+  const watchlistItems = Array.isArray(watchlist) ? watchlist : [];
 
   const aliasMap: Record<string, string> = {
     BITCOIN: "BTCUSDT",
@@ -50,29 +53,31 @@ export default function WatchlistManager() {
     return clean + "USDT";
   };
 
-  const watchedSymbols = new Set((watchlist || []).map((w) => w.symbol.toUpperCase()));
+  const watchedSymbols = new Set(watchlistItems.map((w) => String(w?.symbol || "").toUpperCase()).filter(Boolean));
 
-  const moverMap = new Map(movers?.map((m) => [m.symbol, m]) || []);
+  const moverMap = new Map(moverList.map((m) => [String(m?.symbol || ""), m]).filter(([s]) => !!s));
 
   const symbolMap = new Map<string, { symbol: string; price: number; price_text: string; change_pct: number; exchange: string; market_type: string; ts: string }>();
-  prices?.forEach((p) => {
+  priceList.forEach((p) => {
+    const symbol = String(p?.symbol || "").toUpperCase();
+    if (!symbol) return;
     const existing = symbolMap.get(p.symbol);
     if (!existing || new Date(p.timestamp) > new Date(existing.ts)) {
-      const mover = moverMap.get(p.symbol);
-      symbolMap.set(p.symbol, {
-        symbol: p.symbol,
+      const mover = moverMap.get(symbol);
+      symbolMap.set(symbol, {
+        symbol,
         price: toNumber(p.price),
         price_text: String(p.price_text || p.price || "0"),
         change_pct: toNumber(mover?.change_pct ?? 0),
-        exchange: p.exchange,
-        market_type: p.market_type || "spot",
-        ts: p.timestamp,
+        exchange: String(p.exchange || "unknown"),
+        market_type: String(p.market_type || "spot"),
+        ts: String(p.timestamp || new Date(0).toISOString()),
       });
     }
   });
 
   const tickers = Array.from(symbolMap.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
-  const knownSymbols = Array.from(new Set((prices || []).map((p) => String(p.symbol || "").toUpperCase()))).filter(Boolean);
+  const knownSymbols = Array.from(new Set(priceList.map((p) => String(p?.symbol || "").toUpperCase()).filter(Boolean)));
 
   const handleAdd = async () => {
     const raw = symbolInput.trim();
@@ -224,11 +229,11 @@ export default function WatchlistManager() {
 
       {/* Coin List */}
       <div className="flex-1 overflow-y-auto custom-scrollbar">
-        {!prices || pricesLoading || tickers.length === 0 ? (
+        {!Array.isArray(prices) || pricesLoading || tickers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-gray-500 text-xs gap-3 p-4">
             {pricesLoading && <div className="animate-pulse text-[10px]">Fiyatlar yükleniyor...</div>}
-            {!pricesLoading && !prices && <p className="text-[10px]">Fiyat verisi alınamıyor</p>}
-            {!pricesLoading && prices && tickers.length === 0 && (
+            {!pricesLoading && !Array.isArray(prices) && <p className="text-[10px]">Fiyat verisi alınamıyor</p>}
+            {!pricesLoading && Array.isArray(prices) && tickers.length === 0 && (
               <>
                 <p className="text-[10px]">Henuz takip edilen coin yok</p>
                 <button 

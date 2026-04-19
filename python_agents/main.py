@@ -858,6 +858,7 @@ class AgentOrchestrator:
                     t_high=Config.FAST_BRAIN_T_HIGH,
                     t_low=Config.FAST_BRAIN_T_LOW,
                     min_features=Config.FAST_BRAIN_MIN_FEATURES,
+                    allow_confluence_fallback=Config.FAST_BRAIN_ALLOW_CONFLUENCE_FALLBACK,
                     event_bus=bus,
                 )
                 if self.fast_brain_engine.enabled:

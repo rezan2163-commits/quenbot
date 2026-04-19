@@ -142,6 +142,8 @@ module.exports = {
         // Canli path'te OFI/MH warming-up olsa bile Fast Brain'in
         // confluence-tabanli shadow prediction uretmesine izin ver.
         QUENBOT_FAST_BRAIN_MIN_FEATURES: process.env.QUENBOT_FAST_BRAIN_MIN_FEATURES || "2",
+        QUENBOT_FAST_BRAIN_ALLOW_CONFLUENCE_FALLBACK:
+          process.env.QUENBOT_FAST_BRAIN_ALLOW_CONFLUENCE_FALLBACK || "1",
         QUENBOT_DECISION_ROUTER_ENABLED: process.env.QUENBOT_DECISION_ROUTER_ENABLED || "1",
         QUENBOT_ONLINE_LEARNING_ENABLED: process.env.QUENBOT_ONLINE_LEARNING_ENABLED || "1",
         QUENBOT_METRICS_ENABLED: process.env.QUENBOT_METRICS_ENABLED || "1",

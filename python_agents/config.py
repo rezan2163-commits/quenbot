@@ -209,6 +209,9 @@ class Config:
     FAST_BRAIN_T_HIGH = float(os.getenv("QUENBOT_FAST_BRAIN_T_HIGH", "0.65"))
     FAST_BRAIN_T_LOW = float(os.getenv("QUENBOT_FAST_BRAIN_T_LOW", "0.45"))
     FAST_BRAIN_MIN_FEATURES = int(os.getenv("QUENBOT_FAST_BRAIN_MIN_FEATURES", "4"))
+    FAST_BRAIN_ALLOW_CONFLUENCE_FALLBACK = os.getenv(
+        "QUENBOT_FAST_BRAIN_ALLOW_CONFLUENCE_FALLBACK", "1"
+    ).lower() in {"1", "true", "yes", "on"}
     DECISION_ROUTER_ENABLED = os.getenv("QUENBOT_DECISION_ROUTER_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
     DECISION_ROUTER_SHADOW = os.getenv("QUENBOT_DECISION_ROUTER_SHADOW", "1").lower() in {"1", "true", "yes", "on"}
     DECISION_ROUTER_LOG_PATH = os.getenv("QUENBOT_DECISION_ROUTER_LOG_PATH", "python_agents/.decision_router_shadow.jsonl")
