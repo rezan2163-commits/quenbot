@@ -14,6 +14,7 @@ const TARGET_CARD_MIN_QUALITY = Number(process.env.QUENBOT_TARGET_CARD_MIN_QUALI
 const MAMIS_TARGET_CARD_MIN_CONFIDENCE = Number(process.env.QUENBOT_MAMIS_TARGET_CARD_MIN_CONF || 0.72);
 const MAMIS_TARGET_CARD_MIN_VOLATILITY = Number(process.env.QUENBOT_MAMIS_TARGET_CARD_MIN_VOLATILITY || 0.0035);
 const META_LABELER_VETO_PROBA = Number(process.env.QUENBOT_META_LABELER_VETO_PROBA || 0.15);
+const SIGNAL_CARDS_PER_SYMBOL = Math.max(1, Number(process.env.QUENBOT_SIGNAL_CARDS_PER_SYMBOL || 1));
 
 function normalizeTimestamp(value: unknown): string | null {
   if (value == null) return null;
@@ -658,6 +659,10 @@ app.get("/api/scout/movements", async (req, res) => {
 
 app.get("/api/signals", async (req, res) => {
   try {
+    const includeRejected = ["1", "true", "yes", "on"].includes(String(req.query.includeRejected || "").toLowerCase());
+    const statusFilter = includeRejected
+      ? sql`('pending', 'active', 'open', 'processed', 'risk_rejected')`
+      : sql`('pending', 'active', 'open', 'processed')`;
     const signals = await sql`
       SELECT
         id,
@@ -699,8 +704,12 @@ app.get("/api/signals", async (req, res) => {
         COALESCE(metadata->>'exchange', 'binance') AS exchange,
         market_type
       FROM signals
-      WHERE status IN ('pending', 'active', 'open', 'processed', 'risk_rejected')
+      WHERE status IN ${statusFilter}
         AND timestamp >= NOW() - INTERVAL '24 hours'
+        AND (
+          (metadata->>'expires_at') IS NULL
+          OR (metadata->>'expires_at')::timestamptz > NOW()
+        )
         AND COALESCE(metadata->>'source', metadata->>'signal_provider', 'unknown') IN ('strategist', 'pattern_matcher')
         AND GREATEST(
           CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
@@ -713,26 +722,24 @@ app.get("/api/signals", async (req, res) => {
     `;
     res.json((() => {
       const all = signals.map(normalizeSignalRow).filter(isActionableTargetCard);
-      // Sembol-seviyesinde dedup: aynı coin (spot/futures/exchange ayrımı yok)
-      // sadece en yüksek güvenli kartla temsil edilsin. Ayrıca aynı coin için
-      // son 15 dakikada zaten kart varsa yenisini listelemiyoruz.
-      const bestBySymbol = new Map<string, any>();
+      // Sembol başına TEK kart: aynı coinin iki borsa (binance+bybit) ve iki parite
+      // (spot+futures) verisinden üretilen sinyalleri tek yön kartında birleştir.
+      // Varsayılan `QUENBOT_SIGNAL_CARDS_PER_SYMBOL=1`; gerekirse env ile artırılabilir.
+      const bySymbol = new Map<string, any[]>();
       for (const s of all) {
         const key = String(s.symbol || '').toUpperCase();
         if (!key) continue;
-        const existing = bestBySymbol.get(key);
-        if (!existing) { bestBySymbol.set(key, s); continue; }
-        const existingTs = new Date(existing.signal_time || existing.timestamp).getTime();
-        const currentTs = new Date(s.signal_time || s.timestamp).getTime();
-        // 15dk içinde eski kayıt varsa yeni olanı düşür; yoksa en güveniliri tut.
-        if (Math.abs(currentTs - existingTs) < 15 * 60 * 1000) {
-          const keep = Number(existing.confidence || 0) >= Number(s.confidence || 0) ? existing : s;
-          bestBySymbol.set(key, keep);
-        } else if (currentTs > existingTs) {
-          bestBySymbol.set(key, s);
-        }
+        const list = bySymbol.get(key) || [];
+        list.push(s);
+        list.sort((a, b) => {
+          const aTs = new Date(a.signal_time || a.timestamp).getTime();
+          const bTs = new Date(b.signal_time || b.timestamp).getTime();
+          if (bTs !== aTs) return bTs - aTs;
+          return Number(b.confidence || 0) - Number(a.confidence || 0);
+        });
+        bySymbol.set(key, list.slice(0, SIGNAL_CARDS_PER_SYMBOL));
       }
-      return Array.from(bestBySymbol.values()).sort(
+      return Array.from(bySymbol.values()).flat().sort(
         (a, b) => new Date(b.signal_time || b.timestamp).getTime() - new Date(a.signal_time || a.timestamp).getTime()
       );
     })());

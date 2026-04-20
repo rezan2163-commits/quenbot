@@ -19,8 +19,11 @@ MAMIS_TARGET_CARD_MIN_VOLATILITY = float(Config.get_env('QUENBOT_MAMIS_TARGET_CA
 # Authoritative per-symbol signal gating at DB layer: prevents multiple signal
 # sources (strategist / pattern_matcher / mamis) and different market_types
 # (spot/futures / binance/bybit) from bypassing the per-coin budget.
-SIGNAL_MAX_DAILY_PER_SYMBOL = int(os.getenv('QUENBOT_MAX_DAILY_SIGNALS_PER_SYMBOL', '4'))
-SIGNAL_BURST_LOCKOUT_SECONDS = int(os.getenv('QUENBOT_SIGNAL_BURST_LOCKOUT_SECONDS', '600'))  # 10 min
+SIGNAL_MAX_DAILY_PER_SYMBOL = int(os.getenv('QUENBOT_MAX_DAILY_SIGNALS_PER_SYMBOL', '24'))
+# Taban kilitleme süresi (saniye). Horizon-aware lockout bu değer ile aktif sinyalin
+# kendi horizon'u arasında hangisi büyükse onu kullanır. Varsayılan: 3600s (1 saat)
+# — kullanıcı kuralı "coin başına saatte en fazla 1 yön sinyali".
+SIGNAL_BURST_LOCKOUT_SECONDS = int(os.getenv('QUENBOT_SIGNAL_BURST_LOCKOUT_SECONDS', '3600'))
 
 
 def _json_serial(obj):
@@ -907,38 +910,81 @@ class Database:
         metadata['source'] = signal_source
         metadata.setdefault('signal_provider', signal_source)
         metadata.setdefault('source_model', _infer_signal_model(signal_source, metadata))
-        expires_at = timestamp + timedelta(hours=24) if isinstance(timestamp, datetime) else datetime.utcnow() + timedelta(hours=24)
-        metadata['expires_at'] = str(metadata.get('expires_at') or _utc_isoformat(expires_at))
+        # Kart ömrü sinyalin kendi horizon'una bağlanır; böylece 1h horizon'lu sinyal
+        # 1 saat, 4h horizon'lu 4 saat, 24h horizon'lu 1 gün boyunca panoda kalır.
+        default_expires = (
+            (timestamp if isinstance(timestamp, datetime) else datetime.utcnow())
+            + timedelta(minutes=eta_minutes)
+        )
+        metadata['expires_at'] = str(metadata.get('expires_at') or _utc_isoformat(default_expires))
 
         async with self.pool.acquire() as conn:
-            # ─── Authoritative per-symbol gating (cross-source, cross-market) ───
-            # Aynı coin için son 10 dk içinde bir sinyal varsa yeni sinyali reddet.
-            # Son 24 saatte QUENBOT_MAX_DAILY_SIGNALS_PER_SYMBOL (4) sinyal varsa reddet.
-            # Bu kontrol strategist/pattern_matcher/mamis + spot/futures + binance/bybit
-            # kombinasyonlarının ayrı ayrı limit kullanmasını engeller.
+            # ─── Authoritative per-coin horizon-aware gating ───
+            # Mantık: Her coin için aynı anda TEK bir açık/aktif yön sinyali olabilir.
+            # Mevcut aktif sinyalin kendi horizon'u (estimated_duration_to_target_minutes)
+            # dolana kadar (veya taban süre, varsayılan 1 saat; hangisi büyükse) yeni
+            # sinyal reddedilir. Bu kural kaynak (strategist/pattern_matcher/mamis),
+            # market_type (spot/futures) ve exchange (binance/bybit) farklılıklarından
+            # bağımsız olarak UPPER(symbol) üzerinden çalışır — aynı coinin iki borsa
+            # ve iki parite verisinden üretilen sinyalleri tek bir yön olarak sayar.
+            # Ek olarak günlük cap (QUENBOT_MAX_DAILY_SIGNALS_PER_SYMBOL) güvenlik
+            # tavanı olarak kalır.
             try:
-                gate_row = await conn.fetchrow(
+                # Yalnızca yaşayan (non-terminal) sinyaller horizon kilidini tetikler.
+                # Risk tarafından reddedilmiş veya sonlanmış kayıtlar sayılmaz.
+                active_row = await conn.fetchrow(
                     """
                     SELECT
-                        COUNT(*) FILTER (
-                            WHERE timestamp >= NOW() - INTERVAL '24 hours'
-                        )::int AS daily_count,
-                        MAX(timestamp) FILTER (
-                            WHERE timestamp >= NOW() - ($2 || ' seconds')::interval
-                        ) AS last_recent
+                        id,
+                        timestamp,
+                        GREATEST(60, LEAST(1440, COALESCE(
+                            (metadata->>'estimated_duration_to_target_minutes')::int,
+                            60
+                        ))) AS eta_minutes,
+                        status
                     FROM signals
                     WHERE UPPER(symbol) = UPPER($1)
+                      AND status NOT IN (
+                            'target_hit', 'target_missed', 'expired',
+                            'dismissed', 'filtered_duplicate', 'filtered_noise',
+                            'risk_rejected'
+                          )
+                      AND timestamp >= NOW() - INTERVAL '48 hours'
+                    ORDER BY timestamp DESC
+                    LIMIT 1
                     """,
-                    symbol, str(SIGNAL_BURST_LOCKOUT_SECONDS),
+                    symbol,
                 )
-                daily_count = int(gate_row['daily_count'] or 0) if gate_row else 0
-                last_recent = gate_row['last_recent'] if gate_row else None
-                if last_recent is not None:
-                    logger.info(
-                        f"🚫 Signal burst lockout: {symbol} son {SIGNAL_BURST_LOCKOUT_SECONDS}s "
-                        f"içinde sinyal var (son={last_recent}); yeni sinyal reddedildi."
-                    )
-                    return None
+                now_utc = datetime.utcnow()
+                min_floor_sec = max(SIGNAL_BURST_LOCKOUT_SECONDS, 3600)
+                if active_row is not None:
+                    base_ts = active_row['timestamp']
+                    if isinstance(base_ts, datetime) and base_ts.tzinfo is not None:
+                        base_ts = base_ts.astimezone(timezone.utc).replace(tzinfo=None)
+                    eta_minutes_active = int(active_row['eta_minutes'] or 60)
+                    horizon_sec = eta_minutes_active * 60
+                    lockout_sec = max(horizon_sec, min_floor_sec)
+                    lockout_until = base_ts + timedelta(seconds=lockout_sec)
+                    if now_utc < lockout_until:
+                        remaining = (lockout_until - now_utc).total_seconds()
+                        logger.info(
+                            f"🚫 Per-coin horizon lockout: {symbol} aktif sinyal id="
+                            f"{active_row['id']} status={active_row['status']} "
+                            f"horizon={eta_minutes_active}m; kalan={remaining:.0f}s — "
+                            f"yeni sinyal reddedildi."
+                        )
+                        return None
+
+                daily_row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*)::int AS daily_count
+                    FROM signals
+                    WHERE UPPER(symbol) = UPPER($1)
+                      AND timestamp >= NOW() - INTERVAL '24 hours'
+                    """,
+                    symbol,
+                )
+                daily_count = int(daily_row['daily_count'] or 0) if daily_row else 0
                 if daily_count >= SIGNAL_MAX_DAILY_PER_SYMBOL:
                     logger.info(
                         f"🚫 Daily signal cap: {symbol} "
@@ -996,12 +1042,29 @@ class Database:
             )
             return result == 'UPDATE 1'
 
-    async def update_signal_status(self, signal_id: int, status: str) -> bool:
-        """Update signal status"""
+    async def update_signal_status(self, signal_id: int, status: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Update signal status, optionally appending metadata JSONB."""
         async with self.pool.acquire() as conn:
-            result = await conn.execute("""
-                UPDATE signals SET status = $1 WHERE id = $2
-            """, status, signal_id)
+            if metadata:
+                result = await conn.execute(
+                    """
+                    UPDATE signals
+                    SET status = $1,
+                        metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                    WHERE id = $2
+                    """,
+                    status,
+                    signal_id,
+                    _dumps(metadata),
+                )
+            else:
+                result = await conn.execute(
+                    """
+                    UPDATE signals SET status = $1 WHERE id = $2
+                    """,
+                    status,
+                    signal_id,
+                )
             return result == "UPDATE 1"
 
     async def get_pending_signals(self) -> List[Dict[str, Any]]:
