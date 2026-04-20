@@ -357,13 +357,11 @@ function ActiveCard({ s, dismissing, onDismiss }: { s: Signal; dismissing: boole
   const meta = (s.metadata || {}) as any;
   const { entry, targetPrice, eta, pct } = resolvePrimaryTarget(s);
   const signalAt = parseQuenbotDate(s.signal_time || s.timestamp);
-  // Hedef süresi: backend `metadata.expires_at` = signal_time + horizon. Bu authoritative.
-  // Eski kayıtlarda yoksa signal_time + eta'ya düşer.
-  const expiresRaw = (s as any).expires_at ?? meta.expires_at ?? null;
-  const expiresParsed = expiresRaw ? parseQuenbotDate(expiresRaw) : null;
-  const targetAt = expiresParsed && !Number.isNaN(expiresParsed.getTime())
-    ? expiresParsed
-    : new Date(signalAt.getTime() + eta * 60000);
+  // Hedef süresi tek kaynağa bağlı: sinyalin kendi horizon'u (eta, dakika).
+  // Backend artık expires_at'i horizon'a göre yazıyor; fakat eski kayıtlarda
+  // expires_at = timestamp+24h olduğu için UI'da çelişkili görünüyordu.
+  // Tutarlılık için hem "hedef" etiketi hem de "kalan" geri sayımı aynı eta'dan türetiliyor.
+  const targetAt = new Date(signalAt.getTime() + eta * 60000);
   const now = useNowTick(30_000);
   const totalMs = targetAt.getTime() - signalAt.getTime();
   const progress = totalMs > 0 ? Math.min(1, Math.max(0, (now - signalAt.getTime()) / totalMs)) : 0;
@@ -399,20 +397,6 @@ function ActiveCard({ s, dismissing, onDismiss }: { s: Signal; dismissing: boole
           <div className="text-right leading-tight">
             <div className="font-mono text-[11px] font-bold text-warn">%{conf}</div>
             <div className="text-[9px] text-gray-400">hedef %{(pct * 100).toFixed(1)}</div>
-            <div
-              className={cn(
-                "mt-0.5 inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 font-mono text-[9px] tabular-nums",
-                remainMin <= 0
-                  ? "border-rose-400/30 bg-rose-500/10 text-rose-300"
-                  : remainMin <= 30
-                  ? "border-warn/30 bg-warn/10 text-warn"
-                  : "border-cyan-400/30 bg-cyan-400/10 text-cyan-300",
-              )}
-              title={`Süre kalan: ${remainLabel}`}
-            >
-              <Timer size={9} />
-              <span>{remainMin <= 0 ? "süre doldu" : `kalan ${remainLabel}`}</span>
-            </div>
           </div>
           <button
             onClick={onDismiss}
@@ -450,9 +434,22 @@ function ActiveCard({ s, dismissing, onDismiss }: { s: Signal; dismissing: boole
             style={{ width: `${progress * 100}%` }}
           />
         </div>
-        <div className="mt-0.5 flex items-center justify-between text-[9px]">
+        <div className="mt-1 flex items-center justify-between text-[9px]">
           <span className="text-gray-500">{fmtShort(signalAt)}</span>
-          <span className="font-mono text-cyan-300">⏳ {remainLabel}</span>
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 font-mono tabular-nums",
+              remainMin <= 0
+                ? "border-rose-400/30 bg-rose-500/10 text-rose-300"
+                : remainMin <= 30
+                ? "border-warn/30 bg-warn/10 text-warn"
+                : "border-cyan-400/30 bg-cyan-400/10 text-cyan-300",
+            )}
+            title={`Süre kalan: ${remainLabel}`}
+          >
+            <Timer size={9} />
+            <span>{remainMin <= 0 ? "süre doldu" : `süre kalan: ${remainLabel}`}</span>
+          </span>
         </div>
       </div>
 
