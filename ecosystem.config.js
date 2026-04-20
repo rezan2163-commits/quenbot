@@ -147,6 +147,10 @@ module.exports = {
         QUENBOT_DECISION_ROUTER_ENABLED: process.env.QUENBOT_DECISION_ROUTER_ENABLED || "1",
         QUENBOT_ONLINE_LEARNING_ENABLED: process.env.QUENBOT_ONLINE_LEARNING_ENABLED || "1",
         QUENBOT_METRICS_ENABLED: process.env.QUENBOT_METRICS_ENABLED || "1",
+        // Phase 5 Finalization — Safety Net observer (accuracy + drift izleyici).
+        // Yalnızca gözlem yapar; strateji yolunu etkilemez. Baseline yoksa
+        // 24 saatlik pasif kalibrasyon sonrası metrik üretmeye başlar.
+        QUENBOT_SAFETY_NET_ENABLED: process.env.QUENBOT_SAFETY_NET_ENABLED || "1",
       },
       instances: 1,
       autorestart: true,
