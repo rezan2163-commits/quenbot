@@ -53,9 +53,10 @@ GGUF_SERVER_MODEL_ALIAS = os.getenv("QUENBOT_LLM_SERVER_MODEL", "default")
 
 # Fallback GGUF model names (in order of preference)
 GGUF_MODEL_CANDIDATES = [
-    "gemma-3-12b-it-Q4_K_M.gguf",  # Gemma 3 12B - Hızlı + Akıllı (ÖNCELİKLİ)
-    "gemma-3-12b-it-Q6_K.gguf",
-    "gemma-3-9b-it-Q4_K_M.gguf",
+    "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+    "gemma-2-2b-it-Q4_K_M.gguf",
+    "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+    "gemma-3-12b-it-Q4_K_M.gguf",
 ]
 
 # System prompt for QuenBot trading brain (Gemma 3 optimized)
