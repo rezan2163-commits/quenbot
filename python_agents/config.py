@@ -247,8 +247,10 @@ class Config:
 
     # ─────────────────────────────────────────────────────────────
     # Phase 6 — Oracle Stack (8 dedektör + füzyon + brain + supervisor)
-    # Tüm flag'ler default OFF. Ramp planı: ORACLE_OPERATIONS_MANUAL.md.
-    # Davranışsal hiçbir yol bu PR ile değişmez; eklemeler salt additive.
+    # §1–§8 + §10 Factor Graph + §11 Brain: canlıda aktif (ecosystem.config.js
+    # üzerinden); hepsi read-only observer, strateji/risk yoluna doğrudan
+    # müdahale etmez. Yerel/dev için default OFF bırakılır, prod ecosystem
+    # override'ı misyon kapsamında modülleri açar.
     # ─────────────────────────────────────────────────────────────
     # §9 Oracle Signal Bus (read-only registry; default ON, hiçbir yan etki)
     ORACLE_BUS_ENABLED = os.getenv("QUENBOT_ORACLE_BUS_ENABLED", "1").lower() in {"1", "true", "yes", "on"}

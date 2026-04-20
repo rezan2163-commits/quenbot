@@ -157,9 +157,24 @@ module.exports = {
         QUENBOT_CROSS_ASSET_MIN_SAMPLES: process.env.QUENBOT_CROSS_ASSET_MIN_SAMPLES || "30",
         QUENBOT_CROSS_ASSET_MIN_EDGE: process.env.QUENBOT_CROSS_ASSET_MIN_EDGE || "0.05",
         QUENBOT_CROSS_ASSET_REBUILD_MIN: process.env.QUENBOT_CROSS_ASSET_REBUILD_MIN || "10",
-        // Oracle §1 BOCPD — changepoint detektörü, observer; oracle_signal_bus'a
-        // kanal kaydeder, trade kararlarına dokunmaz.
+        // Oracle §1–§8 dedektörleri + §10 Factor Graph Fusion.
+        // Tümü read-only observer; oracle_signal_bus üzerinden kanal
+        // kaydı yapar, strateji/risk yoluna doğrudan dokunmaz. Aşamalı
+        // rollout yerine artık kalıcı olarak aktif (misyon gereği).
+        // §8 Onchain: API anahtarı yoksa client otomatik disabled kalır.
         QUENBOT_BOCPD_ENABLED: process.env.QUENBOT_BOCPD_ENABLED || "1",
+        QUENBOT_HAWKES_ENABLED: process.env.QUENBOT_HAWKES_ENABLED || "1",
+        QUENBOT_LOB_THERMO_ENABLED: process.env.QUENBOT_LOB_THERMO_ENABLED || "1",
+        QUENBOT_WASSERSTEIN_ENABLED: process.env.QUENBOT_WASSERSTEIN_ENABLED || "1",
+        QUENBOT_PATH_SIGNATURE_ENABLED: process.env.QUENBOT_PATH_SIGNATURE_ENABLED || "1",
+        QUENBOT_MIRROR_FLOW_ENABLED: process.env.QUENBOT_MIRROR_FLOW_ENABLED || "1",
+        QUENBOT_TDA_ENABLED: process.env.QUENBOT_TDA_ENABLED || "1",
+        QUENBOT_ONCHAIN_ENABLED: process.env.QUENBOT_ONCHAIN_ENABLED || "1",
+        QUENBOT_FACTOR_GRAPH_ENABLED: process.env.QUENBOT_FACTOR_GRAPH_ENABLED || "1",
+        // §11 Oracle Brain shadow modda (ORACLE_BRAIN_SHADOW=1); trade
+        // kararlarını uygulamadan gözlem+öğretim döngüsü çalışır.
+        QUENBOT_ORACLE_BRAIN_ENABLED: process.env.QUENBOT_ORACLE_BRAIN_ENABLED || "1",
+        QUENBOT_ORACLE_BRAIN_SHADOW: process.env.QUENBOT_ORACLE_BRAIN_SHADOW || "1",
       },
       instances: 1,
       autorestart: true,
