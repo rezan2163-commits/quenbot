@@ -37,6 +37,8 @@ class MetaLabeler:
         self._fit_samples: int = 0
         self._version: int = 0
         self._min_accept_proba: float = 0.55
+        self._degenerate: bool = False
+        self._degenerate_reason: Optional[str] = None
         self._load()
 
     # ─────────── Inference ───────────
@@ -44,6 +46,14 @@ class MetaLabeler:
         """Return {'accept': bool, 'proba': float, 'reason': str}."""
         if self._model is None:
             return {"accept": True, "proba": 0.5, "reason": "meta_labeler_untrained", "version": 0}
+        if self._degenerate:
+            # Keep meta-labeler advisory-only when model carries no information.
+            return {
+                "accept": True,
+                "proba": 0.5,
+                "reason": f"meta_labeler_degenerate:{self._degenerate_reason or 'unknown'}",
+                "version": self._version,
+            }
         try:
             x = [[float(features.get(k, 0.0) or 0.0) for k in _FEATURE_KEYS]]
             proba = float(self._model.predict_proba(x)[0][1])
@@ -94,6 +104,7 @@ class MetaLabeler:
         self._fitted_at = time.time()
         self._fit_samples = len(samples)
         self._version += 1
+        self._evaluate_model_health()
         # calibrate accept threshold to target ~0.35 precision lift
         try:
             probs = model.predict_proba(X)[:, 1]
@@ -143,9 +154,37 @@ class MetaLabeler:
             self._min_accept_proba = float(d.get("threshold", 0.55))
             self._fitted_at = d.get("fitted_at")
             self._fit_samples = int(d.get("samples", 0))
+            self._evaluate_model_health()
             logger.info(f"🧪 MetaLabeler loaded v{self._version} (n={self._fit_samples})")
         except Exception as e:
             logger.debug(f"meta_labeler load skipped: {e}")
+
+    def _evaluate_model_health(self) -> None:
+        self._degenerate = False
+        self._degenerate_reason = None
+        if self._model is None:
+            return
+        try:
+            importances = getattr(self._model, "feature_importances_", None)
+            if importances is not None and len(importances) > 0:
+                total_importance = float(sum(abs(float(v)) for v in importances))
+                if total_importance <= 1e-12:
+                    self._degenerate = True
+                    self._degenerate_reason = "zero_feature_importance"
+                    return
+
+            n_features = int(getattr(self._model, "n_features_in_", len(_FEATURE_KEYS)))
+            probes = [
+                [0.0] * n_features,
+                [0.5] * n_features,
+                [1.0] * n_features,
+            ]
+            probs = [float(self._model.predict_proba([row])[0][1]) for row in probes]
+            if max(probs) - min(probs) < 1e-6:
+                self._degenerate = True
+                self._degenerate_reason = "constant_probability_surface"
+        except Exception as e:
+            logger.debug(f"meta_labeler health check skipped: {e}")
 
     # ─────────── Health ───────────
     def status(self) -> Dict[str, Any]:
@@ -155,6 +194,8 @@ class MetaLabeler:
             "samples": self._fit_samples,
             "threshold": self._min_accept_proba,
             "fitted_at": self._fitted_at,
+            "degenerate": self._degenerate,
+            "degenerate_reason": self._degenerate_reason,
         }
 
 

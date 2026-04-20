@@ -125,8 +125,9 @@ class AgentOrchestrator:
         self._last_resource_snapshot = None
         self._resource_warnings: list[dict] = []
         # Pattern-match LLM evaluation throttles to keep chat responsive
-        self._pattern_eval_min_similarity = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_SIM", "0.62"))
-        self._pattern_eval_min_interval = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_INTERVAL", "180"))
+        # FULL-TIME MODE: Çok daha agresif pattern evaluation (her 10 saniyede)
+        self._pattern_eval_min_similarity = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_SIM", "0.60"))
+        self._pattern_eval_min_interval = float(os.getenv("QUENBOT_PATTERN_EVAL_MIN_INTERVAL", "10"))  # 180s → 10s
         self._pattern_signal_min_conf = float(os.getenv("QUENBOT_PATTERN_SIGNAL_MIN_CONF", "0.68"))
         self._pattern_signal_min_quality = float(os.getenv("QUENBOT_PATTERN_SIGNAL_MIN_QUALITY", "0.74"))
         self._pattern_signal_window_seconds = int(os.getenv("QUENBOT_PATTERN_SIGNAL_WINDOW_SECONDS", "900"))
@@ -138,7 +139,8 @@ class AgentOrchestrator:
         self._last_pattern_eval_at: dict[str, float] = {}
         self._pattern_eval_semaphore = asyncio.Semaphore(1)
         # MAMIS veto per-symbol cooldown — aynı sembol için tekrarlayan veto spam'ini önle
-        self._mamis_veto_cooldown_seconds = float(os.getenv("QUENBOT_MAMIS_VETO_COOLDOWN_SECONDS", "5.0"))
+        # FULL-TIME: 0.5s ile hızlı veto detection
+        self._mamis_veto_cooldown_seconds = float(os.getenv("QUENBOT_MAMIS_VETO_COOLDOWN_SECONDS", "0.5"))
         self._mamis_last_veto_at: dict[str, float] = {}
         # Günlük sinyal limiti - her coin için günde max 4 sinyal
         self._max_daily_signals_per_symbol = int(os.getenv("QUENBOT_MAX_DAILY_SIGNALS_PER_SYMBOL", "4"))

@@ -187,7 +187,15 @@ class GhostSimulatorAgent:
                 if self.risk_manager:
                     approved, reason = self.risk_manager.check_signal(signal)
                     if not approved:
-                        await self.db.update_signal_status(signal['id'], f'risk_rejected')
+                        await self.db.update_signal_status(
+                            signal['id'],
+                            'risk_rejected',
+                            metadata={
+                                'risk_rejected_reason': str(reason),
+                                'risk_rejected_at': datetime.utcnow().isoformat() + 'Z',
+                                'risk_rejected_stage': 'ghost_simulator_gate',
+                            },
+                        )
                         if self.risk_manager.should_log_rejection(signal['symbol'], reason):
                             logger.info(f"🛡 Risk rejected {signal['symbol']}: {reason}")
                         continue

@@ -435,10 +435,11 @@ class GemmaDecisionCore:
 
     # Son N kararı bellekte tut
     MAX_DECISION_HISTORY = 100
-    # SuperGemma'yı aşırı yüklememek için rate limit (saniye)
-    MIN_DECISION_INTERVAL = float(os.getenv("QUENBOT_DECISION_MIN_INTERVAL", "0.5"))
-    # Aynı sembol için LLM çağrısı cooldown (saniye) — tekrar eden sembol spike'larını kıs
-    SYMBOL_LLM_COOLDOWN = float(os.getenv("QUENBOT_SYMBOL_LLM_COOLDOWN_SECONDS", "60.0"))
+    # SuperGemma'yı aşırı yüklememek için rate limit (saniye) — ULTRA hızlı mod: 50ms
+    # Fallback cache'i sayesinde emniyetli
+    MIN_DECISION_INTERVAL = float(os.getenv("QUENBOT_DECISION_MIN_INTERVAL", "0.05"))
+    # Aynı sembol için LLM çağrısı cooldown (saniye) — 5s ile çok daha agresif
+    SYMBOL_LLM_COOLDOWN = float(os.getenv("QUENBOT_SYMBOL_LLM_COOLDOWN_SECONDS", "5.0"))
     # Similarity trigger — sadece ≥%60 eşleşmede SuperGemma çağrılır
     SIMILARITY_TRIGGER_THRESHOLD = 0.60
     # SuperGemma bağlanamazsa fallback kurallar
@@ -491,10 +492,19 @@ class GemmaDecisionCore:
         symbol = pattern_data.get('symbol', 'UNKNOWN')
         timeframe = pattern_data.get('timeframe', '?')
 
-        # ─── Rate limiting ───
+        # ─── Rate limiting (non-blocking variant) ───
         elapsed = time.monotonic() - self._last_decision_time
         if elapsed < self.MIN_DECISION_INTERVAL:
-            await asyncio.sleep(self.MIN_DECISION_INTERVAL - elapsed)
+            # Non-blocking sleep veya fallback'e git — ultra-fast path
+            if elapsed < 0.01:  # < 10ms ise fallback'e direkt git
+                decision = self._fallback_evaluate(symbol, timeframe, {})
+                decision.reasoning = f"{decision.reasoning} | Rate-limit bypass (< 10ms) — ultra-fast fallback"
+                self._stats['fallback_calls'] += 1
+                decision.latency_ms = int((time.monotonic() - t0) * 1000)
+                self._stats['total_latency_ms'] += decision.latency_ms
+                return decision
+            else:
+                await asyncio.sleep(self.MIN_DECISION_INTERVAL - elapsed)
 
         # ─── Per-symbol LLM cooldown: aynı sembol için tekrarlayan çağrılar → fallback ───
         now_sym = time.monotonic()

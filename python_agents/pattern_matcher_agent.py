@@ -60,13 +60,13 @@ def _get_llm_bridge():
 
 
 # ─── Configuration ───
-SIMILARITY_THRESHOLD = 0.62        # Minimum similarity to trigger a match
+SIMILARITY_THRESHOLD = 0.60        # FULL-TIME: 0.62 → 0.60, aggressively match patterns
 SCAN_INTERVAL_SECONDS = 15         # How often to scan each symbol
 VECTOR_POINTS = 60                 # N-point price vector (last N trade prices)
 MIN_HISTORICAL_SIGNATURES = 1      # Minimum signatures needed for matching
 MAX_MATCHES_PER_SCAN = 5           # Top-K matches to consider
 TIMEFRAMES_TO_SCAN = ['15m', '1h']
-COOLDOWN_SECONDS = 900             # Per-symbol cooldown after a match is found
+COOLDOWN_SECONDS = 60              # FULL-TIME: 900s → 60s, allow frequent pattern detection
 SIGNIFICANT_MOVE_THRESHOLD = 0.02  # Only react to >= 2% moves
 
 

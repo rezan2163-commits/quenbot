@@ -192,6 +192,44 @@ class OrderFlowImbalanceEngine:
             st.last_publish_ts = ts
             await self._publish(symbol, st, ts)
 
+    async def on_trade(self, event) -> None:
+        """Fallback OFI update from trade flow when L1 stream is unavailable.
+
+        Uses signed trade quantity as a proxy imbalance signal. This keeps OFI
+        alive during orderbook outages without disabling true ORDER_BOOK-based OFI.
+        """
+        d = getattr(event, "data", None) or {}
+        symbol = d.get("symbol")
+        if not symbol:
+            return
+        try:
+            qty = float(d.get("quantity", 0) or 0)
+            side = str(d.get("side", "buy")).lower()
+        except (TypeError, ValueError):
+            return
+        if qty <= 0:
+            return
+
+        ts = time.time()
+        st = self._state.setdefault(symbol, OFIState())
+        signed_ofi = qty if side.startswith("b") else -qty
+        st.raw.append((ts, signed_ofi))
+
+        cur_minute = int(ts // 60)
+        if st.cur_minute == 0:
+            st.cur_minute = cur_minute
+        if cur_minute != st.cur_minute:
+            st.minute_sums.append((st.cur_minute, st.cur_minute_acc))
+            st.zscore_samples.append(st.cur_minute_acc)
+            st.cur_minute = cur_minute
+            st.cur_minute_acc = 0.0
+        st.cur_minute_acc += signed_ofi
+
+        self._total_updates += 1
+        if ts - st.last_publish_ts >= self._min_publish_interval:
+            st.last_publish_ts = ts
+            await self._publish(symbol, st, ts)
+
     @staticmethod
     def _compute_ofi_increment(
         b_px: float, b_qty: float, a_px: float, a_qty: float,
