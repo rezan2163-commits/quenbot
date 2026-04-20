@@ -774,6 +774,7 @@ class AgentOrchestrator:
                     publish_hz=Config.OFI_PUBLISH_HZ,
                 )
                 bus.subscribe(EventType.ORDER_BOOK_UPDATE, self.ofi_engine.on_order_book)
+                bus.subscribe(EventType.SCOUT_PRICE_UPDATE, self.ofi_engine.on_trade)
                 logger.info("🌊 OrderFlowImbalance engine online (Cont-Kukanov-Stoikov + Hurst)")
             except Exception as e:
                 logger.warning("OFI bootstrap başarısız: %s", e)
@@ -897,6 +898,26 @@ class AgentOrchestrator:
                 self.decision_core.decision_router = self.decision_router
         except Exception as e:
             logger.debug("decision_core Phase 3 wiring skip: %s", e)
+
+        # Phase 3.5: Decision Router shadow feeder.
+        # Strateji yolunu değiştirmeden router + online_learning zincirini
+        # canlı tutmak için 120s'de bir tüm multi-horizon tracked sembollerde
+        # FastBrain predict çalıştırır ve router.route(fast-only) loguna yazar.
+        # Davranışsal tek etkisi: router shadow log + online_learning eğitim
+        # datası. Canlı sinyal üretimine veya risk/ghost yoluna dokunmaz.
+        self._shadow_router_task = None
+        if (
+            getattr(self, "fast_brain_engine", None) is not None
+            and getattr(self.fast_brain_engine, "enabled", False)
+            and getattr(self, "decision_router", None) is not None
+        ):
+            try:
+                self._shadow_router_task = asyncio.create_task(
+                    self._shadow_router_feeder_loop()
+                )
+                logger.info("🧭 Shadow router feeder online (120s interval)")
+            except Exception as e:
+                logger.warning("Shadow router feeder başlatılamadı: %s", e)
 
         # ── Phase 4: Online Learning Evaluator ────────────────────
         self.online_learning = None
@@ -2347,8 +2368,66 @@ class AgentOrchestrator:
                 await self._refit_meta_labeler()
             except asyncio.CancelledError:
                 break
+
+    async def _shadow_router_feeder_loop(self) -> None:
+        """Phase 3.5 shadow feeder.
+
+        Strateji yolunu değiştirmeden 120 saniyede bir tüm aktif tracked
+        sembollerde FastBrain predict + router.route() çalıştırır. Amaç:
+        - decision_router_shadow.jsonl dosyasına düzenli kayıt akışı
+        - online_learning'in eğitim verisi havuzunu doldurması
+        - fast_brain tracked_symbols değerini 1'den daha gerçekçi seviyeye taşımak
+        Bu döngü gerçek sinyal üretimine, risk yönetimine ya da paper
+        simulasyonuna hiçbir şekilde dokunmaz; çıktısı yalnızca shadow log.
+        """
+        await asyncio.sleep(30)  # başlangıçta diğer modüller ısınsın
+        while self.running:
+            try:
+                await asyncio.sleep(120)
+                fast = getattr(self, "fast_brain_engine", None)
+                router = getattr(self, "decision_router", None)
+                if fast is None or router is None:
+                    continue
+                if not getattr(fast, "enabled", False):
+                    continue
+                symbols: list = []
+                try:
+                    mh = getattr(self, "multi_horizon_engine", None)
+                    if mh is not None:
+                        mh_health = mh.health_check() if hasattr(mh, "health_check") else {}
+                        symbols = list(getattr(mh, "_trackers", {}).keys()) if hasattr(mh, "_trackers") else []
+                        if not symbols and isinstance(mh_health, dict):
+                            symbols = list(mh_health.get("symbols", []) or [])
+                except Exception:
+                    symbols = []
+                if not symbols:
+                    # Confluence engine'e geri düş
+                    try:
+                        ce = getattr(self, "confluence_engine", None)
+                        if ce is not None and hasattr(ce, "_state"):
+                            symbols = list(ce._state.keys())
+                    except Exception:
+                        symbols = []
+                if not symbols:
+                    continue
+                routed = 0
+                for sym in symbols[:32]:  # tavan: event bus spam'ini sınırla
+                    try:
+                        pred = fast.predict(sym)
+                        if pred is None:
+                            continue
+                        fast_dict = pred.to_dict()
+                        # Gemma-tarafı boş; router fast-only path'te karar üretir.
+                        router.route(sym, None, fast_dict)
+                        routed += 1
+                    except Exception:
+                        continue
+                if routed > 0:
+                    logger.debug(f"🧭 Shadow router feeder tick: {routed} sembol rotalandı")
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.debug(f"meta trainer loop: {e}")
+                logger.debug(f"shadow router feeder skip: {e}")
 
 
     async def _chat_processor(self):

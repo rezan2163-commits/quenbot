@@ -63,6 +63,32 @@ def _utc_naive(value: Any) -> Any:
     return value
 
 
+def _canonical_symbol(raw: Any) -> str:
+    """Farklı borsa/piyasa varyantlarını tek canonical forma indirger.
+
+    Örnekler:
+      "btc_usdt"        -> "BTCUSDT"
+      "BTC-USDT"        -> "BTCUSDT"
+      "BTC/USDT"        -> "BTCUSDT"
+      "BTCUSDT_PERP"    -> "BTCUSDT"
+      "BTCUSDT.P"       -> "BTCUSDT"
+      "BTCUSDT-SWAP"    -> "BTCUSDT"
+      "1000PEPEUSDT"    -> "1000PEPEUSDT" (korunur)
+    """
+    s = str(raw or "").strip().upper()
+    if not s:
+        return ""
+    # Ayraçları at
+    for ch in ("_", "-", "/", " ", ":"):
+        s = s.replace(ch, "")
+    # Yaygın vadeli/perp/swap ekleri
+    for suf in (".P", "PERP", "SWAP", "PERPETUAL"):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+            break
+    return s
+
+
 def _infer_signal_source(signal_type: str, metadata: Dict[str, Any]) -> str:
     explicit = str(metadata.get('source') or metadata.get('signal_provider') or '').strip().lower()
     if explicit:
@@ -864,7 +890,12 @@ class Database:
         """Insert a new signal"""
         metadata = signal_data.get('metadata', {}) or {}
         market_type = signal_data.get('market_type', 'spot')
-        symbol = signal_data['symbol']
+        # Canonical symbol: iki borsa (Binance/Bybit) ve iki parite (spot/futures)
+        # kombinasyonundan gelen aynı coin kayıtlarını TEK yön sinyali altında
+        # birleştirmek için sembolü normalize ediyoruz.
+        raw_symbol = str(signal_data.get('symbol') or '').strip()
+        symbol = _canonical_symbol(raw_symbol)
+        signal_data['symbol'] = symbol  # aşağıdaki INSERT'te de normalize değer kullanılsın
         entry_price = float(signal_data.get('price', 0) or 0)
         timestamp = _utc_naive(signal_data['timestamp'])
 

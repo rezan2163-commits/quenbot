@@ -151,6 +151,15 @@ module.exports = {
         // Yalnızca gözlem yapar; strateji yolunu etkilemez. Baseline yoksa
         // 24 saatlik pasif kalibrasyon sonrası metrik üretmeye başlar.
         QUENBOT_SAFETY_NET_ENABLED: process.env.QUENBOT_SAFETY_NET_ENABLED || "1",
+        // Cross-asset graph — eşikleri 29 sembollü canlı pencerede kenar
+        // üretecek şekilde gevşetildi. Yalnızca alert/cooldown etkiler,
+        // strateji yolunu değiştirmez.
+        QUENBOT_CROSS_ASSET_MIN_SAMPLES: process.env.QUENBOT_CROSS_ASSET_MIN_SAMPLES || "30",
+        QUENBOT_CROSS_ASSET_MIN_EDGE: process.env.QUENBOT_CROSS_ASSET_MIN_EDGE || "0.05",
+        QUENBOT_CROSS_ASSET_REBUILD_MIN: process.env.QUENBOT_CROSS_ASSET_REBUILD_MIN || "10",
+        // Oracle §1 BOCPD — changepoint detektörü, observer; oracle_signal_bus'a
+        // kanal kaydeder, trade kararlarına dokunmaz.
+        QUENBOT_BOCPD_ENABLED: process.env.QUENBOT_BOCPD_ENABLED || "1",
       },
       instances: 1,
       autorestart: true,
