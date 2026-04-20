@@ -77,7 +77,7 @@ export default function TopBar() {
           icon={BarChart3}
           label="Simülasyon"
           value={summary ? `${summary.closed_simulations}` : "—"}
-          sub={summary ? `${summary.open_simulations} açık` : ""}
+          sub={summary ? `${summary.open_simulations} paper açık` : ""}
         />
         <KPI
           icon={Target}
@@ -95,7 +95,7 @@ export default function TopBar() {
           icon={TrendingUp}
           label="Sinyal"
           value={summary ? `${summary.active_signals}` : "—"}
-          sub="aktif"
+          sub="pending havuzu"
         />
       </div>
 

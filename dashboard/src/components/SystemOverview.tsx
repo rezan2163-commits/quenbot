@@ -196,7 +196,7 @@ export default function SystemOverview() {
         <MetricCard
           label="İşlemler"
           value={s.total_trades.toLocaleString()}
-          sub={`${s.open_simulations} açık sim.`}
+          sub={`${s.open_simulations} açık paper sim.`}
           icon={Activity}
           accent="text-cyan-400"
         />
