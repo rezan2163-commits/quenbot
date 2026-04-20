@@ -2071,16 +2071,26 @@ class Database:
             return result == 'UPDATE 1'
 
     async def get_signals_for_horizon_check(self) -> List[Dict[str, Any]]:
-        """Get active signals that have target_horizons for periodic evaluation."""
+        """Get active signals that have target_horizons for periodic evaluation.
+
+        Aktif (henüz terminal statüye geçmemiş) tüm dashboard_candidate sinyalleri
+        döner. Paper simülasyonu açılmamış olsa bile (risk_rejected,
+        filtered_duplicate) horizon tracker bu sinyallerin hedeflerini izler ve
+        ETA dolduğunda target_horizons[].status'ü hit/missed olarak kapatır. Bu
+        sayede kart ETA boyunca aktif havuzda kalır, süre dolunca UI
+        kazananlar/kaybedenler sekmesine otomatik düşer.
+        """
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT id, symbol, signal_type, confidence, price, timestamp, status, metadata, market_type
                 FROM signals
-                WHERE status IN ('pending', 'active', 'open')
-                  AND timestamp >= NOW() - INTERVAL '5 hours'
+                WHERE status IN ('pending', 'active', 'open', 'processed',
+                                 'risk_rejected', 'filtered_duplicate')
+                  AND timestamp >= NOW() - INTERVAL '30 hours'
                   AND metadata->>'target_horizons' IS NOT NULL
+                  AND COALESCE(metadata->>'dashboard_candidate','false') = 'true'
                 ORDER BY timestamp DESC
-                LIMIT 100
+                LIMIT 200
             """)
             return [dict(row) for row in rows]
 

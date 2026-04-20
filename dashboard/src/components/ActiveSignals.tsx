@@ -389,6 +389,12 @@ function ActiveCard({ s, dismissing, onDismiss }: { s: Signal; dismissing: boole
               <span className="truncate text-[13px] font-bold tracking-wide text-white">{s.symbol}</span>
               <Badge variant={isLong ? "success" : "danger"}>{isLong ? "LONG" : "SHORT"}</Badge>
               <Badge variant="muted">{(s.market_type || "spot").toUpperCase()}</Badge>
+              {(() => {
+                const st = String(s.status || "").toLowerCase();
+                if (st === "risk_rejected") return <Badge variant="warn" title="Paper sim açılmadı (risk limiti); kart ETA boyunca gözlemde.">gözlem • risk</Badge>;
+                if (st === "filtered_duplicate") return <Badge variant="warn" title="Aynı sembolde aktif kart var; bu sinyal kopyası gözlemde.">gözlem • kopya</Badge>;
+                return null;
+              })()}
             </div>
             <div className="truncate text-[9px] text-gray-500">{reason}</div>
           </div>

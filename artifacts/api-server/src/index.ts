@@ -108,7 +108,15 @@ function resolveSignalSource(signal: any) {
 
 function isActionableTargetCard(signal: any) {
   const status = String(signal.status || "").toLowerCase();
-  if (!['pending', 'active', 'open', 'processed', 'risk_rejected'].includes(status)) return false;
+  // Terminal statüler hariç her şey kart havuzunda kalır — böylece risk/duplicate
+  // nedeniyle sim başlatılmamış ama dashboard_candidate=true olan sinyaller
+  // ETA süresi boyunca kartlarda durur, eta bitiminde horizon tracker bunları
+  // target_hit/expired statüsüne geçirip winners/losers'a yönlendirir.
+  const TERMINAL = new Set([
+    'target_hit', 'target_missed', 'expired', 'closed', 'failed',
+    'dismissed', 'filtered_noise', 'filtered_low_return',
+  ]);
+  if (TERMINAL.has(status)) return false;
 
   const confidence = toFiniteNumber(signal.confidence, 0);
   const targetPct = resolveSignalTargetPct(signal);
@@ -660,9 +668,13 @@ app.get("/api/scout/movements", async (req, res) => {
 app.get("/api/signals", async (req, res) => {
   try {
     const includeRejected = ["1", "true", "yes", "on"].includes(String(req.query.includeRejected || "").toLowerCase());
-    const statusFilter = includeRejected
-      ? sql`('pending', 'active', 'open', 'processed', 'risk_rejected')`
-      : sql`('pending', 'active', 'open', 'processed')`;
+    // Kart havuzu politikası: hak kazanmış (dashboard_candidate=true) sinyal,
+    // risk_rejected ya da filtered_duplicate olsa bile ETA süresi dolana kadar
+    // kartta kalır. Terminal statüler (target_hit/target_missed/expired/
+    // closed/failed/dismissed/filtered_noise/filtered_low_return) hariç her
+    // durum gösterilir; expires_at dolduğunda sorgu onları düşürür.
+    // Geriye dönük uyumluluk için includeRejected flag'i korunur (artık no-op).
+    void includeRejected;
     const signals = await sql`
       SELECT
         id,
@@ -704,12 +716,16 @@ app.get("/api/signals", async (req, res) => {
         COALESCE(metadata->>'exchange', 'binance') AS exchange,
         market_type
       FROM signals
-      WHERE status IN ${statusFilter}
-        AND timestamp >= NOW() - INTERVAL '24 hours'
+      WHERE status NOT IN (
+              'target_hit','target_missed','expired','closed','failed',
+              'dismissed','filtered_noise','filtered_low_return'
+            )
+        AND timestamp >= NOW() - INTERVAL '48 hours'
         AND (
           (metadata->>'expires_at') IS NULL
           OR (metadata->>'expires_at')::timestamptz > NOW()
         )
+        AND COALESCE(metadata->>'dashboard_candidate','false') = 'true'
         AND COALESCE(metadata->>'source', metadata->>'signal_provider', 'unknown') IN ('strategist', 'pattern_matcher')
         AND GREATEST(
           CASE WHEN COALESCE((metadata->>'target_pct')::double precision, 0.02) > 0.5
