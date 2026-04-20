@@ -178,10 +178,27 @@ module.exports = {
         QUENBOT_TDA_ENABLED: process.env.QUENBOT_TDA_ENABLED || "1",
         QUENBOT_ONCHAIN_ENABLED: process.env.QUENBOT_ONCHAIN_ENABLED || "1",
         QUENBOT_FACTOR_GRAPH_ENABLED: process.env.QUENBOT_FACTOR_GRAPH_ENABLED || "1",
-        // §11 Oracle Brain shadow modda (ORACLE_BRAIN_SHADOW=1); trade
-        // kararlarını uygulamadan gözlem+öğretim döngüsü çalışır.
+        // §11 Oracle Brain — Low-Dose Active Mode (Aşama 1).
+        // Shadow kapalı; direktifler Directive Gatekeeper + Auto-Rollback
+        // güvenlik ağının arkasında uygulanıyor. Hard blocklist kalıcı
+        // (OVERRIDE_VETO, FORCE_TRADE, DISABLE_SAFETY_NET).
         QUENBOT_ORACLE_BRAIN_ENABLED: process.env.QUENBOT_ORACLE_BRAIN_ENABLED || "1",
-        QUENBOT_ORACLE_BRAIN_SHADOW: process.env.QUENBOT_ORACLE_BRAIN_SHADOW || "1",
+        QUENBOT_ORACLE_BRAIN_SHADOW: process.env.QUENBOT_ORACLE_BRAIN_SHADOW || "0",
+        // Aşama 1 low-dose tuning — confidence min 0.80, 3/saat, dar allowlist.
+        QUENBOT_DIRECTIVE_GATEKEEPER_ENABLED: process.env.QUENBOT_DIRECTIVE_GATEKEEPER_ENABLED || "1",
+        QUENBOT_ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN:
+          process.env.QUENBOT_ORACLE_BRAIN_DIRECTIVE_CONFIDENCE_MIN || "0.80",
+        QUENBOT_ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR:
+          process.env.QUENBOT_ORACLE_BRAIN_MAX_DIRECTIVES_PER_HOUR || "3",
+        QUENBOT_ORACLE_BRAIN_DIRECTIVE_ALLOWLIST:
+          process.env.QUENBOT_ORACLE_BRAIN_DIRECTIVE_ALLOWLIST ||
+          "ADJUST_CONFIDENCE_THRESHOLD,ADJUST_POSITION_SIZE_MULT,PAUSE_SYMBOL",
+        // Auto-rollback explicit: rejection rate / accuracy / cascade / impact
+        // regression tetikleyicileri aktif. Trip olursa ORACLE_BRAIN_SHADOW
+        // otomatik True'ya döner ve forensic bundle yazılır.
+        QUENBOT_AUTO_ROLLBACK_ENABLED: process.env.QUENBOT_AUTO_ROLLBACK_ENABLED || "1",
+        QUENBOT_AUTO_ROLLBACK_CASCADE_DETECTION:
+          process.env.QUENBOT_AUTO_ROLLBACK_CASCADE_DETECTION || "1",
         // Gatekeeper gevşemesi: yön (long/short) analizlerinde çok katı
         // confidence/quality filtresi sistemi öğrenemez hale getiriyordu.
         // Eşikleri düşürüp sampling artırıyoruz; TEK-COIN-TEK-KART kuralı
