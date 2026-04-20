@@ -1,5 +1,5 @@
 // PM2 Ecosystem Configuration - QuenBot
-// Optimized for 16 vCPU / 32 GB RAM — Gemma-3 12B IT GGUF
+// Optimized for compact CPU-only inference on 16 vCPU / 32 GB RAM
 // Usage: pm2 start ecosystem.config.js
 const quenbotTimeZone = process.env.QUENBOT_TIMEZONE || "Europe/Vienna";
 
@@ -12,8 +12,8 @@ module.exports = {
       args: [
         "--host", "127.0.0.1",
         "--port", "8099",
-        "--model", "/root/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-        "--alias", "qwen2.5-7b",
+        "--model", "/root/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+        "--alias", "qwen2.5-3b",
         "--ctx-size", "4096",
         "--threads", "10",
         "--parallel", "1",
@@ -32,7 +32,7 @@ module.exports = {
       restart_delay: 5000,
       exp_backoff_restart_delay: 500,
       kill_timeout: 10000,
-      max_memory_restart: "12G",
+      max_memory_restart: "8G",
       error_file: "./logs/llama-server-error.log",
       out_file: "./logs/llama-server-out.log",
       merge_logs: true,
@@ -93,17 +93,18 @@ module.exports = {
         DB_NAME: "trade_intel",
         OLLAMA_NUM_PARALLEL: "1",
         OLLAMA_MAX_LOADED_MODELS: "1",
-        // Aktif beyin modeli: Qwen2.5-7B-Instruct Q4_K_M GGUF.
-        // Gemma-3 12B Q4 llama-cpp-python 0.3.20 ile native segfault/assert
-        // atiyordu (thread race + CPU repack). Qwen2.5-7B hem daha stabil hem
-        // ~2x hizli (CPU'da 8-15s turn). Gemma GGUF diskte saklaniyor;
-        // QUENBOT_GGUF_MODEL_FILE env ile geri donebilirsin.
-        QUENBOT_LLM_MODEL: "qwen2.5-7b-instruct",
+        // Aktif beyin modeli: Qwen2.5-3B-Instruct Q4_K_M GGUF.
+        // Kullanici talebi dogrultusunda buyuk Qwen/Gemma modelleri yerine
+        // kompakt bir ana orkestrator kullaniliyor. Ogrenilmis strateji,
+        // vector memory, directives ve DB verileri modelden bagimsiz oldugu
+        // icin korunur; sadece inference katmani degisir.
+        QUENBOT_LLM_MODEL: "qwen2.5-3b-instruct",
         QUENBOT_LLM_NUM_CTX: "8192",
         QUENBOT_LLM_MAX_TOKENS: "512",
         QUENBOT_LLM_NUM_THREAD: "6",
-        QUENBOT_CHAT_MODEL: "qwen2.5-7b-instruct",
-        QUENBOT_DECISION_MODEL: "qwen2.5-7b-instruct",
+        QUENBOT_CHAT_MODEL: "qwen2.5-3b-instruct",
+        QUENBOT_DECISION_MODEL: "qwen2.5-3b-instruct",
+        QUENBOT_ACTIVE_MODELS: "qwen2.5-3b-instruct,gemma-2-2b-it",
         // Chat speed tuning — 7B Q4 CPU'da daha hizli, budget daraltilabilir.
         QUENBOT_CHAT_LLM_TIMEOUT: "35",
         QUENBOT_CHAT_FULL_TIMEOUT: "35",
@@ -113,14 +114,15 @@ module.exports = {
         QUENBOT_CHAT_FULL_MAX_TOKENS: "220",
         QUENBOT_CHAT_QUICK_MAX_TOKENS: "120",
         QUENBOT_GGUF_MODEL_DIR: process.env.QUENBOT_GGUF_MODEL_DIR || "/root/models",
-        QUENBOT_GGUF_MODEL_FILE: process.env.QUENBOT_GGUF_MODEL_FILE || "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+        QUENBOT_GGUF_MODEL_FILE: process.env.QUENBOT_GGUF_MODEL_FILE || "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
         // HTTP mode: llama-server standalone binary'yi kullan, Python
         // wrapper'daki Zen4 segfault'u bypass et.
         QUENBOT_LLM_SERVER_URL: process.env.QUENBOT_LLM_SERVER_URL || "http://127.0.0.1:8099",
-        QUENBOT_LLM_SERVER_MODEL: process.env.QUENBOT_LLM_SERVER_MODEL || "qwen2.5-7b",
+        QUENBOT_LLM_SERVER_MODEL: process.env.QUENBOT_LLM_SERVER_MODEL || "qwen2.5-3b",
         // Zen4 CPU'da libggml-cpu.so thread race segfault atiyor (hem 0.3.20
         // hem 0.3.2'de). Tek cozum: single-thread inference + OMP kapali.
-        // 7B Q4 modelde inference yine 15-25s — kabul edilebilir.
+        // 3B Q4 modelde inference belirgin sekilde daha hafif; eldeki CPU
+        // dugumunde daha stabil kalir.
         QUENBOT_GGUF_NUM_THREADS: "1",
         OMP_NUM_THREADS: "1",
         OPENBLAS_NUM_THREADS: "1",

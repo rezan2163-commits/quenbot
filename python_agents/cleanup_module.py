@@ -17,16 +17,26 @@ class CleanupModule:
                 os.getenv("QUENBOT_LLM_MODEL", "gemma-3-12b-it"),
                 os.getenv("QUENBOT_DECISION_MODEL", os.getenv("QUENBOT_LLM_MODEL", "gemma-3-12b-it")),
             ]
-        self.active_models = sorted(set(active))
+        gguf_file = os.getenv("QUENBOT_GGUF_MODEL_FILE", "").strip()
+        server_alias = os.getenv("QUENBOT_LLM_SERVER_MODEL", "").strip()
+        if gguf_file:
+            active.append(gguf_file)
+            active.append(Path(gguf_file).stem)
+        if server_alias:
+            active.append(server_alias)
+        self.active_models = sorted({m.strip() for m in active if m.strip()})
         self.gguf_model_dir = Path(os.getenv("QUENBOT_GGUF_MODEL_DIR", "/root/models"))
 
     def scan(self) -> Dict[str, List[str]]:
         model_dir = self.gguf_model_dir
         keep: List[str] = []
         remove: List[str] = []
+        active_tokens = [m.casefold() for m in self.active_models]
         if model_dir.exists():
             for item in model_dir.glob("*.gguf"):
-                if any(model in item.name for model in self.active_models):
+                item_name = item.name.casefold()
+                item_stem = item.stem.casefold()
+                if any(token in item_name or token in item_stem for token in active_tokens):
                     keep.append(str(item))
                 else:
                     remove.append(str(item))
