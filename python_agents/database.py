@@ -976,9 +976,13 @@ class Database:
                     FROM signals
                     WHERE UPPER(symbol) = UPPER($1)
                       AND status NOT IN (
+                            -- Sadece gerçek terminal statüler lockout'u
+                            -- kaldırır. risk_rejected / filtered_duplicate
+                            -- kart havuzunda ETA boyunca kaldığı için
+                            -- aynı coinin ikinci kartına izin vermez.
                             'target_hit', 'target_missed', 'expired',
-                            'dismissed', 'filtered_duplicate', 'filtered_noise',
-                            'risk_rejected'
+                            'closed', 'failed',
+                            'dismissed', 'filtered_noise', 'filtered_low_return'
                           )
                       AND timestamp >= NOW() - INTERVAL '48 hours'
                     ORDER BY timestamp DESC

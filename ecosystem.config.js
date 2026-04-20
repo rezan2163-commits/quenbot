@@ -53,6 +53,13 @@ module.exports = {
         ADMIN_PIN: process.env.ADMIN_PIN || "BABA",
         UV_THREADPOOL_SIZE: "8",
         NODE_OPTIONS: "--max-old-space-size=2048",
+        // Hedef kart filtreleri: Python agent tarafıyla aynı eşikler.
+        // Gevşetildi — sistem daha çok örnek görsün, sonuçtan öğrensin.
+        QUENBOT_TARGET_CARD_MIN_CONF: process.env.QUENBOT_TARGET_CARD_MIN_CONF || "0.52",
+        QUENBOT_TARGET_CARD_MIN_QUALITY: process.env.QUENBOT_TARGET_CARD_MIN_QUALITY || "0.55",
+        QUENBOT_MAMIS_TARGET_CARD_MIN_CONF: process.env.QUENBOT_MAMIS_TARGET_CARD_MIN_CONF || "0.62",
+        QUENBOT_META_LABELER_VETO_PROBA: process.env.QUENBOT_META_LABELER_VETO_PROBA || "0.10",
+        QUENBOT_SIGNAL_CARDS_PER_SYMBOL: process.env.QUENBOT_SIGNAL_CARDS_PER_SYMBOL || "1",
       },
       instances: 1,
       autorestart: true,
@@ -175,6 +182,19 @@ module.exports = {
         // kararlarını uygulamadan gözlem+öğretim döngüsü çalışır.
         QUENBOT_ORACLE_BRAIN_ENABLED: process.env.QUENBOT_ORACLE_BRAIN_ENABLED || "1",
         QUENBOT_ORACLE_BRAIN_SHADOW: process.env.QUENBOT_ORACLE_BRAIN_SHADOW || "1",
+        // Gatekeeper gevşemesi: yön (long/short) analizlerinde çok katı
+        // confidence/quality filtresi sistemi öğrenemez hale getiriyordu.
+        // Eşikleri düşürüp sampling artırıyoruz; TEK-COIN-TEK-KART kuralı
+        // üç ayrı katmanda (insert_signal horizon-aware lockout,
+        // ghost_simulator filtered_duplicate, /api/signals bySymbol map)
+        // korunmaya devam ediyor, sadece havuz büyüyor.
+        QUENBOT_TARGET_CARD_MIN_CONF: process.env.QUENBOT_TARGET_CARD_MIN_CONF || "0.52",
+        QUENBOT_TARGET_CARD_MIN_QUALITY: process.env.QUENBOT_TARGET_CARD_MIN_QUALITY || "0.55",
+        QUENBOT_MAMIS_TARGET_CARD_MIN_CONF: process.env.QUENBOT_MAMIS_TARGET_CARD_MIN_CONF || "0.62",
+        QUENBOT_MAMIS_TARGET_CARD_MIN_VOLATILITY: process.env.QUENBOT_MAMIS_TARGET_CARD_MIN_VOLATILITY || "0.0030",
+        // Meta-labeler veto eşiği: çok düşük olasılıkta bile sadece açıkça
+        // reddedilenleri dışla (0.10 → daha geniş örnek).
+        QUENBOT_META_LABELER_VETO_PROBA: process.env.QUENBOT_META_LABELER_VETO_PROBA || "0.10",
       },
       instances: 1,
       autorestart: true,
