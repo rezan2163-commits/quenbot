@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowUpCircle, ArrowDownCircle, Clock3, Target, BrainCircuit,
   Trash2, X, CheckCircle2, XCircle, Timer, Activity,
@@ -85,6 +85,26 @@ function resolvePrimaryTarget(signal: Signal | any) {
   const targetPrice = toNumber(signal.target_price ?? meta.target_price ?? selected?.target_price, 0);
   const eta = toNumber(signal.estimated_duration_to_target_minutes ?? meta.estimated_duration_to_target_minutes ?? selected?.eta_minutes, 60);
   return { entry, targetPrice, eta, pct: resolveTargetPct(signal), selected };
+}
+
+// Kart üzerindeki "süre kalan" geri sayımını canlı tutar.
+function useNowTick(intervalMs = 30_000) {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+function formatRemaining(totalMin: number): string {
+  if (totalMin <= 0) return "süre doldu";
+  const d = Math.floor(totalMin / (60 * 24));
+  const h = Math.floor((totalMin - d * 60 * 24) / 60);
+  const m = totalMin - d * 60 * 24 - h * 60;
+  if (d > 0) return h > 0 ? `${d} gün ${h} saat` : `${d} gün`;
+  if (h > 0) return m > 0 ? `${h} saat ${m} dk` : `${h} saat`;
+  return `${m} dk`;
 }
 
 function classifyOutcome(o: any): { kind: "win" | "loss" | "neutral"; change: number; hitHorizon?: any; resolvedAt: number; direction: "long" | "short"; exitPrice: number } {
@@ -337,14 +357,18 @@ function ActiveCard({ s, dismissing, onDismiss }: { s: Signal; dismissing: boole
   const meta = (s.metadata || {}) as any;
   const { entry, targetPrice, eta, pct } = resolvePrimaryTarget(s);
   const signalAt = parseQuenbotDate(s.signal_time || s.timestamp);
-  const targetAt = new Date(signalAt.getTime() + eta * 60000);
-  const now = Date.now();
+  // Hedef süresi: backend `metadata.expires_at` = signal_time + horizon. Bu authoritative.
+  // Eski kayıtlarda yoksa signal_time + eta'ya düşer.
+  const expiresRaw = (s as any).expires_at ?? meta.expires_at ?? null;
+  const expiresParsed = expiresRaw ? parseQuenbotDate(expiresRaw) : null;
+  const targetAt = expiresParsed && !Number.isNaN(expiresParsed.getTime())
+    ? expiresParsed
+    : new Date(signalAt.getTime() + eta * 60000);
+  const now = useNowTick(30_000);
   const totalMs = targetAt.getTime() - signalAt.getTime();
   const progress = totalMs > 0 ? Math.min(1, Math.max(0, (now - signalAt.getTime()) / totalMs)) : 0;
   const remainMin = Math.max(0, Math.floor((targetAt.getTime() - now) / 60000));
-  const remainH = Math.floor(remainMin / 60);
-  const remainM = remainMin % 60;
-  const remainLabel = remainMin <= 0 ? "süre doldu" : remainH > 0 ? `${remainH}s ${remainM}dk` : `${remainM}dk`;
+  const remainLabel = formatRemaining(remainMin);
 
   const currentPrice = toNumber(s.current_price_at_signal ?? meta.current_price_at_signal ?? s.price, 0);
   const conf = (toNumber(s.confidence) * 100).toFixed(0);
@@ -375,6 +399,20 @@ function ActiveCard({ s, dismissing, onDismiss }: { s: Signal; dismissing: boole
           <div className="text-right leading-tight">
             <div className="font-mono text-[11px] font-bold text-warn">%{conf}</div>
             <div className="text-[9px] text-gray-400">hedef %{(pct * 100).toFixed(1)}</div>
+            <div
+              className={cn(
+                "mt-0.5 inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 font-mono text-[9px] tabular-nums",
+                remainMin <= 0
+                  ? "border-rose-400/30 bg-rose-500/10 text-rose-300"
+                  : remainMin <= 30
+                  ? "border-warn/30 bg-warn/10 text-warn"
+                  : "border-cyan-400/30 bg-cyan-400/10 text-cyan-300",
+              )}
+              title={`Süre kalan: ${remainLabel}`}
+            >
+              <Timer size={9} />
+              <span>{remainMin <= 0 ? "süre doldu" : `kalan ${remainLabel}`}</span>
+            </div>
           </div>
           <button
             onClick={onDismiss}
